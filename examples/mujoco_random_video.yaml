@@ -1,0 +1,42 @@
+# Same shape as mujoco_random_local.yaml, but with rollout.record_video: true --
+# each episode renders a top-down mp4 to runs/<run_id>/videos/. `pixi run -e sim
+# smoke-video`. Uses DEBUG logging to demonstrate the structured logger.
+api_version: ec.eval/v1alpha1
+name: mujoco_reacher_random_video
+seed: 7
+tags:
+  simulator: mujoco
+  policy_family: random
+  runtime: local
+  purpose: video_smoke_test
+
+sim:
+  backend: mujoco
+  mode: stepped
+  model: reacher2
+  backend_config:
+    success_threshold: 0.04
+
+policy:
+  type: random
+  runtime:
+    type: local
+  requested_action_horizon: 20  # hold each random target ~20 steps so the arm tracks it
+  action_chunk_mode: sync
+
+embodiment:
+  adapter: passthrough
+  clip_actions: true
+  fallback_action: zero
+
+rollout:
+  num_episodes: 2
+  max_steps_per_episode: 150
+  record_raw: true
+  record_video: true
+  video_fps: 30
+
+outputs:
+  root_dir: ./runs
+  run_name_template: "{date}_{name}_{seed}"
+  log_level: DEBUG

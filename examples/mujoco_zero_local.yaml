@@ -1,0 +1,41 @@
+# Minimal MuJoCo eval with the blank policy service as a LOCAL SUBPROCESS.
+# Runnable without Docker: `pixi run -e sim smoke`.
+# The host drives the MuJoCo reacher (stepped), launches the zero-policy service
+# as its own process, and calls it over HTTP each control step.
+api_version: ec.eval/v1alpha1
+name: mujoco_reacher_zero_local
+seed: 42
+tags:
+  simulator: mujoco
+  policy_family: zero
+  runtime: local
+
+sim:
+  backend: mujoco
+  mode: stepped
+  model: reacher2
+  backend_config:
+    success_threshold: 0.03
+
+policy:
+  type: zero
+  runtime:
+    type: local          # launch the policy service as a host subprocess
+  requested_action_horizon: 1
+  action_chunk_mode: sync
+
+embodiment:
+  adapter: passthrough
+  observation_schema_id: ec.obs.mujoco_proprio/v1
+  action_schema_id: ec.action.mujoco_normalized/v1
+  clip_actions: true
+  fallback_action: zero
+
+rollout:
+  num_episodes: 3
+  max_steps_per_episode: 150
+  record_raw: true
+
+outputs:
+  root_dir: ./runs
+  run_name_template: "{date}_{name}_{seed}"

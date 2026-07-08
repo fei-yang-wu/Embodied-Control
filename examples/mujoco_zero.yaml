@@ -1,0 +1,43 @@
+# Minimal MuJoCo eval with the blank policy service in its own DOCKER CONTAINER.
+# This is the designed separation: the VLA policy runtime is isolated from the
+# host and from the simulator. Build the image first:
+#     pixi run build-policy-image        # -> ec-policy-debug:latest
+# Then run (needs docker daemon access; use `newgrp docker` / reboot if needed):
+#     pixi run -e sim smoke-docker
+api_version: ec.eval/v1alpha1
+name: mujoco_reacher_zero_docker
+seed: 42
+tags:
+  simulator: mujoco
+  policy_family: zero
+  runtime: docker
+
+sim:
+  backend: mujoco
+  mode: stepped
+  model: reacher2
+  backend_config:
+    success_threshold: 0.03
+
+policy:
+  type: zero
+  runtime:
+    type: docker
+    image: ec-policy-debug:latest   # digest-pin for serious runs
+    container_port: 8000
+  requested_action_horizon: 1
+  action_chunk_mode: sync
+
+embodiment:
+  adapter: passthrough
+  clip_actions: true
+  fallback_action: zero
+
+rollout:
+  num_episodes: 3
+  max_steps_per_episode: 150
+  record_raw: true
+
+outputs:
+  root_dir: ./runs
+  run_name_template: "{date}_{name}_{seed}"

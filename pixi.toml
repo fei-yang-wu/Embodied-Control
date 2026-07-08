@@ -1,0 +1,48 @@
+[workspace]
+name = "embodied-control"
+version = "0.1.0"
+description = "Pixi-managed host orchestrator for isolated VLA policy / simulator evaluation."
+authors = ["Embodied Control Contributors"]
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+# Host tooling stays light: the default environment carries only the orchestrator,
+# schemas, CLI, transport client, and the stdlib policy service. Heavyweight
+# simulator dependencies (MuJoCo) live in the `sim` feature environment, and the
+# blank VLA policy service runs in its own Docker container (see containers/).
+
+[tasks]
+doctor = "ec doctor"
+test = "pytest -q"
+# Run the blank policy service standalone (manual / debugging):
+policy-serve = "ec policy serve --type zero --action-dim 2 --host 127.0.0.1 --port 8756"
+policy-ping = "ec policy ping --endpoint 127.0.0.1:8756"
+build-policy-image = "bash scripts/build_policy_image.sh"
+
+[dependencies]
+python = ">=3.13,<3.14"
+pip = "*"
+pytest = ">=8,<9"
+pydantic = ">=2,<3"
+pyyaml = ">=6,<7"
+
+[pypi-dependencies]
+embodied-control = { path = ".", editable = true }
+
+# --- sim feature: MuJoCo stepped backend (kept out of the light default env) ---
+[feature.sim.dependencies]
+mujoco = ">=3,<4"
+numpy = ">=1.24"
+imageio = ">=2.30"
+imageio-ffmpeg = ">=0.4"
+
+[feature.sim.tasks]
+# These require MuJoCo, so they live in the sim environment: `pixi run -e sim smoke`.
+smoke = "ec eval run examples/mujoco_zero_local.yaml"
+smoke-random = "ec eval run examples/mujoco_random_local.yaml"
+smoke-docker = "ec eval run examples/mujoco_zero.yaml"
+smoke-video = "ec eval run examples/mujoco_random_video.yaml"
+test-sim = "pytest -q"
+
+[environments]
+sim = ["sim"]

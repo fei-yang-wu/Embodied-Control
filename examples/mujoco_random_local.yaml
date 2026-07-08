@@ -1,0 +1,37 @@
+# MuJoCo eval with a RANDOM blank policy (local subprocess) and action chunking.
+# `pixi run -e sim smoke-random`.
+api_version: ec.eval/v1alpha1
+name: mujoco_reacher_random_local
+seed: 7
+tags:
+  simulator: mujoco
+  policy_family: random
+  runtime: local
+
+sim:
+  backend: mujoco
+  mode: stepped
+  model: reacher2
+  backend_config:
+    success_threshold: 0.04
+
+policy:
+  type: random
+  runtime:
+    type: local
+  requested_action_horizon: 20  # hold each random target ~20 steps so the arm tracks it
+  action_chunk_mode: sync
+
+embodiment:
+  adapter: passthrough
+  clip_actions: true
+  fallback_action: zero
+
+rollout:
+  num_episodes: 5
+  max_steps_per_episode: 200
+  record_raw: true
+
+outputs:
+  root_dir: ./runs
+  run_name_template: "{date}_{name}_{seed}"
