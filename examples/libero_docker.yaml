@@ -1,0 +1,57 @@
+# Real LIBERO delegated backend: one task, containerized, driven by our own
+# blank policy over the same HTTP transport the fake evaluator uses. No GPU
+# passthrough available in this deployment, so rendering runs on CPU (OSMesa)
+# -- expect this to be noticeably slower than the fake evaluator or the MuJoCo
+# reacher; env creation alone (compiling the MJCF scene) takes real time.
+#
+# Build both images first:
+#     pixi run build-policy-image
+#     pixi run build-libero-image     # several minutes: torch + robosuite + LIBERO
+# Then run (needs docker daemon access; use `newgrp docker` / reboot if needed):
+#     pixi run smoke-libero
+api_version: ec.eval/v1alpha1
+name: libero_spatial_task0_zero
+seed: 0
+tags:
+  backend: libero
+  mode: delegated
+  runtime: docker
+  suite: libero_spatial
+
+sim:
+  backend: libero
+  mode: delegated
+  action_dim: 7   # OSC_POSE controller: dx,dy,dz,droll,dpitch,dyaw,gripper, normalized [-1,1]
+  runtime:
+    type: docker
+    image: ec-libero-eval:latest
+  timeout_s: 900   # LIBERO env creation + CPU (OSMesa) rendering is much slower than the fake evaluator
+  backend_config:
+    suite: libero_spatial
+    task_index: 0
+    camera_height: 128
+    camera_width: 128
+    health_timeout_s: 120   # policy health-check timeout as seen by the LIBERO container
+
+policy:
+  # A real manipulation task, unlike the reacher: zero (arm holds still) should
+  # essentially never succeed, giving an honest baseline before wiring a real
+  # VLA policy in later. Random OSC_POSE deltas are far less likely to stumble
+  # into a multi-stage manipulation success than they were on the toy reacher.
+  type: zero
+  runtime:
+    type: docker
+    image: ec-policy-debug:latest
+  requested_action_horizon: 1
+
+embodiment:
+  observation_schema_id: ec.obs.libero/v1   # proprio + cameras (agentview, wrist)
+  action_schema_id: ec.action.libero_osc_pose/v1
+
+rollout:
+  num_episodes: 2
+  max_steps_per_episode: 200
+
+outputs:
+  root_dir: ./runs
+  run_name_template: "{date}_{name}_{seed}"

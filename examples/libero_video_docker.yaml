@@ -1,0 +1,56 @@
+# Same shape as libero_docker.yaml, but with rollout.record_video: true and a
+# random policy (zero holds still -- a boring video; random at least moves the
+# arm around, even though it still won't complete the task). LIBERO's
+# OffScreenRenderEnv already renders agentview_image every step for the
+# observation dict; this just keeps those frames instead of discarding them.
+#
+# Build both images first:
+#     pixi run build-policy-image
+#     pixi run build-libero-image     # several minutes: torch + robosuite + LIBERO
+# Then run (needs docker daemon access; use `newgrp docker` / reboot if needed):
+#     pixi run smoke-libero-video
+api_version: ec.eval/v1alpha1
+name: libero_spatial_task0_random_video
+seed: 0
+tags:
+  backend: libero
+  mode: delegated
+  runtime: docker
+  suite: libero_spatial
+  purpose: video_smoke_test
+
+sim:
+  backend: libero
+  mode: delegated
+  action_dim: 7   # OSC_POSE controller: dx,dy,dz,droll,dpitch,dyaw,gripper, normalized [-1,1]
+  runtime:
+    type: docker
+    image: ec-libero-eval:latest
+  timeout_s: 900   # LIBERO env creation + CPU (OSMesa) rendering is much slower than the fake evaluator
+  backend_config:
+    suite: libero_spatial
+    task_index: 0
+    camera_height: 128
+    camera_width: 128
+    health_timeout_s: 120   # policy health-check timeout as seen by the LIBERO container
+
+policy:
+  type: random
+  runtime:
+    type: docker
+    image: ec-policy-debug:latest
+  requested_action_horizon: 10   # hold each random delta ~10 steps so motion is visible, not jittery noise
+
+embodiment:
+  observation_schema_id: ec.obs.libero/v1   # proprio + cameras (agentview, wrist)
+  action_schema_id: ec.action.libero_osc_pose/v1
+
+rollout:
+  num_episodes: 2
+  max_steps_per_episode: 200
+  record_video: true
+  video_fps: 20   # LIBERO's control_freq default is 20Hz
+
+outputs:
+  root_dir: ./runs
+  run_name_template: "{date}_{name}_{seed}"

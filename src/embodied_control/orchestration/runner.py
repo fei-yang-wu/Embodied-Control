@@ -33,26 +33,27 @@ from embodied_control.logging.timeutil import utcnow_iso
 from embodied_control.metrics.aggregate import aggregate_run_metrics
 from embodied_control.orchestration import planner as planner_mod
 from embodied_control.orchestration import registry
+from embodied_control.orchestration.delegated import run_delegated_rollout
+from embodied_control.orchestration.errors import RunFailure
 from embodied_control.orchestration.supervisor import PolicyServiceSupervisor
 from embodied_control.transport.client import PolicyClientError
 
 
-class RunFailure(RuntimeError):
-    def __init__(self, phase: str, reason: str):
-        super().__init__(f"[{phase}] {reason}")
-        self.phase = phase
-        self.reason = reason
-
-
 def run_eval(job: EvalJob) -> EvalResult:
     started_at = utcnow_iso()
+    delegated = job.sim.mode == "delegated"
 
-    # --- build backend (needs the sim env) to learn action dim + ctrlrange ---
-    # Built before the plan/store/logger exist (its action_dim/ctrlrange are
-    # needed to resolve the plan), so it starts with a null logger.
-    backend = registry.get_sim_backend(job.sim.backend)(job)
-    action_dim = backend.action_dim
-    ctrlrange = backend.action_ctrlrange
+    if delegated:
+        # No in-process object to introspect action_dim from -- a delegated
+        # runtime owns its own rollout loop, so the job must declare it.
+        # (SimSpec's model validator guarantees action_dim is set here.)
+        backend, action_dim, ctrlrange = None, job.sim.action_dim, None
+    else:
+        # Built before the plan/store/logger exist (its action_dim/ctrlrange
+        # are needed to resolve the plan), so it starts with a null logger.
+        backend = registry.get_sim_backend(job.sim.backend)(job)
+        action_dim = backend.action_dim
+        ctrlrange = backend.action_ctrlrange
 
     plan = planner_mod.build_plan(
         job,
@@ -71,14 +72,19 @@ def run_eval(job: EvalJob) -> EvalResult:
         LogConfig(level=job.outputs.log_level, log_dir=str(store.logs_dir)),
         run_id=plan.run_id,
     )
-    backend.logger = logger.child("sim")
+    if backend is not None:
+        backend.logger = logger.child("sim")
     logger.event("run.started", phase="init", run_dir=plan.run_dir,
-                 backend=job.sim.backend, policy=job.policy.type,
+                 backend=job.sim.backend, mode=job.sim.mode, policy=job.policy.type,
                  runtime=plan.policy_runtime.type)
 
-    controller = registry.get_embodiment(job.embodiment.adapter)(
-        job, ctrlrange, logger=logger.child("embodiment")
-    )
+    # Delegated mode has no host-side rollout loop to feed an embodiment
+    # controller into -- the delegated runtime is the black-box evaluator.
+    controller = None
+    if not delegated:
+        controller = registry.get_embodiment(job.embodiment.adapter)(
+            job, ctrlrange, logger=logger.child("embodiment")
+        )
     supervisor = PolicyServiceSupervisor(
         job, plan, str(store.policy_log_path), logger=logger.child("policy")
     )
@@ -105,12 +111,15 @@ def run_eval(job: EvalJob) -> EvalResult:
                      policy_id=desc.get("policy_id"), action_dim=desc.get("action_dim"))
 
         phase = "rollout"
-        rollout_logger = logger.child("rollout")
-        for episode_id, seed in enumerate(plan.seeds):
-            episodes.append(
-                _run_episode(job, plan, backend, controller, client, rollout_logger, episode_id,
-                             seed, latencies_ms, store)
-            )
+        if delegated:
+            episodes = run_delegated_rollout(job, plan, store, logger.child("delegated"))
+        else:
+            rollout_logger = logger.child("rollout")
+            for episode_id, seed in enumerate(plan.seeds):
+                episodes.append(
+                    _run_episode(job, plan, backend, controller, client, rollout_logger,
+                                 episode_id, seed, latencies_ms, store)
+                )
 
         phase = "aggregate"
         status_str = "succeeded"
@@ -123,7 +132,8 @@ def run_eval(job: EvalJob) -> EvalResult:
                      policy_log_tail=supervisor.logs()[-500:])
     finally:
         supervisor.stop()
-        backend.close()
+        if backend is not None:
+            backend.close()
 
     # --- write artifacts (always, even on failure) -----------------------
     metrics = aggregate_run_metrics(plan.run_id, len(plan.seeds), episodes, latencies_ms)

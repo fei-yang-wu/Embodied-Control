@@ -1,0 +1,49 @@
+# Delegated-mode eval with BOTH runtimes containerized: the policy service in
+# its own container and the fake evaluator (sim) in its own container, wired
+# together over the host network (see orchestration/delegated.py for why sim
+# uses --network host: it needs to reach the policy container's published
+# port, portably across Docker/Apptainer). This is the designed separation in
+# full: two isolated runtimes, neither importing the other's dependencies.
+#
+# Build both images first:
+#     pixi run build-policy-image
+#     pixi run build-fake-delegated-image
+# Then run (needs docker daemon access; use `newgrp docker` / `sg docker -c` if needed):
+#     pixi run smoke-delegated-docker
+api_version: ec.eval/v1alpha1
+name: fake_delegated_docker
+seed: 11
+tags:
+  backend: fake_delegated
+  mode: delegated
+  runtime: docker
+
+sim:
+  backend: fake_delegated
+  mode: delegated
+  action_dim: 4
+  runtime:
+    type: docker
+    image: ec-fake-delegated-eval:latest
+  timeout_s: 60
+  backend_config:
+    task_id: fake_reach_task
+
+policy:
+  type: random
+  runtime:
+    type: docker
+    image: ec-policy-debug:latest
+  requested_action_horizon: 5
+
+embodiment:
+  observation_schema_id: ec.obs.fake_delegated/v1
+  action_schema_id: ec.action.fake_delegated/v1
+
+rollout:
+  num_episodes: 4
+  max_steps_per_episode: 40
+
+outputs:
+  root_dir: ./runs
+  run_name_template: "{date}_{name}_{seed}"

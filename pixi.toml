@@ -18,6 +18,21 @@ test = "pytest -q"
 policy-serve = "ec policy serve --type zero --action-dim 2 --host 127.0.0.1 --port 8756"
 policy-ping = "ec policy ping --endpoint 127.0.0.1:8756"
 build-policy-image = "bash scripts/build_policy_image.sh"
+# Delegated-mode eval: neither the host nor the two runtimes need MuJoCo, so
+# these run in the light default env (no `-e sim` needed).
+smoke-delegated = "ec eval run examples/fake_delegated_local.yaml"
+build-fake-delegated-image = "bash scripts/build_fake_delegated_image.sh"
+smoke-delegated-docker = "ec eval run examples/fake_delegated_docker.yaml"
+# Real LIBERO backend: also no MuJoCo needed on the host (LIBERO's own MuJoCo
+# lives inside its own container's Python 3.8 env, unrelated to the host's).
+build-libero-image = "bash scripts/build_libero_image.sh"
+smoke-libero = "ec eval run examples/libero_docker.yaml"
+smoke-libero-video = "ec eval run examples/libero_video_docker.yaml"
+smoke-libero-image-stats = "ec eval run examples/libero_image_stats_docker.yaml"
+# Push to ghcr.io (see scripts/push_image.sh for one-time auth setup).
+push-policy-image = "bash scripts/push_image.sh ec-policy-debug:latest"
+push-fake-delegated-image = "bash scripts/push_image.sh ec-fake-delegated-eval:latest"
+push-libero-image = "bash scripts/push_image.sh ec-libero-eval:latest"
 
 [dependencies]
 python = ">=3.13,<3.14"
@@ -42,6 +57,7 @@ smoke = "ec eval run examples/mujoco_zero_local.yaml"
 smoke-random = "ec eval run examples/mujoco_random_local.yaml"
 smoke-docker = "ec eval run examples/mujoco_zero.yaml"
 smoke-video = "ec eval run examples/mujoco_random_video.yaml"
+smoke-video-docker = "ec eval run examples/mujoco_video_docker.yaml"
 test-sim = "pytest -q"
 
 [environments]

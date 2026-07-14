@@ -1,0 +1,100 @@
+"""End-to-end delegated-mode eval via the local runtime (default env: no
+mujoco/docker needed -- this is the point of the delegated/stepped split)."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+from pydantic import ValidationError
+
+from embodied_control.artifacts.validation import validate_run_dir
+from embodied_control.config.loader import load_job
+from embodied_control.config.schemas import (
+    EvalJob,
+    OutputSpec,
+    PolicyBinding,
+    RolloutSpec,
+    RuntimeSpec,
+    SimSpec,
+)
+from embodied_control.orchestration.runner import run_eval
+
+EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
+
+
+def _job(tmp_path: Path, num_ep=3, steps=20, seed=5, action_dim=3) -> EvalJob:
+    return EvalJob(
+        name="test_delegated",
+        seed=seed,
+        sim=SimSpec(
+            backend="fake_delegated", mode="delegated", action_dim=action_dim,
+            runtime=RuntimeSpec(type="local"), timeout_s=30,
+            backend_config={"task_id": "unit_test_task"},
+        ),
+        policy=PolicyBinding(type="random", runtime=RuntimeSpec(type="local"),
+                             requested_action_horizon=3),
+        rollout=RolloutSpec(num_episodes=num_ep, max_steps_per_episode=steps),
+        outputs=OutputSpec(root_dir=str(tmp_path / "runs")),
+    )
+
+
+def test_delegated_local_eval_produces_valid_normalized_artifacts(tmp_path):
+    result = run_eval(_job(tmp_path))
+    assert result.status == "succeeded"
+    assert result.metrics.num_episodes_completed == 3
+    assert result.metrics.num_episodes_failed == 0
+    assert result.metrics.num_policy_requests > 0
+
+    run_dir = Path(result.run_dir)
+    for f in ["job.yaml", "resolved_job.yaml", "manifest.json", "status.json",
+              "metrics.json", "episodes.jsonl", "validation.json",
+              "generated/sim_config.json", "logs/sim.log",
+              "raw/episode_0000.json", "raw/episode_0001.json", "raw/episode_0002.json"]:
+        assert (run_dir / f).is_file(), f"missing {f}"
+
+    report = validate_run_dir(run_dir)
+    assert report.valid, report.errors
+
+    episodes = [json.loads(l) for l in (run_dir / "episodes.jsonl").read_text().splitlines()]
+    assert len(episodes) == 3
+    assert [e["episode_id"] for e in episodes] == [0, 1, 2]
+    assert [e["seed"] for e in episodes] == [5, 6, 7]  # per-episode seeds
+    assert all(e["task_id"] == "unit_test_task" for e in episodes)
+    assert all(e["artifacts"]["raw_record"] == f"raw/episode_{i:04d}.json" for i, e in enumerate(episodes))
+
+
+def test_delegated_mode_requires_action_dim():
+    # A schema-level error (like a malformed job.yaml), not a runtime failure --
+    # raised at construction, before any plan/run_dir could even be created.
+    with pytest.raises(ValidationError):
+        SimSpec(backend="fake_delegated", mode="delegated", action_dim=None)
+
+
+def test_delegated_mode_ignores_record_video_without_crashing(tmp_path):
+    job = _job(tmp_path, num_ep=1, steps=5)
+    job.rollout.record_video = True
+    result = run_eval(job)
+    assert result.status == "succeeded"  # best-effort: warns, doesn't fail
+
+
+def test_example_delegated_jobs_load_and_validate():
+    for name in ["fake_delegated_local.yaml", "fake_delegated_docker.yaml"]:
+        job = load_job(EXAMPLES / name)
+        assert job.sim.mode == "delegated"
+        assert job.sim.backend == "fake_delegated"
+        assert job.sim.action_dim is not None
+
+
+def test_libero_example_job_loads_and_validates():
+    # Schema-only: real LIBERO/robosuite/docker execution is covered by manual
+    # smoke testing (`pixi run smoke-libero`), not automated pytest -- same
+    # category as the other docker-runtime examples (see README "Tests").
+    job = load_job(EXAMPLES / "libero_docker.yaml")
+    assert job.sim.mode == "delegated"
+    assert job.sim.backend == "libero"
+    assert job.sim.action_dim == 7  # OSC_POSE: dx,dy,dz,droll,dpitch,dyaw,gripper
+    assert job.sim.runtime.type == "docker"
+    assert job.sim.backend_config["suite"] == "libero_spatial"
+    assert isinstance(job.sim.backend_config["task_index"], int)

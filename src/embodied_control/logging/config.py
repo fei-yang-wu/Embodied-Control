@@ -2,18 +2,24 @@
 
 Every field here is a knob a job/CLI invocation can set — this is the
 "configurable base logger" the orchestrator constructs once per run.
+
+Deliberately a plain dataclass, not a pydantic model: ``EcLogger`` (and the
+``PolicyClient`` it can be attached to) must stay stdlib-only so it can be
+reused inside minimal, non-pip-installed containers -- e.g. the fake delegated
+evaluator, which imports ``transport.client.PolicyClient`` -> ``EcLogger`` ->
+this module.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Literal
-
-from pydantic import BaseModel
 
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR"]
 
 
-class LogConfig(BaseModel):
+@dataclass
+class LogConfig:
     level: LogLevel = "INFO"
 
     console: bool = True

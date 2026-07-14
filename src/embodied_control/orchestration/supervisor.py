@@ -7,6 +7,7 @@ ready ``PolicyClient``.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from embodied_control.config.schemas import EvalJob, ExecutionPlan
@@ -14,6 +15,21 @@ from embodied_control.logging.logger import EcLogger
 from embodied_control.runtime.docker import DockerRuntimeAdapter
 from embodied_control.runtime.local import LocalRuntimeAdapter
 from embodied_control.transport.factory import make_policy_client
+
+_POLICY_MAX_ACTION_HORIZON = 32  # headroom above any example's requested_action_horizon
+
+
+def _debug_server_args(job: EvalJob, plan: ExecutionPlan, host: str, port: int) -> list[str]:
+    """Flags for ``embodied_control.policies.debug_server`` (shared by local/docker)."""
+    return [
+        "--type", job.policy.type,
+        "--action-dim", str(plan.action_dim),
+        "--action-schema-id", plan.action_schema_id,
+        "--host", host,
+        "--port", str(port),
+        "--seed", str(job.seed),
+        "--max-action-horizon", str(_POLICY_MAX_ACTION_HORIZON),
+    ]
 
 
 class PolicyServiceSupervisor:
@@ -41,33 +57,31 @@ class PolicyServiceSupervisor:
             self.logger.event("runtime.external.attached", phase="policy_launch",
                                endpoint=f"{ep.host}:{ep.port}")
         elif rt.type == "docker":
+            # The image ENTRYPOINT already invokes the debug server module; the
+            # container binds 0.0.0.0 internally, Docker maps it to host_port.
+            command = _debug_server_args(self.job, self.plan, host="0.0.0.0", port=rt.container_port)
             self._adapter = DockerRuntimeAdapter(
                 name="policy",
                 image=rt.image,
                 container_name=rt.container_name,
-                policy_type=self.job.policy.type,
-                action_dim=self.plan.action_dim,
-                action_schema_id=self.plan.action_schema_id,
+                command=command,
+                network="bridge",
                 host_port=rt.host_port,
                 container_port=rt.container_port,
-                seed=self.job.seed,
-                max_action_horizon=32,
                 log_path=self.log_path,
                 shm_size=self.job.policy.runtime.shm_size,
                 logger=runtime_logger,
             )
             self._handle = self._adapter.start()
         else:  # local
+            command = [sys.executable, "-m", "embodied_control.policies.debug_server"]
+            command += _debug_server_args(self.job, self.plan, host=ep.host, port=ep.port)
             self._adapter = LocalRuntimeAdapter(
                 name="policy",
-                policy_type=self.job.policy.type,
-                action_dim=self.plan.action_dim,
-                action_schema_id=self.plan.action_schema_id,
-                host=ep.host,
-                port=ep.port,
-                seed=self.job.seed,
-                max_action_horizon=32,
+                command=command,
                 log_path=self.log_path,
+                endpoint_host=ep.host,
+                endpoint_port=ep.port,
                 logger=runtime_logger,
             )
             self._handle = self._adapter.start()

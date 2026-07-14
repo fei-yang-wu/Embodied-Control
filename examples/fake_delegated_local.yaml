@@ -1,0 +1,41 @@
+# Delegated-mode eval with everything as local subprocesses: no MuJoCo, no
+# Docker needed. Proves the delegated shape (a separate runtime that owns its
+# own rollout loop and calls the policy service directly, normalized by the
+# host afterward) end-to-end in the light default env: `pixi run smoke-delegated`.
+api_version: ec.eval/v1alpha1
+name: fake_delegated_local
+seed: 11
+tags:
+  backend: fake_delegated
+  mode: delegated
+  runtime: local
+
+sim:
+  backend: fake_delegated
+  mode: delegated
+  action_dim: 4          # no in-process model to introspect this from; must be declared
+  runtime:
+    type: local
+  timeout_s: 60
+  backend_config:
+    task_id: fake_reach_task
+
+policy:
+  type: random
+  runtime:
+    type: local
+  requested_action_horizon: 5
+
+embodiment:
+  # Not used in delegated mode (the delegated runtime is the black-box
+  # evaluator) -- schema ids are recorded for provenance only.
+  observation_schema_id: ec.obs.fake_delegated/v1
+  action_schema_id: ec.action.fake_delegated/v1
+
+rollout:
+  num_episodes: 4
+  max_steps_per_episode: 40
+
+outputs:
+  root_dir: ./runs
+  run_name_template: "{date}_{name}_{seed}"

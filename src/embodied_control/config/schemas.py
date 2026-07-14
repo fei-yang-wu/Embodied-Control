@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 EVAL_API_VERSION = "ec.eval/v1alpha1"
 ARTIFACT_CONTRACT_VERSION = "ec.artifacts/v1alpha1"
@@ -51,15 +51,31 @@ class EndpointSpec(BaseModel):
 
 
 class SimSpec(BaseModel):
-    backend: Literal["mujoco"] = "mujoco"
-    mode: Literal["stepped"] = "stepped"  # MuJoCo is flexible; host drives reset/step
-    model: str = "reacher2"  # builtin MJCF key (see sim/models.py)
-    model_path: str | None = None  # optional external .xml/.mjcf
+    backend: Literal["mujoco", "fake_delegated", "libero"] = "mujoco"
+    # stepped: host drives reset/step in-process (MuJoCo is flexible enough for this).
+    # delegated: a separate runtime (local subprocess or Docker container) owns and
+    # runs its own rollout loop end-to-end, calling the policy service directly; the
+    # host only launches it, waits for exit, and normalizes its raw output. This is
+    # the shape a black-box evaluator (e.g. LIBERO) needs (design D2/6.5).
+    mode: Literal["stepped", "delegated"] = "stepped"
+    model: str = "reacher2"  # builtin MJCF key (see sim/models.py); stepped only
+    model_path: str | None = None  # optional external .xml/.mjcf; stepped only
     backend_config: dict[str, Any] = Field(default_factory=dict)
+
+    # --- delegated mode only ---
+    action_dim: int | None = None  # required for delegated (no in-process model to introspect)
+    runtime: RuntimeSpec = Field(default_factory=RuntimeSpec)
+    timeout_s: int = 120  # how long to wait for the delegated runtime to exit
+
+    @model_validator(mode="after")
+    def _delegated_requires_action_dim(self) -> "SimSpec":
+        if self.mode == "delegated" and self.action_dim is None:
+            raise ValueError("sim.action_dim is required when sim.mode='delegated'")
+        return self
 
 
 class PolicyBinding(BaseModel):
-    type: Literal["zero", "random"] = "zero"  # which blank policy the service runs
+    type: Literal["zero", "random", "image_stats"] = "zero"  # which blank policy the service runs
     runtime: RuntimeSpec = Field(default_factory=RuntimeSpec)  # launched by the host
     endpoint: EndpointSpec | None = None  # OR: connect to an external service (no launch)
     requested_action_horizon: int = 1
