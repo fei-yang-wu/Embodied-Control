@@ -13,7 +13,12 @@ from __future__ import annotations
 import random
 import time
 
-from embodied_control.transport.protocol import PROTOCOL_VERSION, key_str
+from embodied_control.transport.protocol import (
+    PROTOCOL_VERSION,
+    decode_image_bytes,
+    key_str,
+    mean_brightness,
+)
 
 
 class Policy:
@@ -83,7 +88,7 @@ class Policy:
                     "error": f"episode {ks} was not reset before act",
                     "actions": [],
                 }
-            chunk = self._action_chunk(env_id, episode_id, horizon)
+            chunk = self._action_chunk(env_id, episode_id, horizon, obs)
             actions.append(
                 {
                     "env_id": env_id,
@@ -103,38 +108,59 @@ class Policy:
         }
 
     # --- subclass hooks --------------------------------------------------
-    def _action(self, env_id: int, episode_id: int) -> list[float]:
+    def _action(self, env_id: int, episode_id: int, obs: dict) -> list[float]:
         raise NotImplementedError
 
-    def _action_chunk(self, env_id: int, episode_id: int, horizon: int) -> list[list[float]]:
+    def _action_chunk(self, env_id: int, episode_id: int, horizon: int, obs: dict) -> list[list[float]]:
         """Return a chunk of ``horizon`` actions. Default: independent per step."""
-        return [self._action(env_id, episode_id) for _ in range(horizon)]
+        return [self._action(env_id, episode_id, obs) for _ in range(horizon)]
 
 
 class ZeroPolicy(Policy):
     policy_type = "zero"
 
-    def _action(self, env_id: int, episode_id: int) -> list[float]:
+    def _action(self, env_id: int, episode_id: int, obs: dict) -> list[float]:
         return [0.0] * self.action_dim
 
 
 class RandomPolicy(Policy):
     policy_type = "random"
 
-    def _action(self, env_id: int, episode_id: int) -> list[float]:
+    def _action(self, env_id: int, episode_id: int, obs: dict) -> list[float]:
         rng = self._episodes[key_str([env_id, episode_id])]
         return [rng.uniform(-1.0, 1.0) for _ in range(self.action_dim)]
 
-    def _action_chunk(self, env_id: int, episode_id: int, horizon: int) -> list[list[float]]:
+    def _action_chunk(self, env_id: int, episode_id: int, horizon: int, obs: dict) -> list[list[float]]:
         # One coherent command held across the chunk: a position-controlled arm
         # needs the target held long enough to track it, and this is a truer
         # demonstration of action chunking (one intent per chunk) than per-step
         # white noise. Consecutive chunks re-sample, so the arm explores.
-        action = self._action(env_id, episode_id)
+        action = self._action(env_id, episode_id, obs)
         return [list(action) for _ in range(horizon)]
 
 
-_POLICIES = {"zero": ZeroPolicy, "random": RandomPolicy}
+class ImageStatsPolicy(Policy):
+    """Proves the camera wire round-trip actually carries decodable image
+    data, before wiring in a real vision policy: reads the first camera in
+    the observation, decodes its raw bytes, and uses their mean brightness to
+    set every action dim (mapped from [0, 255] to [-1, 1]). Not a real vision
+    model -- just enough to be observably different for a dark vs. bright
+    frame, which zero/random can never demonstrate since they never look at
+    the observation at all. Falls back to zero action if no camera is present
+    (e.g. a stepped backend without cameras, or a proprio-only job)."""
+
+    policy_type = "image_stats"
+
+    def _action(self, env_id: int, episode_id: int, obs: dict) -> list[float]:
+        cameras = obs.get("cameras") or []
+        if not cameras:
+            return [0.0] * self.action_dim
+        raw = decode_image_bytes(cameras[0])
+        signal = (mean_brightness(raw) / 255.0) * 2.0 - 1.0
+        return [signal] * self.action_dim
+
+
+_POLICIES = {"zero": ZeroPolicy, "random": RandomPolicy, "image_stats": ImageStatsPolicy}
 
 
 def make_policy(policy_type: str, action_dim: int, **kwargs) -> Policy:

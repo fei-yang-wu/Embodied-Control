@@ -1,0 +1,56 @@
+# Real LIBERO + a policy that actually reads images: proves the camera wire
+# protocol carries real, decodable data end to end (zero/random never look at
+# the observation at all, so they can't demonstrate this). image_stats decodes
+# the agentview camera frame each request and sets its action from the mean
+# pixel brightness -- not a real vision model, just enough to be observably
+# different for different scenes/lighting, ahead of wiring in a real VLA.
+#
+# Build both images first:
+#     pixi run build-policy-image
+#     pixi run build-libero-image     # several minutes: torch + robosuite + LIBERO
+# Then run (needs docker daemon access; use `newgrp docker` / reboot if needed):
+#     pixi run smoke-libero-image-stats
+api_version: ec.eval/v1alpha1
+name: libero_spatial_task0_image_stats
+seed: 0
+tags:
+  backend: libero
+  mode: delegated
+  runtime: docker
+  suite: libero_spatial
+  purpose: camera_wire_protocol_proof
+
+sim:
+  backend: libero
+  mode: delegated
+  action_dim: 7   # OSC_POSE controller: dx,dy,dz,droll,dpitch,dyaw,gripper, normalized [-1,1]
+  runtime:
+    type: docker
+    image: ec-libero-eval:latest
+  timeout_s: 900   # LIBERO env creation + CPU (OSMesa) rendering is much slower than the fake evaluator
+  backend_config:
+    suite: libero_spatial
+    task_index: 0
+    camera_height: 128
+    camera_width: 128
+    health_timeout_s: 120   # policy health-check timeout as seen by the LIBERO container
+
+policy:
+  type: image_stats
+  runtime:
+    type: docker
+    image: ec-policy-debug:latest
+  requested_action_horizon: 1   # re-query every step: the point here is reacting to each new frame
+
+embodiment:
+  observation_schema_id: ec.obs.libero/v1   # proprio + cameras (agentview, wrist)
+  action_schema_id: ec.action.libero_osc_pose/v1
+
+rollout:
+  num_episodes: 1
+  max_steps_per_episode: 50   # a short proof run, not a benchmark sweep
+
+outputs:
+  root_dir: ./runs
+  run_name_template: "{date}_{name}_{seed}"
+  log_level: DEBUG

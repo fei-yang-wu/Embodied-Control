@@ -188,7 +188,7 @@ def build_parser() -> argparse.ArgumentParser:
     pol = sub.add_parser("policy", help="policy service commands")
     pols = pol.add_subparsers(dest="policy_command", required=True)
     serve = pols.add_parser("serve", help="run a blank policy service")
-    serve.add_argument("--type", default="zero", choices=["zero", "random"])
+    serve.add_argument("--type", default="zero", choices=["zero", "random", "image_stats"])
     serve.add_argument("--action-dim", type=int, required=True)
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8756)

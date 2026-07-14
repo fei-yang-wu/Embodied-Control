@@ -18,7 +18,7 @@ from embodied_control.transport.server import PolicyServer
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Blank VLA policy debug server")
-    p.add_argument("--type", default="zero", choices=["zero", "random"])
+    p.add_argument("--type", default="zero", choices=["zero", "random", "image_stats"])
     p.add_argument("--action-dim", type=int, required=True)
     p.add_argument("--action-schema-id", default="ec.action.normalized/v1")
     p.add_argument("--host", default="127.0.0.1")
