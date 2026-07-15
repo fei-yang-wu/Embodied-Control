@@ -1,9 +1,13 @@
 # Plan: wiring in real VLA policies (OpenPI, GR00T)
 
-Status: M1, M2, and M4 done. M3 blocked on external GPU infra (see M3 below).
-Builds on the research in `docs/transport-comparison.md` (protocol details
-verified against OpenPI and GR00T source, then validated against how StarVLA
-and Isaac Lab-Arena solved the same problem). Last updated: 2026-07-14.
+Status: M1, M2, M3, and M4 all done — a real trained checkpoint (OpenPI's
+public `pi05_libero`) has been run end-to-end through this repo's own
+orchestrator against real LIBERO episodes, with a genuine 100% success rate
+on 2 episodes (see M3 below for the full result and the real bugs that
+running it for real surfaced). Builds on the research in
+`docs/transport-comparison.md` (protocol details verified against OpenPI and
+GR00T source, then validated against how StarVLA and Isaac Lab-Arena solved
+the same problem). Last updated: 2026-07-15.
 
 ## Goal
 
@@ -173,63 +177,84 @@ LIBERO smoke runs against blank actions produce the full artifact contract
 — done (`smoke-libero`, `smoke-libero-image-stats`, both rebuilt images,
 `manifest.json.policy_describe` confirmed populated).
 
-### M3 — real end-to-end: π0-LIBERO — BLOCKED on external infra, not started
+### M3 — real end-to-end: π0-LIBERO — DONE (2026-07-15)
 
-OpenPI ships LIBERO-finetuned checkpoints and a serving script, and LIBERO
-is our proven backend — this is the cheapest possible first real model.
-Server runs on a GPU host (outside Docker until NVIDIA Container Toolkit is
-configured — see `docs/gotchas.md`); LIBERO container connects out via host
-networking, which it already uses.
+Ran for real: NVIDIA Container Toolkit configured on this host (it has a
+real RTX 5080, previously just not passed through to Docker — see
+`docs/gotchas.md`), OpenPI's real `scripts/docker/serve_policy.Dockerfile`
+built and run with `--env LIBERO --port 8000` (auto-downloaded the public
+`pi05_libero` checkpoint from GCS, ~11.6GB, no training needed), then
+`examples/libero_openpi_external.yaml` run through this repo's own
+orchestrator end to end.
 
-This milestone needs a GPU host and a downloaded checkpoint — infrastructure
-an agent can't provision unilaterally. M2's adapter, translation layer,
-orchestration wiring, and (as of M5's `RuntimeSpec.command`) launch-command
-support are all done and waiting; M3 is a matter of pointing at a real
-server and confirming translation config once that server exists, not
-further plumbing work.
+**Result**: `run_id=20260715_073801_libero_spatial_task0_openpi_pi05_0`,
+2/2 episodes succeeded (`success_rate=1.0`) on task
+`pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate`,
+episodes terminating early on genuine success (82 and 71 steps, not hitting
+the 200-step cap — `env.check_success()` firing for real, not an artifact),
+17 total real inference calls, `mean_action_horizon=10.0` both episodes
+(the real checkpoint's chunk length, matching what was requested), full
+artifact contract validated (`validate_run_dir` → `valid: True`, zero
+errors/warnings). This is the first number this repo has produced that
+reflects an actual trained model, not a blank policy.
 
-**Verified against OpenPI's real source (2026-07-15), not guessed** — this
-narrows what M3 actually needs once GPU access exists:
+**Three real, previously-undetectable bugs found and fixed by actually
+running this, not by more source-reading**:
 
-- **A ready-made public checkpoint exists, no training needed**:
-  `scripts/serve_policy.py::DEFAULT_CHECKPOINT[EnvMode.LIBERO]` =
-  `config="pi05_libero", dir="gs://openpi-assets/checkpoints/pi05_libero"`.
-- **Launch command** (`scripts/serve_policy.py`, `tyro`-CLI): `python
-  scripts/serve_policy.py --env LIBERO --port 8000` uses that default
-  checkpoint automatically. Real Docker invocation (`scripts/docker/
-  serve_policy.Dockerfile`): `docker run --network=host --gpus=all -e
-  SERVER_ARGS="--env LIBERO --port 8000" openpi_server` — note `--network
-  host`, the exact same model this repo's delegated LIBERO containers
-  already use, for the same underlying reason (see `docs/architecture.md`).
-  This is directly usable as `EndpointSpec`'s `RuntimeSpec.command` override
-  once a GPU host exists — no new orchestration code needed.
-- **Exact observation contract** (`src/openpi/policies/libero_policy.py::
-  LiberoInputs`): `infer(obs)` expects exactly `{"observation/state":
-  float[8], "observation/image": uint8[224,224,3], "observation/wrist_image":
-  uint8[224,224,3], "prompt": str}`. This is a *verified*, not guessed,
-  `OpenPIObservationMapping` — see `examples/libero_openpi_external.yaml`.
-- **Exact action contract** (`LiberoOutputs`): returns `{"actions":
-  float[..., 7]}` — the 7 matches this repo's LIBERO `action_dim` (OSC_POSE)
-  exactly, confirming `action_key="actions"` is correct with no translation
-  needed on the output side.
-- **Real integration gap this surfaces**: the checkpoint expects **224×224**
-  images; `sim/libero_eval.py`'s `_make_env` defaults to 128×128
-  (`camera_height`/`camera_width` in `backend_config`). Fix is trivial —
-  set `backend_config: {camera_height: 224, camera_width: 224}` in the job
-  — but it's a real, concrete thing that would otherwise silently produce
-  wrong-shaped input at M3 time.
-- **Genuinely still open, not verifiable without a real server**: which raw
-  LIBERO observation fields compose the 8-dim `observation/state` in the
-  exact order the checkpoint was trained on (`examples/libero/
-  convert_libero_data_to_lerobot.py` builds it from LIBERO's raw
-  `step["observation"]["state"]`, but the precise field composition wasn't
-  chased further — verifying this blind, without a server to check the
-  result against, risks encoding a wrong guess with false confidence, which
-  is worse than leaving it explicitly open).
+1. **msgpack envelope mismatch (silent, not a transport error)**. OpenPI's
+   server implements its own ndarray wire format
+   (`__ndarray__`/`dtype`/`shape`/`data` keys), not the generic
+   `msgpack-numpy` PyPI package's convention (`nd`/`type`/`kind`/`shape`/
+   `data`) that `transport/openpi_client.py` was built against. The
+   mismatch doesn't fail at the transport layer — the server just doesn't
+   recognize the envelope, silently reconstructs the array as a 0-d object
+   array, and the *first* symptom appears deep inside OpenPI's own LIBERO
+   input transform as an unrelated-looking `IndexError`. Every unit test
+   passed throughout, because the test fixture used the same (wrong, but
+   self-consistent) envelope as the client. Fixed with
+   `transport/openpi_msgpack.py` — a faithful, attributed port of OpenPI's
+   actual encode/decode functions, used by both the real client and the
+   test fixture now. (Considered depending on the real `openpi-client` PyPI
+   package instead per this doc's earlier "Risks" note — it exists, is
+   small, and even ships the `image_tools.resize_with_pad` this repo is
+   still missing — but its `numpy<2.0.0` pin has no conda-forge build for
+   this project's Python 3.13 host environment; reimplementing ~30 lines
+   was simpler than a second Python toolchain just for one package.)
+2. **`observation/state` must be a real ndarray, not a Python list.**
+   OpenPI's normalization transform calls `.shape` on it generically (not
+   LIBERO-specific) — a plain list survives the wire fine but fails
+   server-side with `AttributeError: 'list' object has no attribute
+   'shape'`. Fixed in `openpi_translate.py` for both the LIBERO preset and
+   the generic proprio path.
+3. **The host process running `ec eval run` needs the same transport deps
+   as the job's `policy.endpoint.scheme`, not just the delegated
+   container.** `orchestration/runner.py` always builds a policy client
+   host-side for the pre-flight `policy_describe` health/action-dim check
+   (deliberately — it's what makes a misconfigured job fail fast before
+   launching an expensive LIBERO container), so `ec eval run` on a job with
+   `scheme: openpi_websocket` needs `websockets`/`msgpack` importable in
+   *that* process too. Not a bug to fix in the runner (the pre-flight check
+   is genuinely valuable) — documented as a real operational requirement:
+   run `ec eval run` via `pixi run -e transports ec eval run ...` for any
+   job using a real-policy endpoint scheme, not the light default env.
 
-**Accept when**: a multi-episode LIBERO run against the real checkpoint
-completes with a nonzero success rate and full artifacts — the first
-number this repo produces that reflects an actual model.
+**Resolved, was flagged as open**: the exact composition of the 8-dim
+`observation/state` (`concat(robot0_eef_pos, quat2axisangle(robot0_eef_quat),
+robot0_gripper_qpos)`) was found in OpenPI's own reference LIBERO eval
+script (`examples/libero/main.py`, not the dataset converter this doc
+originally checked) and confirmed correct by the real success above — see
+`openpi_translate.py::_libero_pi0_state`/`_quat2axisangle`. Also implemented
+from that same script: the 180° image flip
+("IMPORTANT: rotate 180 degrees to match train preprocessing" — their
+comment) via `OpenPIObservationMapping.flip_images_180`.
+
+**Known remaining simplification, not yet revisited**: images are rendered
+natively at 224×224 (`sim/libero_eval.py`'s `camera_height`/`camera_width`)
+rather than OpenPI's own eval pipeline's render-at-256-then-resize-with-pad-
+to-224. Since both are square aspect ratios this is a resize-only
+(no letterboxing) difference, and the real result above suggests it's
+close enough to work, but it hasn't been A/B'd against the exact reference
+preprocessing.
 
 ### M4 — GR00T adapter — DONE
 

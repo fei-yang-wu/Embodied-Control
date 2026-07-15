@@ -1,20 +1,29 @@
 # Real LIBERO delegated backend against a real OpenPI-served checkpoint --
-# the M3 target of docs/design/real_policy_adapters.md. NOT runnable as-is:
-# needs a GPU host running OpenPI's server. All the values below are
-# verified against OpenPI's actual source (2026-07-15), not guessed -- see
-# the plan doc's M3 section for exactly what was checked and what remains
-# genuinely open (the precise composition of the 8-dim `observation/state`).
+# the M3 target of docs/design/real_policy_adapters.md. VERIFIED WORKING
+# (2026-07-15): run_id=20260715_073801_libero_spatial_task0_openpi_pi05_0,
+# 2/2 episodes succeeded against the real public pi05_libero checkpoint. See
+# the plan doc's M3 section for the full result and the real bugs fixed
+# along the way (transport/openpi_msgpack.py in particular -- required, not
+# optional, for a real OpenPI server to work at all).
 #
-# 1. On a GPU host, run the real server (no training needed -- OpenPI ships
+# To reproduce:
+# 1. NVIDIA Container Toolkit must be configured for the Docker daemon
+#    (see docs/gotchas.md) -- `docker run --rm --gpus all
+#    nvidia/cuda:12.2.2-base-ubuntu22.04 nvidia-smi` should work.
+# 2. On a GPU host, run the real server (no training needed -- OpenPI ships
 #    a public LIBERO checkpoint used automatically by `--env LIBERO`):
-#      python scripts/serve_policy.py --env LIBERO --port 8000
-#    or, containerized (openpi's own Dockerfile, host networking + GPU,
-#    same networking model this repo's own delegated containers already use):
-#      docker run --network=host --gpus=all \
+#      git clone https://github.com/Physical-Intelligence/openpi.git && cd openpi
+#      docker build . -t openpi_server -f scripts/docker/serve_policy.Dockerfile
+#      docker run -d --network=host --gpus=all -v $(pwd):/app \
 #        -e SERVER_ARGS="--env LIBERO --port 8000" openpi_server
-# 2. Point `policy.endpoint.host` below at that GPU host's address.
-# 3. Build/run as usual: `pixi run build-libero-image` then
-#      ec eval run examples/libero_openpi_external.yaml
+#    (mounting the repo is required -- the image installs deps at build time
+#    but expects the application code mounted at runtime, per its own Dockerfile)
+# 3. Point `policy.endpoint.host` below at that GPU host's address (127.0.0.1
+#    if same machine, which is what was actually verified).
+# 4. Build/run: `pixi run build-libero-image` then, IMPORTANT, run via the
+#    `transports` env (the host process itself needs websockets/msgpack too,
+#    not just the LIBERO container -- see docs/gotchas.md):
+#      pixi run -e transports ec eval run examples/libero_openpi_external.yaml
 api_version: ec.eval/v1alpha1
 name: libero_spatial_task0_openpi_pi05
 seed: 0
@@ -50,12 +59,18 @@ policy:
     port: 8000
     action_dim: 7
     observation_mapping:
-      # Verified exactly against LiberoInputs.__call__ -- not a guess.
+      # Verified exactly against LiberoInputs.__call__ + examples/libero/main.py
+      # (OpenPI's own reference LIBERO eval script) -- not a guess.
       proprio_key: "observation/state"
       prompt_key: "prompt"
       camera_keys:
         agentview_image: "observation/image"
         robot0_eye_in_hand_image: "observation/wrist_image"
+      # Both required for a real pi05_libero checkpoint -- see
+      # transport/openpi_translate.py's module docstring for exactly what
+      # each does and where it was verified.
+      flip_images_180: true
+      libero_pi0_proprio: true
   requested_action_horizon: 10  # advisory only -- pi0's real chunk length is checkpoint-fixed
 
 embodiment:

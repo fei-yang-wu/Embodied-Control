@@ -53,7 +53,12 @@ RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir torch==1.11.0+cpu torchvision==0.12.0+cpu torchaudio==0.11.0 \
        --extra-index-url https://download.pytorch.org/whl/cpu \
     && pip install --no-cache-dir -e . \
-    && pip install --no-cache-dir "imageio>=2.15,<3" "imageio-ffmpeg>=0.4"
+    && pip install --no-cache-dir "imageio>=2.15,<3" "imageio-ffmpeg>=0.4" \
+    && pip install --no-cache-dir "websockets==13.1" "msgpack>=1.0,<2"
+# Not msgpack-numpy: OpenPI's server uses its own wire envelope, not that
+# package's -- see transport/openpi_msgpack.py's docstring. Not pyzmq either:
+# no GR00T-served LIBERO job exists yet (see docs/design/real_policy_adapters.md);
+# add it when that becomes a real case, not preemptively.
 
 # libero.libero's __init__.py interactively prompts for a custom dataset path
 # on its FIRST import ever, if ~/.libero/config.yaml doesn't exist yet -- which
@@ -75,6 +80,9 @@ COPY src/embodied_control/transport/client.py       /app/src/embodied_control/tr
 COPY src/embodied_control/transport/chunking.py     /app/src/embodied_control/transport/chunking.py
 COPY src/embodied_control/transport/base.py         /app/src/embodied_control/transport/base.py
 COPY src/embodied_control/transport/factory.py      /app/src/embodied_control/transport/factory.py
+COPY src/embodied_control/transport/openpi_client.py    /app/src/embodied_control/transport/openpi_client.py
+COPY src/embodied_control/transport/openpi_translate.py /app/src/embodied_control/transport/openpi_translate.py
+COPY src/embodied_control/transport/openpi_msgpack.py   /app/src/embodied_control/transport/openpi_msgpack.py
 COPY src/embodied_control/logging/                  /app/src/embodied_control/logging/
 
 # The host mounts generated/sim_config.json read-only at /generated and the

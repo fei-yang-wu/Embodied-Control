@@ -219,9 +219,9 @@ A few things worth knowing if you touch this container:
   mean brightness, which is what actually proves the round trip carries real,
   usable image data end to end (verified against a real LIBERO frame: exactly
   128×128×3 = 49152 bytes, byte-perfect, mean brightness 120.35 — a plausible
-  value for a normally-lit scene, not a degenerate 0 or 255). This was the
-  last piece blocking a real vision-based VLA policy (GR00T/OpenPI) from being
-  wired in — see "Not in this milestone".
+  value for a normally-lit scene, not a degenerate 0 or 255). This is exactly
+  what a real vision-based VLA policy also needs — see "Real VLA policy
+  transports" below for the adapters this made possible.
 - **Video is captured separately, for human review, not for the policy.**
   `rollout.record_video: true` keeps the `agentview_image` frame LIBERO is
   already rendering each step (instead of discarding it) and encodes it with
@@ -406,23 +406,25 @@ Test with `pixi run -e transports test-transports` (websockets/pyzmq/msgpack/
 numpy — kept out of the light default env; see `pixi.toml`'s `transports`
 feature). Both adapters are exercised against fake servers speaking the real
 wire protocol (`tests/fake_openpi_server.py`, `tests/fake_gr00t_server.py`),
-including a full `run_eval()` run — see `docs/design/real_policy_adapters.md`
-for what's built, what's deliberately scoped down (e.g. GR00T's
-`ModalityConfig` is unwrapped into a plain dict rather than reconstructed as
-a real object, to avoid depending on the full `gr00t` package), and why
-wiring in an actual checkpoint (not just the transport) is the next step.
+including a full `run_eval()` run.
+
+**A real checkpoint has actually been run and succeeded**: OpenPI's public
+`pi05_libero`, driven through this repo's own orchestrator against real
+LIBERO episodes — `examples/libero_openpi_external.yaml`,
+`docs/design/real_policy_adapters.md`'s M3 section has the full result and
+the (real, only-found-by-actually-running-it) bugs that surfaced along the
+way. **Important**: the process running `ec eval run` needs the same
+transport deps as the job's `policy.endpoint.scheme` — use
+`pixi run -e transports ec eval run <job>.yaml` for any job with
+`scheme: openpi_websocket`/`gr00t_zmq`, not the light default env.
 
 ## Not in this milestone
 
-**A real checkpoint actually loaded and answering** — the transports above
-are proven against fake servers, not a real trained model; that needs a GPU
-host and downloaded weights (`docs/design/real_policy_adapters.md`'s M3).
-Also not yet: managed launching of a real policy server (today you point at
-one that's already running; `PolicyServiceSupervisor` still only knows how
-to launch our own debug server), gRPC transport for *our own* protocol (not
-needed — HTTP/JSON payloads are small at 128×128), JPEG/compressed image
-encoding (raw is small enough for now), GPU passthrough for LIBERO's
-containerized rendering (works today via CPU OSMesa; EGL would need NVIDIA
-Container Toolkit configured on the Docker daemon), Apptainer/HPC,
-IsaacLab-Arena, CI-based image builds, and cross-run comparison reporting.
-See the design doc for the sequencing.
+Managed launching of a real policy server (today you point at one that's
+already running via `policy.endpoint`, or launch it with an explicit
+`RuntimeSpec.command` override — see `docs/design/real_policy_adapters.md`'s
+M5 notes; there's no automatic "build and run the real server image" step),
+gRPC transport for *our own* protocol (not needed — HTTP/JSON payloads are
+small at 128×128), JPEG/compressed image encoding (raw is small enough for
+now), Apptainer/HPC, IsaacLab-Arena, CI-based image builds, and cross-run
+comparison reporting. See the design doc for the sequencing.

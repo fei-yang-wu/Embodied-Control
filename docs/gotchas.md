@@ -3,7 +3,57 @@
 Specific bugs and environment traps discovered while building this repo,
 kept so the same subsystem doesn't have to be re-debugged from scratch next
 time. Each entry: what happened, why, and what was actually done about it.
-Last updated: 2026-07-14.
+Last updated: 2026-07-15.
+
+## Real-policy transport (OpenPI / GR00T)
+
+**A wire-protocol bug can pass every unit test and still be completely
+broken against the real server, if the test fixture shares the same bug.**
+`transport/openpi_client.py` originally packed observations with the
+generic `msgpack-numpy` PyPI package's ndarray envelope
+(`nd`/`type`/`kind`/`shape`/`data` keys). OpenPI's real server implements
+its *own* ndarray encoding (`__ndarray__`/`dtype`/`shape`/`data` keys,
+`packages/openpi-client/src/openpi_client/msgpack_numpy.py`) — a different
+convention, not a bug on either side individually. The generic package's
+envelope arrives at OpenPI's server as an unrecognized plain dict; their
+server doesn't error, it just doesn't reconstruct an array, and
+`np.asarray()` on that dict later produces a 0-d object array — the first
+visible symptom is an unrelated-looking `IndexError`/`AttributeError` deep
+inside OpenPI's own input transform, not a transport-layer error. This was
+invisible to `pixi run -e transports test-transports` because
+`tests/fake_openpi_server.py` used the *same* generic package, so client and
+fixture were self-consistently wrong together. Only caught by running
+against a real, live OpenPI server. Fixed by `transport/openpi_msgpack.py`
+— a faithful, attributed port of OpenPI's actual encode/decode functions,
+used by both the real client and the test fixture now, so they can no
+longer silently agree on the wrong thing. **Lesson**: a test fixture that
+you also wrote is not independent verification of wire compatibility with a
+*third party's* real implementation — it only proves self-consistency.
+GR00T's real server was checked against this same risk and found *not*
+affected (its `MsgSerializer` calls the generic package's own `encode`/
+`decode` functions directly, verified in `gr00t/policy/server_client.py`).
+
+**A real OpenPI server's normalization pipeline requires `observation/state`
+to be a numpy ndarray, not a plain Python list** — `AttributeError: 'list'
+object has no attribute 'shape'` inside their own `_normalize_quantile`
+transform otherwise. msgpack-numpy only special-cases actual `np.ndarray`/
+`np.generic` objects over the wire; a Python list survives the round-trip as
+a list. Fixed in `transport/openpi_translate.py` (`_libero_pi0_state` and
+the generic proprio path both now build `np.asarray(..., dtype=np.float32)`).
+
+**`ec eval run` needs the same transport dependencies as the job's
+`policy.endpoint.scheme`, in the process running the CLI itself — not just
+inside a delegated container.** `orchestration/runner.py` always builds a
+policy client host-side for the pre-flight `policy_describe` health/
+action-dim check, deliberately (it's what makes a misconfigured job fail
+fast before launching an expensive container) — but that means running
+`ec eval run` on a job with `scheme: openpi_websocket` from the light
+default pixi env fails with `ModuleNotFoundError: No module named
+'websockets'`, even though the actual inference happens entirely inside a
+separate LIBERO container that has the right deps. Not a bug to fix (the
+pre-flight check is genuinely valuable) — use
+`pixi run -e transports ec eval run <job>.yaml` for any job with a
+real-policy endpoint scheme.
 
 ## Rendering / OpenGL
 
@@ -28,16 +78,25 @@ twice:
   no import-order race to lose. This is why `containers/libero_eval/Dockerfile`
   uses `ENV`, not a Python-level `os.environ` assignment in the harness.
 
-**No GPU passthrough is configured for this deployment's Docker daemon** —
-`docker run --gpus all ...` fails with `permission_denied` /
-`no known GPU vendor found from CDI` (no NVIDIA Container Toolkit runtime
-registered, only plain `runc`). This means EGL rendering is not an option
-inside any container here, even though the *host* has a working GPU + EGL.
-`ec-libero-eval` uses OSMesa (CPU software rendering) instead — slower, but
-needs no daemon configuration, which makes it the portable default. If a
-target machine ever gets the NVIDIA Container Toolkit configured, EGL
-becomes possible again and would be faster, but nothing here currently
-detects or uses it.
+**GPU passthrough was not configured for this deployment's Docker daemon
+until 2026-07-15** — `docker run --gpus all ...` used to fail with
+`permission_denied` / `no known GPU vendor found from CDI` (no NVIDIA
+Container Toolkit runtime registered, only plain `runc`), even though the
+*host* always had a working GPU (an RTX 5080) + EGL. Fixed by installing
+`nvidia-container-toolkit` (`sudo apt-get install nvidia-container-toolkit`,
+`sudo nvidia-ctk runtime configure --runtime=docker`,
+`sudo systemctl restart docker` — see NVIDIA's install guide for exact
+current commands) and verified with `docker run --rm --gpus all
+nvidia/cuda:12.2.2-base-ubuntu22.04 nvidia-smi`. This is what made M3 (a
+real GPU-served OpenPI checkpoint) possible — see
+`docs/design/real_policy_adapters.md`.
+
+`ec-libero-eval` still uses OSMesa (CPU software rendering) for the LIBERO
+*simulator* itself, unrelated to this fix — LIBERO's own rendering has not
+been switched to EGL/GPU, only the separate real-policy *server* container
+(OpenPI's, run independently, not part of this repo's own images) uses the
+GPU now. Nothing in `sim/libero_eval.py`/`containers/libero_eval/` currently
+detects or uses GPU rendering; OSMesa remains the portable default there.
 
 **OSMesa itself failed once with a confusing `PyOpenGL` error** (
 `AttributeError: 'NoneType' object has no attribute 'glGetError'`) even

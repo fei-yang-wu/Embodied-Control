@@ -33,11 +33,11 @@ import time
 import urllib.error
 import urllib.request
 
-import msgpack_numpy
 import websockets.sync.client
 
 from embodied_control.logging.logger import EcLogger
 from embodied_control.transport.client import PolicyClientError
+from embodied_control.transport import openpi_msgpack
 from embodied_control.transport.openpi_translate import (
     OpenPIObservationMapping,
     observation_to_openpi,
@@ -80,7 +80,7 @@ class OpenPIWebsocketClient:
             )
         except OSError as exc:
             raise PolicyClientError(f"cannot reach openpi policy service at {self._uri}: {exc}") from exc
-        self._server_metadata = msgpack_numpy.unpackb(self._ws.recv())
+        self._server_metadata = openpi_msgpack.unpackb(self._ws.recv())
         self.logger.debug("openpi.connected", metadata_keys=sorted(self._server_metadata))
 
     # --- operations ------------------------------------------------------
@@ -142,13 +142,13 @@ class OpenPIWebsocketClient:
         payload = observation_to_openpi(observations[0], self.mapping)
 
         start = time.monotonic()
-        self._ws.send(msgpack_numpy.packb(payload))
+        self._ws.send(openpi_msgpack.packb(payload))
         response = self._ws.recv()
         total_ms = (time.monotonic() - start) * 1000.0
         if isinstance(response, str):
             raise PolicyClientError(f"openpi inference server error:\n{response}")
 
-        action = msgpack_numpy.unpackb(response)
+        action = openpi_msgpack.unpackb(response)
         chunk = openpi_action_to_chunk(action, self.mapping)
         # requested_horizon is advisory only for a real checkpoint -- its
         # chunk length is fixed by training config, not requestable per-call

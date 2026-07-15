@@ -1,9 +1,15 @@
-"""A minimal server speaking OpenPI's *real* wire protocol (msgpack-numpy
-over websocket, plus the /healthz HTTP intercept), for testing
-``OpenPIWebsocketClient`` without a real checkpoint or GPU. Mirrors
-``src/openpi/serving/websocket_policy_server.py`` closely enough to be a
-faithful transport-layer stand-in -- see ``transport/openpi_client.py``'s
+"""A minimal server speaking OpenPI's *real* wire protocol (its own
+msgpack-numpy envelope over websocket, plus the /healthz HTTP intercept),
+for testing ``OpenPIWebsocketClient`` without a real checkpoint or GPU.
+Mirrors ``src/openpi/serving/websocket_policy_server.py`` closely enough to
+be a faithful transport-layer stand-in -- see ``transport/openpi_client.py``'s
 docstring for the exact behaviors this reproduces.
+
+Uses ``transport.openpi_msgpack`` (OpenPI's own envelope, not the generic
+``msgpack-numpy`` PyPI package) -- using the generic package here would have
+made this fixture self-consistent with a client that had the same bug,
+silently hiding the exact wire-incompatibility a live server round-trip
+caught (see ``openpi_msgpack.py``'s docstring for the full story).
 """
 
 from __future__ import annotations
@@ -11,8 +17,9 @@ from __future__ import annotations
 import http
 import threading
 
-import msgpack_numpy
 import websockets.sync.server as _server
+
+from embodied_control.transport import openpi_msgpack
 
 
 class FakeOpenPIServer:
@@ -44,10 +51,10 @@ class FakeOpenPIServer:
         return None
 
     def _handler(self, websocket) -> None:
-        websocket.send(msgpack_numpy.packb(self._metadata))
+        websocket.send(openpi_msgpack.packb(self._metadata))
         while True:
             try:
-                obs = msgpack_numpy.unpackb(websocket.recv())
+                obs = openpi_msgpack.unpackb(websocket.recv())
             except _server.ConnectionClosed:
                 return
             try:
@@ -56,4 +63,4 @@ class FakeOpenPIServer:
                 websocket.send(f"{type(exc).__name__}: {exc}")
                 websocket.close(code=1011, reason="internal error")
                 return
-            websocket.send(msgpack_numpy.packb(action))
+            websocket.send(openpi_msgpack.packb(action))

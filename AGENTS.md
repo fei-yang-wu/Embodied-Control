@@ -101,27 +101,36 @@ if the symptom is stranger than plain permission-denied).
   it, not before (this is a repeated, deliberate choice in this codebase,
   not an oversight to "fix").
 
-## Current status (2026-07-14)
+## Current status (2026-07-15)
 
-Everything is still exercised only with our own blank debug policies
-(`zero`/`random`/`image_stats`) and fake OpenPI/GR00T-protocol test servers
-— **no real trained VLA model has been wired in yet.** The adopted plan is
-`docs/design/real_policy_adapters.md` (milestones M1–M4: chunk-scheduler
-refactor → OpenPI adapter → real π0-LIBERO end-to-end → GR00T adapter); M1,
-M2, and M4 are done — both `transport/openpi_client.py` and
-`transport/gr00t_client.py` speak their real wire protocols (verified
-against each project's actual source, not assumed) and are wired all the
-way through the orchestrator (`EndpointSpec.scheme`, `transport/factory.py`,
-`orchestration/supervisor.py`, and the delegated evaluators, which used to
-hardcode HTTP regardless of scheme — a real bug caught and fixed while
-wiring this up). **M3 (a real checkpoint end-to-end) is blocked on a GPU
-host and downloaded weights** — infrastructure this agent can't provision;
-the plumbing is ready and waiting. The underlying protocol research is
-`docs/transport-comparison.md`. Read both before touching this area — the
-plan encodes decisions (neutral observations, partial-vs-full handshake
-validation, why chunking stays stdlib-only, why GR00T's `ModalityConfig` is
-deliberately not reconstructed as a real object) that aren't obvious from
-the code alone.
+All four milestones in `docs/design/real_policy_adapters.md` are done. A
+**real trained VLA checkpoint is wired in and has actually succeeded**:
+OpenPI's public `pi05_libero` checkpoint, run through this repo's own
+orchestrator against real LIBERO episodes, 2/2 episodes succeeded
+(`run_id=20260715_073801_libero_spatial_task0_openpi_pi05_0`). This host now
+has NVIDIA Container Toolkit configured (a real GPU was present the whole
+time, just not passed through to Docker — see `docs/gotchas.md`).
+
+`transport/openpi_client.py` and `transport/gr00t_client.py` speak their
+real wire protocols and are wired all the way through the orchestrator
+(`EndpointSpec.scheme`, `transport/factory.py`, `orchestration/supervisor.py`,
+the delegated evaluators). Running the real thing surfaced two more bugs
+that reading source alone hadn't caught: OpenPI's server uses its own
+msgpack ndarray envelope, not the generic `msgpack-numpy` package's
+(`transport/openpi_msgpack.py` fixes this — every unit test had passed
+throughout, because the test fixture shared the same wrong-but-consistent
+envelope), and `observation/state` must be a real ndarray, not a Python
+list. Also: **`ec eval run` needs the same transport deps as the job's
+`policy.endpoint.scheme` in the process that runs it, not just inside a
+delegated container** — use `pixi run -e transports ec eval run ...` for
+any job with a real-policy endpoint scheme.
+
+The underlying protocol research is `docs/transport-comparison.md`; the
+full story (including the fixed bugs, verified checkpoint/CLI details, and
+what's still a known simplification) is in
+`docs/design/real_policy_adapters.md`'s M3 section. Read both before
+touching this area — they encode decisions and hard-won details that aren't
+obvious from the code alone.
 
 Also not yet built: Apptainer/HPC support, IsaacLab-Arena backend, GPU
 passthrough for containerized rendering (works today via CPU/OSMesa),

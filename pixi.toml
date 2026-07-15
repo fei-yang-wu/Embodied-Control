@@ -61,17 +61,25 @@ smoke-video-docker = "ec eval run examples/mujoco_video_docker.yaml"
 test-sim = "pytest -q"
 
 # --- transports feature: real-policy client adapters (OpenPI, GR00T) ---
-# These deps (websockets, msgpack, pyzmq) are never bundled into the tiny
-# stdlib-only containers (fake_delegated_eval) -- only LIBERO's container,
-# which already carries numpy, would ever import these client modules for
-# real. This env exists so the *client/translation* code itself has test
-# coverage on the host without needing a GPU or a real checkpoint (see
-# docs/design/real_policy_adapters.md, M2).
+# These deps are never bundled into the tiny stdlib-only containers
+# (fake_delegated_eval) -- only LIBERO's container, which already carries
+# numpy, would ever import these client modules for real. This env exists so
+# the *client/translation* code itself has test coverage on the host without
+# needing a GPU or a real checkpoint (see docs/design/real_policy_adapters.md).
+#
+# openpi-client (real PyPI package, not our own reimplementation) is used
+# for OpenPI's wire mechanics -- verified against a live server (2026-07-15)
+# that the generic msgpack-numpy package's envelope (`nd`/`type`/`kind`) is
+# NOT wire-compatible with OpenPI's server, which uses its own custom
+# envelope (`__ndarray__`/`dtype`) baked into openpi-client's msgpack_numpy.py.
+# GR00T's real server calls the generic package's own encode/decode functions
+# directly (verified in gr00t/policy/server_client.py), so msgpack-numpy
+# stays correct for that adapter -- this mismatch is OpenPI-specific.
 [feature.transports.dependencies]
 numpy = ">=1.24"
 websockets = ">=12"
 msgpack-python = ">=1.0"
-msgpack-numpy = ">=0.4"
+msgpack-numpy = ">=0.4"  # GR00T's own server uses this package's real envelope -- see gr00t_client.py
 pyzmq = ">=25"
 
 [feature.transports.tasks]

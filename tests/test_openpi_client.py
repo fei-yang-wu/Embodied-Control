@@ -6,6 +6,7 @@ test-transports`, not covered by the light default `pixi run test`."""
 from __future__ import annotations
 
 import json
+import math
 
 import pytest
 
@@ -17,6 +18,7 @@ from embodied_control.transport.client import PolicyClientError  # noqa: E402
 from embodied_control.transport.openpi_client import OpenPIWebsocketClient  # noqa: E402
 from embodied_control.transport.openpi_translate import (  # noqa: E402
     OpenPIObservationMapping,
+    _quat2axisangle,
     observation_to_openpi,
     openpi_action_to_chunk,
 )
@@ -50,7 +52,11 @@ def test_observation_to_openpi_maps_cameras_proprio_and_prompt():
         "task": {"task_id": "t", "language_instruction": "pick up the cup"},
     }
     payload = observation_to_openpi(obs, mapping)
-    assert payload["observation/state"] == [1.0, 2.0]
+    # a real ndarray, not a plain list -- verified live against a real
+    # server that its normalization pipeline requires .shape (see
+    # openpi_translate.py's comment)
+    assert isinstance(payload["observation/state"], np.ndarray)
+    assert payload["observation/state"].tolist() == [1.0, 2.0]
     assert payload["prompt"] == "pick up the cup"
     assert payload["observation/image"].shape == (4, 4, 3)
 
@@ -60,6 +66,60 @@ def test_observation_to_openpi_skips_unmapped_cameras():
     obs = {"cameras": [{"name": "wrist_cam", "array": np.zeros((2, 2))}]}
     payload = observation_to_openpi(obs, mapping)
     assert payload == {}
+
+
+def test_quat2axisangle_identity_quaternion_is_zero_rotation():
+    # xyzw identity quaternion -> zero rotation
+    assert _quat2axisangle([0.0, 0.0, 0.0, 1.0]) == [0.0, 0.0, 0.0]
+
+
+def test_quat2axisangle_matches_robosuite_reference_values():
+    # 90-degree rotation about the z-axis: xyzw = (0, 0, sin(45deg), cos(45deg))
+    result = _quat2axisangle([0.0, 0.0, math.sin(math.pi / 4), math.cos(math.pi / 4)])
+    assert result[0] == pytest.approx(0.0, abs=1e-9)
+    assert result[1] == pytest.approx(0.0, abs=1e-9)
+    assert result[2] == pytest.approx(math.pi / 2, abs=1e-9)  # 90 degrees in radians
+
+
+def test_observation_to_openpi_libero_pi0_proprio_builds_verified_8dim_state():
+    # Verified against OpenPI's own examples/libero/main.py: concat(eef_pos,
+    # quat2axisangle(eef_quat), gripper_qpos) = 8 floats, exactly this order.
+    mapping = OpenPIObservationMapping(libero_pi0_proprio=True)
+    obs = {
+        "proprio": {
+            "names": [
+                "robot0_eef_pos[0]", "robot0_eef_pos[1]", "robot0_eef_pos[2]",
+                "robot0_eef_quat[0]", "robot0_eef_quat[1]", "robot0_eef_quat[2]", "robot0_eef_quat[3]",
+                "robot0_gripper_qpos[0]", "robot0_gripper_qpos[1]",
+                "unrelated_field[0]",  # must be ignored, not swept into the state vector
+            ],
+            "values": [0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 1.0, 0.04, -0.04, 999.0],
+        },
+    }
+    state = observation_to_openpi(obs, mapping)["observation/state"]
+    assert isinstance(state, np.ndarray)
+    assert len(state) == 8
+    assert state[:3].tolist() == pytest.approx([0.1, 0.2, 0.3])
+    assert state[3:6].tolist() == pytest.approx([0.0, 0.0, 0.0])  # identity quat -> zero axis-angle
+    assert state[6:].tolist() == pytest.approx([0.04, -0.04])
+
+
+def test_observation_to_openpi_libero_pi0_proprio_raises_on_missing_fields():
+    mapping = OpenPIObservationMapping(libero_pi0_proprio=True)
+    obs = {"proprio": {"names": ["some_other_field"], "values": [1.0]}}
+    with pytest.raises(ValueError, match="robot0_eef_pos"):
+        observation_to_openpi(obs, mapping)
+
+
+def test_observation_to_openpi_flips_images_180_when_enabled():
+    mapping = OpenPIObservationMapping(
+        camera_keys={"agentview_image": "observation/image"}, flip_images_180=True,
+    )
+    array = np.arange(9).reshape(3, 3, 1)
+    obs = {"cameras": [{"name": "agentview_image", "array": array}]}
+    result = observation_to_openpi(obs, mapping)["observation/image"]
+    assert np.array_equal(result, array[::-1, ::-1])
+    assert not np.array_equal(result, array)  # sanity: this array isn't 180-rotation-symmetric
 
 
 def test_openpi_action_to_chunk_converts_ndarray_to_float_lists():
