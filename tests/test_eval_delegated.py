@@ -115,6 +115,26 @@ def test_real_policy_adapter_example_jobs_load_and_validate():
         assert job.policy.endpoint.observation_mapping.get("proprio_key")
 
 
+def test_libero_openpi_example_job_loads_and_matches_verified_checkpoint_contract():
+    # Schema-only (see above) -- but the mapping values themselves are
+    # verified against OpenPI's real src/openpi/policies/libero_policy.py,
+    # not placeholders, per docs/design/real_policy_adapters.md M3. This
+    # guards those specific verified values from silently drifting too.
+    job = load_job(EXAMPLES / "libero_openpi_external.yaml")
+    assert job.sim.backend == "libero"
+    assert job.sim.action_dim == 7
+    assert job.sim.backend_config["camera_height"] == 224
+    assert job.sim.backend_config["camera_width"] == 224
+    ep = job.policy.endpoint
+    assert ep.scheme == "openpi_websocket"
+    assert ep.action_dim == 7
+    assert ep.observation_mapping["proprio_key"] == "observation/state"
+    assert ep.observation_mapping["camera_keys"] == {
+        "agentview_image": "observation/image",
+        "robot0_eye_in_hand_image": "observation/wrist_image",
+    }
+
+
 def test_runtime_command_override_launches_and_produces_valid_run(tmp_path):
     """End-to-end proof that RuntimeSpec.command actually gets launched (not
     just resolved correctly in isolation, per test_config_and_planner.py) --

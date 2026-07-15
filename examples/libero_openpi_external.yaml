@@ -1,0 +1,71 @@
+# Real LIBERO delegated backend against a real OpenPI-served checkpoint --
+# the M3 target of docs/design/real_policy_adapters.md. NOT runnable as-is:
+# needs a GPU host running OpenPI's server. All the values below are
+# verified against OpenPI's actual source (2026-07-15), not guessed -- see
+# the plan doc's M3 section for exactly what was checked and what remains
+# genuinely open (the precise composition of the 8-dim `observation/state`).
+#
+# 1. On a GPU host, run the real server (no training needed -- OpenPI ships
+#    a public LIBERO checkpoint used automatically by `--env LIBERO`):
+#      python scripts/serve_policy.py --env LIBERO --port 8000
+#    or, containerized (openpi's own Dockerfile, host networking + GPU,
+#    same networking model this repo's own delegated containers already use):
+#      docker run --network=host --gpus=all \
+#        -e SERVER_ARGS="--env LIBERO --port 8000" openpi_server
+# 2. Point `policy.endpoint.host` below at that GPU host's address.
+# 3. Build/run as usual: `pixi run build-libero-image` then
+#      ec eval run examples/libero_openpi_external.yaml
+api_version: ec.eval/v1alpha1
+name: libero_spatial_task0_openpi_pi05
+seed: 0
+tags:
+  backend: libero
+  mode: delegated
+  policy: openpi_external
+  checkpoint: pi05_libero
+
+sim:
+  backend: libero
+  mode: delegated
+  action_dim: 7   # OSC_POSE controller: dx,dy,dz,droll,dpitch,dyaw,gripper -- matches
+                  # LiberoOutputs' `actions[..., :7]` exactly, verified in openpi source.
+  runtime:
+    type: docker
+    image: ec-libero-eval:latest
+  timeout_s: 900
+  backend_config:
+    suite: libero_spatial
+    task_index: 0
+    # pi05_libero expects 224x224 (src/openpi/policies/libero_policy.py::
+    # make_libero_example) -- our harness defaults to 128x128 for the debug
+    # policies, which never looked at resolution; a real checkpoint does.
+    camera_height: 224
+    camera_width: 224
+    health_timeout_s: 120
+
+policy:
+  endpoint:
+    scheme: openpi_websocket
+    host: 127.0.0.1   # <-- set to your GPU host's address
+    port: 8000
+    action_dim: 7
+    observation_mapping:
+      # Verified exactly against LiberoInputs.__call__ -- not a guess.
+      proprio_key: "observation/state"
+      prompt_key: "prompt"
+      camera_keys:
+        agentview_image: "observation/image"
+        robot0_eye_in_hand_image: "observation/wrist_image"
+  requested_action_horizon: 10  # advisory only -- pi0's real chunk length is checkpoint-fixed
+
+embodiment:
+  observation_schema_id: ec.obs.libero/v1
+  action_schema_id: ec.action.libero_osc_pose/v1
+
+rollout:
+  num_episodes: 2
+  max_steps_per_episode: 200
+
+outputs:
+  root_dir: ./runs
+  run_name_template: "{date}_{name}_{seed}"

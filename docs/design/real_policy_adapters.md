@@ -179,16 +179,53 @@ OpenPI ships LIBERO-finetuned checkpoints and a serving script, and LIBERO
 is our proven backend — this is the cheapest possible first real model.
 Server runs on a GPU host (outside Docker until NVIDIA Container Toolkit is
 configured — see `docs/gotchas.md`); LIBERO container connects out via host
-networking, which it already uses. The real work here is translation
-config: `agentview_image` / `robot0_eye_in_hand_image` / proprio / task
-language → the checkpoint's expected keys (OpenPI normalizes server-side,
-so the client sends raw observations with the right keys and resolution).
+networking, which it already uses.
 
 This milestone needs a GPU host and a downloaded checkpoint — infrastructure
-an agent can't provision unilaterally. M2's adapter, translation layer, and
-orchestration wiring are all done and waiting; M3 is a matter of pointing
-`EndpointSpec` at a real server and writing the actual key-mapping config
-once that server exists, not further plumbing work.
+an agent can't provision unilaterally. M2's adapter, translation layer,
+orchestration wiring, and (as of M5's `RuntimeSpec.command`) launch-command
+support are all done and waiting; M3 is a matter of pointing at a real
+server and confirming translation config once that server exists, not
+further plumbing work.
+
+**Verified against OpenPI's real source (2026-07-15), not guessed** — this
+narrows what M3 actually needs once GPU access exists:
+
+- **A ready-made public checkpoint exists, no training needed**:
+  `scripts/serve_policy.py::DEFAULT_CHECKPOINT[EnvMode.LIBERO]` =
+  `config="pi05_libero", dir="gs://openpi-assets/checkpoints/pi05_libero"`.
+- **Launch command** (`scripts/serve_policy.py`, `tyro`-CLI): `python
+  scripts/serve_policy.py --env LIBERO --port 8000` uses that default
+  checkpoint automatically. Real Docker invocation (`scripts/docker/
+  serve_policy.Dockerfile`): `docker run --network=host --gpus=all -e
+  SERVER_ARGS="--env LIBERO --port 8000" openpi_server` — note `--network
+  host`, the exact same model this repo's delegated LIBERO containers
+  already use, for the same underlying reason (see `docs/architecture.md`).
+  This is directly usable as `EndpointSpec`'s `RuntimeSpec.command` override
+  once a GPU host exists — no new orchestration code needed.
+- **Exact observation contract** (`src/openpi/policies/libero_policy.py::
+  LiberoInputs`): `infer(obs)` expects exactly `{"observation/state":
+  float[8], "observation/image": uint8[224,224,3], "observation/wrist_image":
+  uint8[224,224,3], "prompt": str}`. This is a *verified*, not guessed,
+  `OpenPIObservationMapping` — see `examples/libero_openpi_external.yaml`.
+- **Exact action contract** (`LiberoOutputs`): returns `{"actions":
+  float[..., 7]}` — the 7 matches this repo's LIBERO `action_dim` (OSC_POSE)
+  exactly, confirming `action_key="actions"` is correct with no translation
+  needed on the output side.
+- **Real integration gap this surfaces**: the checkpoint expects **224×224**
+  images; `sim/libero_eval.py`'s `_make_env` defaults to 128×128
+  (`camera_height`/`camera_width` in `backend_config`). Fix is trivial —
+  set `backend_config: {camera_height: 224, camera_width: 224}` in the job
+  — but it's a real, concrete thing that would otherwise silently produce
+  wrong-shaped input at M3 time.
+- **Genuinely still open, not verifiable without a real server**: which raw
+  LIBERO observation fields compose the 8-dim `observation/state` in the
+  exact order the checkpoint was trained on (`examples/libero/
+  convert_libero_data_to_lerobot.py` builds it from LIBERO's raw
+  `step["observation"]["state"]`, but the precise field composition wasn't
+  chased further — verifying this blind, without a server to check the
+  result against, risks encoding a wrong guess with false confidence, which
+  is worse than leaving it explicitly open).
 
 **Accept when**: a multi-episode LIBERO run against the real checkpoint
 completes with a nonzero success rate and full artifacts — the first
