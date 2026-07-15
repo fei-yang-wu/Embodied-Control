@@ -36,6 +36,7 @@ from embodied_control.orchestration import registry
 from embodied_control.orchestration.delegated import run_delegated_rollout
 from embodied_control.orchestration.errors import RunFailure
 from embodied_control.orchestration.supervisor import PolicyServiceSupervisor
+from embodied_control.transport.chunking import ChunkScheduler
 from embodied_control.transport.client import PolicyClientError
 
 
@@ -194,11 +195,8 @@ def _run_episode(job, plan, backend, controller, client, logger, episode_id, see
     client.reset([key], seed)
     logger.event("sim.episode.started", phase="rollout", episode_id=episode_id, seed=seed)
 
-    horizon = max(1, int(job.policy.requested_action_horizon))
+    scheduler = ChunkScheduler(job.policy.requested_action_horizon)
     max_steps = int(job.rollout.max_steps_per_episode)
-    buffer: list[list[float]] = []
-    num_requests = 0
-    horizons: list[int] = []
     fallback_steps = 0
     steps = 0
     total_return = 0.0
@@ -214,10 +212,10 @@ def _run_episode(job, plan, backend, controller, client, logger, episode_id, see
         record_video = _try_capture_frame(backend, frames, logger)
 
     while steps < max_steps and not done:
-        if not buffer:
+        if scheduler.empty:
             req_id = f"{plan.run_id}:{episode_id}:{steps}"
             try:
-                resp = client.act(req_id, [key], [obs.to_wire()], horizon)
+                resp = client.act(req_id, [key], [obs.to_wire()], scheduler.requested_horizon)
             except PolicyClientError as exc:
                 # Bounded, recorded fallback: apply the controller's safe action.
                 logger.event("policy.request.failed", severity="warning", phase="rollout",
@@ -231,14 +229,11 @@ def _run_episode(job, plan, backend, controller, client, logger, episode_id, see
                 if record_video:
                     record_video = _try_capture_frame(backend, frames, logger)
                 continue
-            num_requests += 1
             timing = resp.get("timing", {})
             latencies_ms.append(float(timing.get("total_ms", 0.0)))
-            chunk = resp["actions"][0]["action_chunk"]
-            horizons.append(len(chunk))
-            buffer = list(chunk)
+            scheduler.fill(resp["actions"][0]["action_chunk"])
 
-        norm_action = buffer.pop(0)
+        norm_action = scheduler.pop()
         ctrl = controller.decode_action(norm_action)
         result = backend.step(ctrl)
         obs, done = result.observation, result.done
@@ -254,7 +249,7 @@ def _run_episode(job, plan, backend, controller, client, logger, episode_id, see
     if job.rollout.record_raw:
         raw = dict(summary)
         raw.update({"episode_id": episode_id, "seed": seed, "steps": steps,
-                    "num_requests": num_requests, "fallback_steps": fallback_steps})
+                    "num_requests": scheduler.num_requests, "fallback_steps": fallback_steps})
         artifacts["raw_record"] = store.write_raw_episode(episode_id, raw)
 
     if frames:
@@ -285,8 +280,8 @@ def _run_episode(job, plan, backend, controller, client, logger, episode_id, see
             "min_distance": summary["min_distance"],
         },
         policy=EpisodePolicyStats(
-            num_requests=num_requests,
-            mean_action_horizon=round(sum(horizons) / len(horizons), 4) if horizons else 0.0,
+            num_requests=scheduler.num_requests,
+            mean_action_horizon=scheduler.mean_action_horizon,
             fallback_steps=fallback_steps,
             timeouts=0,
         ),

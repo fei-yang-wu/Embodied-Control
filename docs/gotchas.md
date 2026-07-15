@@ -132,6 +132,18 @@ Fix: `gh auth refresh -h github.com -s write:packages` (interactive
 device-code flow — only a human can complete this, an agent can't do it
 unattended), then re-run `docker login` with the refreshed token.
 
+**Adding a new module under `transport/`/`sim/`/`logging/` doesn't make it
+appear in a container just because a file already inside that container
+imports it.** Extracting `ChunkScheduler` into `transport/chunking.py` and
+importing it from `sim/fake_delegated_eval.py` / `sim/libero_eval.py` built
+locally fine (host has the whole `src/` tree on `PYTHONPATH`) but would have
+failed at container *runtime* with `ModuleNotFoundError` — each
+`containers/*/Dockerfile` lists its `COPY` lines file-by-file (deliberately,
+to keep images minimal), so a new source file needs its own `COPY` line
+added by hand in every Dockerfile that imports it. Caught before a rebuild
+by grepping the Dockerfile's `COPY` list while making the edit, not by
+running the container and hitting the import error.
+
 ## Miscellaneous
 
 **A local delegated-mode `runtime.type: local` branch once hardcoded the

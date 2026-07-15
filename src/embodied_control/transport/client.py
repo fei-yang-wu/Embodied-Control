@@ -16,6 +16,7 @@ from embodied_control.logging.logger import EcLogger
 from embodied_control.transport.protocol import (
     build_act_request,
     build_reset_request,
+    encode_camera,
 )
 
 
@@ -85,11 +86,29 @@ class PolicyClient:
         return resp
 
     def act(self, request_id, episode_keys, observations, requested_horizon) -> dict:
+        wire_observations = [self._encode_observation(obs) for obs in observations]
         resp = self._request(
             "POST",
             "/act",
-            build_act_request(request_id, episode_keys, observations, requested_horizon),
+            build_act_request(request_id, episode_keys, wire_observations, requested_horizon),
         )
         if resp.get("status") != "ok":
             raise PolicyClientError(f"policy act failed: {resp.get('status')}: {resp.get('error')}")
         return resp
+
+    @staticmethod
+    def _encode_observation(obs: dict) -> dict:
+        """Encode any raw ``cameras: [{name, array, encoding?}]`` entries into
+        the wire's base64 form. Callers (evaluators) pass neutral observations
+        with raw array-like objects; this is the one place that knows this
+        transport's wire encoding, so a different transport (e.g. msgpack over
+        websocket) can pack the same arrays without a base64 detour, with no
+        evaluator-side changes."""
+        cameras = obs.get("cameras")
+        if not cameras:
+            return obs
+        encoded = dict(obs)
+        encoded["cameras"] = [
+            encode_camera(c["name"], c["array"], c.get("encoding", "rgb8")) for c in cameras
+        ]
+        return encoded

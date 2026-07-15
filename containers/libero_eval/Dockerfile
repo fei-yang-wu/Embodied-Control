@@ -72,6 +72,7 @@ COPY src/embodied_control/sim/libero_eval.py        /app/src/embodied_control/si
 COPY src/embodied_control/transport/__init__.py     /app/src/embodied_control/transport/__init__.py
 COPY src/embodied_control/transport/protocol.py     /app/src/embodied_control/transport/protocol.py
 COPY src/embodied_control/transport/client.py       /app/src/embodied_control/transport/client.py
+COPY src/embodied_control/transport/chunking.py     /app/src/embodied_control/transport/chunking.py
 COPY src/embodied_control/logging/                  /app/src/embodied_control/logging/
 
 # The host mounts generated/sim_config.json read-only at /generated and the

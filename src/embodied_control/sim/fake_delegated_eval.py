@@ -23,6 +23,7 @@ import json
 import random
 from pathlib import Path
 
+from embodied_control.transport.chunking import ChunkScheduler
 from embodied_control.transport.client import PolicyClient, PolicyClientError
 
 
@@ -57,21 +58,16 @@ def run_episode(client: PolicyClient, episode_id: int, seed: int, config: dict) 
     horizon = max(1, int(config.get("requested_action_horizon", 1)))
     max_steps = int(config["max_steps_per_episode"])
 
-    buffer: list[list[float]] = []
-    num_requests = 0
-    horizons: list[int] = []
+    scheduler = ChunkScheduler(horizon)
     total_return = 0.0
     steps = 0
 
     while steps < max_steps:
-        if not buffer:
+        if scheduler.empty:
             obs = _fake_observation(rng, env_id=0, episode_id=episode_id, task_id=task_id)
-            resp = client.act(f"{episode_id}:{steps}", [key], [obs], horizon)
-            num_requests += 1
-            chunk = resp["actions"][0]["action_chunk"]
-            horizons.append(len(chunk))
-            buffer = list(chunk)
-        action = buffer.pop(0)
+            resp = client.act(f"{episode_id}:{steps}", [key], [obs], scheduler.requested_horizon)
+            scheduler.fill(resp["actions"][0]["action_chunk"])
+        action = scheduler.pop()
         # No physics to simulate -- a small illustrative reward so total_return
         # is non-trivial (smaller actions score slightly better).
         total_return -= sum(abs(a) for a in action) * 0.01
@@ -90,8 +86,8 @@ def run_episode(client: PolicyClient, episode_id: int, seed: int, config: dict) 
         "success": success,
         "steps": steps,
         "total_return": round(total_return, 6),
-        "num_requests": num_requests,
-        "mean_action_horizon": round(sum(horizons) / len(horizons), 4) if horizons else 0.0,
+        "num_requests": scheduler.num_requests,
+        "mean_action_horizon": scheduler.mean_action_horizon,
     }
 
 

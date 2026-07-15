@@ -9,9 +9,12 @@ reset/step loop end-to-end, the host only launches it, waits for exit, and
 normalizes its raw per-episode output.
 
 Camera observations (``agentview_image``, ``robot0_eye_in_hand_image``) ARE
-sent to the policy, base64-encoded raw ``rgb8`` in a ``cameras[]`` field
-alongside proprioception (``transport.protocol.encode_camera``) -- at
-128x128x3 this is ~65KB/frame, trivial over plain HTTP/JSON, so there is no
+sent to the policy, in a ``cameras[]`` field alongside proprioception -- this
+module builds a *neutral* observation (raw arrays, not wire-encoded); the
+transport client owns turning that into whatever bytes-on-the-wire form it
+uses (``PolicyClient._encode_observation`` base64-encodes for HTTP/JSON; a
+future msgpack transport would pack the same arrays directly). At 128x128x3,
+base64-over-HTTP is ~65KB/frame, trivial over plain HTTP/JSON, so there is no
 compression/format negotiation here yet. The blank zero/random policies still
 never look at any of it; ``image_stats`` (a policy that reads and decodes real
 bytes from the observation) is what actually proves the round trip carries
@@ -39,8 +42,8 @@ import argparse
 import json
 from pathlib import Path
 
+from embodied_control.transport.chunking import ChunkScheduler
 from embodied_control.transport.client import PolicyClient, PolicyClientError
-from embodied_control.transport.protocol import encode_camera
 
 _IMAGE_KEY_SUFFIXES = ("_image", "_depth", "_segmentation")
 _CAMERA_KEYS = ("agentview_image", "robot0_eye_in_hand_image")
@@ -74,8 +77,9 @@ def _make_env(suite_name: str, task_index: int, camera_height: int, camera_width
 
 
 def _wire_observation(obs: dict, env_id: int, episode_id: int, language: str, task_id: str) -> dict:
-    """Proprioception (flattened non-image fields) plus cameras (raw rgb8,
-    base64-encoded) -- see module docstring for the payload-size reasoning."""
+    """Proprioception (flattened non-image fields) plus cameras -- a *neutral*
+    observation carrying raw arrays; the transport client owns wire encoding
+    (see module docstring)."""
     names: list[str] = []
     values: list[float] = []
     for key, val in obs.items():
@@ -86,7 +90,7 @@ def _wire_observation(obs: dict, env_id: int, episode_id: int, language: str, ta
         for i, v in enumerate(arr):
             names.append(f"{key}[{i}]" if multi else key)
             values.append(float(v))
-    cameras = [encode_camera(key, obs[key]) for key in _CAMERA_KEYS if key in obs]
+    cameras = [{"name": key, "array": obs[key]} for key in _CAMERA_KEYS if key in obs]
     return {
         "env_id": env_id,
         "episode_id": episode_id,
@@ -127,24 +131,19 @@ def run_episode(client: PolicyClient, env, task, init_states, episode_id: int, s
     if videos_dir is not None:
         _capture_frame(obs, frames)
 
-    buffer: list[list[float]] = []
-    num_requests = 0
-    horizons: list[int] = []
+    scheduler = ChunkScheduler(horizon)
     total_return = 0.0
     steps = 0
     success = False
 
     while steps < max_steps:
-        if not buffer:
+        if scheduler.empty:
             wire_obs = _wire_observation(obs, env_id=0, episode_id=episode_id,
                                           language=task.language, task_id=task.name)
-            resp = client.act(f"{episode_id}:{steps}", [key], [wire_obs], horizon)
-            num_requests += 1
-            chunk = resp["actions"][0]["action_chunk"]
-            horizons.append(len(chunk))
-            buffer = list(chunk)
+            resp = client.act(f"{episode_id}:{steps}", [key], [wire_obs], scheduler.requested_horizon)
+            scheduler.fill(resp["actions"][0]["action_chunk"])
 
-        action = buffer.pop(0)
+        action = scheduler.pop()
         obs, reward, done, info = env.step(action)
         total_return += float(reward)
         steps += 1
@@ -174,8 +173,8 @@ def run_episode(client: PolicyClient, env, task, init_states, episode_id: int, s
         "success": success,
         "steps": steps,
         "total_return": round(total_return, 6),
-        "num_requests": num_requests,
-        "mean_action_horizon": round(sum(horizons) / len(horizons), 4) if horizons else 0.0,
+        "num_requests": scheduler.num_requests,
+        "mean_action_horizon": scheduler.mean_action_horizon,
     }
 
 
