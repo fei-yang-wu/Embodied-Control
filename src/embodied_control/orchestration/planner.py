@@ -87,7 +87,8 @@ def build_plan(
     if pol.endpoint is not None:
         # Connect to an already-running external service; nothing to launch.
         endpoint = ResolvedEndpoint(
-            scheme=pol.endpoint.scheme, host=pol.endpoint.host, port=pol.endpoint.port
+            scheme=pol.endpoint.scheme, host=pol.endpoint.host, port=pol.endpoint.port,
+            action_dim=pol.endpoint.action_dim, observation_mapping=pol.endpoint.observation_mapping,
         )
         runtime = ResolvedRuntime(
             name="policy", type="external", host_port=pol.endpoint.port

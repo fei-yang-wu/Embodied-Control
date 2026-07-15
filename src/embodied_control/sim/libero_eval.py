@@ -2,18 +2,19 @@
 
 Entry point for the delegated sim runtime (``python -m
 embodied_control.sim.libero_eval``). Drives real LIBERO/robosuite manipulation
-episodes, calling the policy service over the *same* transport
-(``transport.client.PolicyClient``) the fake evaluator and stepped MuJoCo path
-use -- LIBERO is a black-box evaluator (design D2/6.5): it owns its own
-reset/step loop end-to-end, the host only launches it, waits for exit, and
-normalizes its raw per-episode output.
+episodes, calling the policy service over whichever transport the resolved
+plan's endpoint declares (``transport.factory.make_policy_client`` --
+``policy_scheme`` in the generated sim config, defaulting to ``http`` for the
+blank debug policies) -- LIBERO is a black-box evaluator (design D2/6.5): it
+owns its own reset/step loop end-to-end, the host only launches it, waits for
+exit, and normalizes its raw per-episode output.
 
 Camera observations (``agentview_image``, ``robot0_eye_in_hand_image``) ARE
 sent to the policy, in a ``cameras[]`` field alongside proprioception -- this
 module builds a *neutral* observation (raw arrays, not wire-encoded); the
 transport client owns turning that into whatever bytes-on-the-wire form it
-uses (``PolicyClient._encode_observation`` base64-encodes for HTTP/JSON; a
-future msgpack transport would pack the same arrays directly). At 128x128x3,
+uses (HTTP base64-encodes; ``openpi_websocket`` packs the same arrays
+directly via msgpack-numpy, no base64 detour). At 128x128x3,
 base64-over-HTTP is ~65KB/frame, trivial over plain HTTP/JSON, so there is no
 compression/format negotiation here yet. The blank zero/random policies still
 never look at any of it; ``image_stats`` (a policy that reads and decodes real
@@ -42,8 +43,10 @@ import argparse
 import json
 from pathlib import Path
 
+from embodied_control.transport.base import PolicyClientProtocol
 from embodied_control.transport.chunking import ChunkScheduler
-from embodied_control.transport.client import PolicyClient, PolicyClientError
+from embodied_control.transport.client import PolicyClientError
+from embodied_control.transport.factory import make_policy_client
 
 _IMAGE_KEY_SUFFIXES = ("_image", "_depth", "_segmentation")
 _CAMERA_KEYS = ("agentview_image", "robot0_eye_in_hand_image")
@@ -115,7 +118,7 @@ def _capture_frame(obs: dict, frames: list) -> None:
         frames.append(image[::-1])
 
 
-def run_episode(client: PolicyClient, env, task, init_states, episode_id: int, seed: int,
+def run_episode(client: PolicyClientProtocol, env, task, init_states, episode_id: int, seed: int,
                 config: dict, videos_dir: Path | None) -> dict:
     key = [0, episode_id]
     client.reset([key], seed)
@@ -192,7 +195,11 @@ def main(argv: list[str] | None = None) -> int:
     # LIBERO env creation (compiling the MJCF scene) plus CPU rendering is much
     # slower to come up than the fake evaluator's instant health check.
     health_timeout_s = float(config.get("health_timeout_s", 60.0))
-    client = PolicyClient(config["policy_host"], config["policy_port"], timeout_s=30.0)
+    client = make_policy_client(
+        config.get("policy_scheme", "http"), config["policy_host"], config["policy_port"],
+        timeout_s=30.0, action_dim=config.get("action_dim"),
+        observation_mapping=config.get("policy_observation_mapping"),
+    )
     try:
         client.wait_healthy(timeout_s=health_timeout_s)
     except PolicyClientError as exc:

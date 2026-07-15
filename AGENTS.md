@@ -37,9 +37,10 @@ incompatible with the host's Python 3.13.
 ## Commands
 
 ```bash
-pixi run test              # default env: ~49 tests, ~6s — run this after every change
-pixi run -e sim test-sim   # full suite incl. real MuJoCo evals: ~54 tests, ~11s
-pixi run doctor             # host + dependency check (imageio, offscreen renderer, docker, ...)
+pixi run test                          # default env: ~49 tests, ~6s — run this after every change
+pixi run -e sim test-sim               # full suite incl. real MuJoCo evals: ~54 tests, ~11s
+pixi run -e transports test-transports # OpenPI/GR00T client adapter tests (websockets/msgpack/numpy)
+pixi run doctor                        # host + dependency check (imageio, offscreen renderer, docker, ...)
 ```
 
 Docker-runtime examples (`smoke-docker`, `smoke-delegated-docker`,
@@ -102,16 +103,21 @@ if the symptom is stranger than plain permission-denied).
 
 ## Current status (2026-07-14)
 
-Everything is built and tested with our own blank debug policies
-(`zero`/`random`/`image_stats`) — **no real trained VLA model has been
-wired in yet.** The adopted plan for closing that gap is
-`docs/design/real_policy_adapters.md` (milestones M1–M4: chunk-scheduler
-refactor → OpenPI adapter → real π0-LIBERO end-to-end → GR00T adapter);
-the underlying protocol research is `docs/transport-comparison.md`. Read
-both before starting that work — the protocol details are verified against
-OpenPI's and GR00T's current source, and the plan encodes decisions
-(neutral observations, fail-fast handshake validation, stdlib-only
-chunking) that aren't obvious from the code alone.
+Everything is still exercised only with our own blank debug policies
+(`zero`/`random`/`image_stats`) and, as of M2, a fake OpenPI-protocol test
+server — **no real trained VLA model has been wired in yet.** The adopted
+plan is `docs/design/real_policy_adapters.md` (milestones M1–M4:
+chunk-scheduler refactor → OpenPI adapter → real π0-LIBERO end-to-end →
+GR00T adapter); M1 and M2 are done. `transport/openpi_client.py` +
+`transport/openpi_translate.py` speak OpenPI's real websocket+msgpack-numpy
+protocol (verified against its actual source, not assumed) and are wired all
+the way through the orchestrator (`EndpointSpec.scheme="openpi_websocket"`,
+`transport/factory.py`, `orchestration/supervisor.py`) — what's missing is a
+real checkpoint's translation config (M3), not plumbing. The underlying
+protocol research is `docs/transport-comparison.md`. Read both before
+touching this area — the plan encodes decisions (neutral observations,
+partial-vs-full handshake validation, why chunking stays stdlib-only) that
+aren't obvious from the code alone.
 
 Also not yet built: Apptainer/HPC support, IsaacLab-Arena backend, GPU
 passthrough for containerized rendering (works today via CPU/OSMesa),

@@ -95,6 +95,7 @@ def run_eval(job: EvalJob) -> EvalResult:
     phase = "policy_launch"
     status_str = "running"
     reason: str | None = None
+    desc: dict = {}
 
     try:
         client = supervisor.start(health_timeout_s=30.0)
@@ -157,6 +158,7 @@ def run_eval(job: EvalJob) -> EvalResult:
             "observation": plan.observation_schema_id,
             "action": plan.action_schema_id,
         },
+        policy_describe=desc,
     )
     store.write_manifest(manifest)
 

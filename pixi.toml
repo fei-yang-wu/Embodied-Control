@@ -60,5 +60,22 @@ smoke-video = "ec eval run examples/mujoco_random_video.yaml"
 smoke-video-docker = "ec eval run examples/mujoco_video_docker.yaml"
 test-sim = "pytest -q"
 
+# --- transports feature: real-policy client adapters (OpenPI, GR00T) ---
+# These deps (websockets, msgpack, pyzmq) are never bundled into the tiny
+# stdlib-only containers (fake_delegated_eval) -- only LIBERO's container,
+# which already carries numpy, would ever import these client modules for
+# real. This env exists so the *client/translation* code itself has test
+# coverage on the host without needing a GPU or a real checkpoint (see
+# docs/design/real_policy_adapters.md, M2).
+[feature.transports.dependencies]
+numpy = ">=1.24"
+websockets = ">=12"
+msgpack-python = ">=1.0"
+msgpack-numpy = ">=0.4"
+
+[feature.transports.tasks]
+test-transports = "pytest -q tests/test_openpi_client.py"
+
 [environments]
 sim = ["sim"]
+transports = ["transports"]

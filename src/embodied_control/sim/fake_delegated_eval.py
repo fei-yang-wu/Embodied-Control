@@ -23,8 +23,10 @@ import json
 import random
 from pathlib import Path
 
+from embodied_control.transport.base import PolicyClientProtocol
 from embodied_control.transport.chunking import ChunkScheduler
-from embodied_control.transport.client import PolicyClient, PolicyClientError
+from embodied_control.transport.client import PolicyClientError
+from embodied_control.transport.factory import make_policy_client
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -49,7 +51,7 @@ def _fake_observation(rng: random.Random, env_id: int, episode_id: int, task_id:
     }
 
 
-def run_episode(client: PolicyClient, episode_id: int, seed: int, config: dict) -> dict:
+def run_episode(client: PolicyClientProtocol, episode_id: int, seed: int, config: dict) -> dict:
     key = [0, episode_id]
     client.reset([key], seed)
     rng = random.Random(seed)
@@ -98,8 +100,10 @@ def main(argv: list[str] | None = None) -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     health_timeout_s = float(config.get("health_timeout_s", 30.0))
-    client = PolicyClient(
-        config["policy_host"], config["policy_port"], timeout_s=30.0
+    client = make_policy_client(
+        config.get("policy_scheme", "http"), config["policy_host"], config["policy_port"],
+        timeout_s=30.0, action_dim=config.get("action_dim"),
+        observation_mapping=config.get("policy_observation_mapping"),
     )
     try:
         client.wait_healthy(timeout_s=health_timeout_s)

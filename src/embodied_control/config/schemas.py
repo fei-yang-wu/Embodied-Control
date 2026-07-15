@@ -45,9 +45,26 @@ class RuntimeSpec(BaseModel):
 class EndpointSpec(BaseModel):
     """Connect to an already-running policy service instead of launching one."""
 
-    scheme: Literal["http", "grpc", "zmq"] = "http"
+    scheme: Literal["http", "openpi_websocket", "gr00t_zmq"] = "http"
     host: str = "127.0.0.1"
     port: int
+    # Real-policy adapters can't introspect this from the checkpoint the way
+    # our own debug policies can -- the job author asserts it, and it's
+    # checked against the env's action_dim the same way describe() already
+    # is for http (see orchestration/runner.py's policy_describe phase).
+    action_dim: int | None = None
+    # Scheme-specific translation config (e.g. OpenPIObservationMapping's
+    # fields for "openpi_websocket") -- see docs/design/real_policy_adapters.md.
+    observation_mapping: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _non_http_requires_action_dim(self) -> "EndpointSpec":
+        if self.scheme != "http" and self.action_dim is None:
+            raise ValueError(
+                f"endpoint.action_dim is required when scheme={self.scheme!r} "
+                "(a real-policy adapter can't introspect this from the checkpoint)"
+            )
+        return self
 
 
 class SimSpec(BaseModel):
@@ -138,6 +155,8 @@ class ResolvedEndpoint(BaseModel):
     scheme: str = "http"
     host: str
     port: int
+    action_dim: int | None = None
+    observation_mapping: dict[str, Any] = Field(default_factory=dict)
 
 
 class ResolvedRuntime(BaseModel):
@@ -223,6 +242,12 @@ class RunManifest(BaseModel):
     host: HostFingerprint
     runtimes: list[ResolvedRuntime] = Field(default_factory=list)
     schemas: dict[str, str] = Field(default_factory=dict)
+    # Whatever the policy's describe() returned (policy_id, action_dim, and
+    # for real-policy adapters the checkpoint's own server_metadata) -- so
+    # "which checkpoint produced this success rate" is answerable from the
+    # run directory itself, months later, not just from the job config's
+    # intent (see docs/design/real_policy_adapters.md).
+    policy_describe: dict[str, Any] = Field(default_factory=dict)
     artifact_contract_version: str = ARTIFACT_CONTRACT_VERSION
 
 

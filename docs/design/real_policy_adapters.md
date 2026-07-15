@@ -1,9 +1,9 @@
 # Plan: wiring in real VLA policies (OpenPI, GR00T)
 
-Status: adopted plan, nothing implemented yet. Builds on the research in
-`docs/transport-comparison.md` (protocol details verified against OpenPI and
-GR00T source, then validated against how StarVLA and Isaac Lab-Arena solved
-the same problem). Last updated: 2026-07-14.
+Status: M1 and M2 done. Builds on the research in `docs/transport-comparison.md`
+(protocol details verified against OpenPI and GR00T source, then validated
+against how StarVLA and Isaac Lab-Arena solved the same problem).
+Last updated: 2026-07-14.
 
 ## Goal
 
@@ -107,35 +107,71 @@ Ordering follows the repo's prove-cheap-before-real rule: refactors that
 de-risk under test first, then the transport with a ready-made real
 checkpoint for our proven backend, then the second transport.
 
-### M1 — extract the chunk scheduler + neutral observation (pure refactor)
+### M1 — extract the chunk scheduler + neutral observation (pure refactor) — DONE
 
-The consume/refill loop is duplicated three ways today
-(`orchestration/runner.py:199-241`, `sim/fake_delegated_eval.py:60-74`,
-`sim/libero_eval.py:130-147`), and observation encoding lives in the
-evaluators. Two steps, no new dependencies:
+`transport/chunking.py::ChunkScheduler` (buffer, refill-on-empty, per-request
+horizons bookkeeping) replaced the duplicated logic in the stepped runner,
+`fake_delegated_eval`, and `libero_eval`. Evaluators stopped calling
+`encode_camera` themselves; `PolicyClient.act()` encodes now. HTTP wire bytes
+are byte-identical to before. Verified: `pixi run test` (49 passed) +
+`pixi run -e sim test-sim` (54 passed) green; both Docker images rebuilt,
+`smoke-delegated-docker`/`smoke-libero`/`smoke-libero-image-stats` all pass;
+a live client/server round-trip confirmed a real numpy camera array still
+produces the same bright→+1.0/dark→−1.0 result as the unit tests.
 
-1. `transport/chunking.py::ChunkScheduler` — owns buffer, refill-on-empty,
-   per-request horizons bookkeeping (`num_requests`, `mean_action_horizon`).
-   All three loops refactored onto it.
-2. Neutral observation: evaluators stop calling `encode_camera` themselves;
-   `PolicyClient.act()` encodes. HTTP wire bytes stay identical.
+### M2 — OpenPI adapter — DONE
 
-**Accept when**: `pixi run test` + `pixi run -e sim test-sim` green; fake
-+ LIBERO images rebuilt and their `smoke-*` tasks pass with per-episode
-records equivalent to before.
+Built: `transport/openpi_translate.py` (pure functions —
+`OpenPIObservationMapping`, `observation_to_openpi`, `openpi_action_to_chunk`
+— no network, independently testable), `transport/openpi_client.py`
+(`OpenPIWebsocketClient`, websockets + msgpack-numpy, wire behavior verified
+against OpenPI's actual `websocket_policy_server.py` and
+`websocket_client_policy.py` source rather than assumed — notably `reset()`
+sends nothing over the wire at all, and `/healthz` is a plain HTTP intercept
+before the websocket upgrade, so `health()` never needs to open a session),
+`transport/base.py::PolicyClientProtocol` (the three-implementation
+threshold that justifies formalizing the shared interface), `tests/
+fake_openpi_server.py` (a small fixture speaking the real wire protocol,
+used by `tests/test_openpi_client.py`'s 9 tests — translation unit tests,
+transport round-trip, error path, multi-env rejection, and a full
+`run_eval()` integration test against a real external endpoint). Scheme
+`openpi_websocket` added to `EndpointSpec`/`transport/factory.py`; a new
+`transports` pixi feature (numpy + websockets + msgpack + msgpack-numpy)
+hosts these tests without adding weight to the light default env.
 
-### M2 — OpenPI adapter
+External-server mode needed no new code — `PolicyBinding.endpoint` +
+`RuntimeSpec.type="external"` already existed end-to-end in
+`planner.py`/`supervisor.py` for the HTTP scheme; it now also works for
+`openpi_websocket` for free.
 
-`transport/openpi_client.py` (websockets + msgpack-numpy), a fake
-OpenPI-wire echo server as a test fixture (~60 lines, covered by
-`pixi run test`), factory + schema scheme `openpi_websocket`, handshake
-metadata → `manifest.json`, handshake validation → `validation.json`,
-external-server mode (skip supervisor launch, just `wait_healthy` against a
-configured host:port).
+Two things adjusted from the original sketch, both found while implementing
+rather than assumed upfront:
+
+- **A real bug caught along the way**: `fake_delegated_eval.py` and
+  `libero_eval.py` hardcoded `PolicyClient` (HTTP) regardless of
+  `policy_endpoint.scheme` — a delegated evaluator would have silently tried
+  to speak HTTP to a websocket server. Fixed by routing both through
+  `transport/factory.py::make_policy_client`, same as the stepped path
+  already did. This was a real gap, not a hypothetical: M3 (real LIBERO ×
+  OpenPI) would have hit it immediately.
+- **Handshake validation is partial, not full, and that's deliberate**: the
+  existing `action_dim` mismatch check in `runner.py` (`RunFailure` before
+  any episode runs) now also covers `openpi_websocket`, since
+  `EndpointSpec.action_dim` is asserted by the job author and echoed back
+  through `describe()`. Full validation against the *server's own* declared
+  shape (comparing `observation_mapping` against real metadata fields) isn't
+  built — we don't know the real metadata schema without a real checkpoint,
+  and guessing it would mean hardcoding unverified field names. Deferred to
+  M3, where a real server's actual metadata is available to validate against.
+- **Server metadata now persists into artifacts**: `RunManifest.policy_describe`
+  (new field) captures whatever `describe()` returns — verified end-to-end
+  against the real `ec-libero-eval` Docker image, not just the fixture.
 
 **Accept when**: unit tests round-trip real msgpack frames against the
-fixture; a LIBERO smoke run against the fixture (blank actions) produces
-the full artifact contract including recorded server metadata.
+fixture — done (9/9 passing in `pixi run -e transports test-transports`);
+LIBERO smoke runs against blank actions produce the full artifact contract
+— done (`smoke-libero`, `smoke-libero-image-stats`, both rebuilt images,
+`manifest.json.policy_describe` confirmed populated).
 
 ### M3 — real end-to-end: π0-LIBERO
 

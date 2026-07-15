@@ -56,6 +56,7 @@ def _generate_sim_config(job: EvalJob, plan: ExecutionPlan) -> dict:
         "policy_scheme": plan.policy_endpoint.scheme,
         "policy_host": plan.policy_endpoint.host,
         "policy_port": plan.policy_endpoint.port,
+        "policy_observation_mapping": plan.policy_endpoint.observation_mapping,
         "seeds": plan.seeds,
         "max_steps_per_episode": job.rollout.max_steps_per_episode,
         "action_dim": plan.action_dim,

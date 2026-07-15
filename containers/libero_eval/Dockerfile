@@ -73,6 +73,8 @@ COPY src/embodied_control/transport/__init__.py     /app/src/embodied_control/tr
 COPY src/embodied_control/transport/protocol.py     /app/src/embodied_control/transport/protocol.py
 COPY src/embodied_control/transport/client.py       /app/src/embodied_control/transport/client.py
 COPY src/embodied_control/transport/chunking.py     /app/src/embodied_control/transport/chunking.py
+COPY src/embodied_control/transport/base.py         /app/src/embodied_control/transport/base.py
+COPY src/embodied_control/transport/factory.py      /app/src/embodied_control/transport/factory.py
 COPY src/embodied_control/logging/                  /app/src/embodied_control/logging/
 
 # The host mounts generated/sim_config.json read-only at /generated and the

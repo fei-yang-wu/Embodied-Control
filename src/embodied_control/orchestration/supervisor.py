@@ -87,7 +87,8 @@ class PolicyServiceSupervisor:
             self._handle = self._adapter.start()
 
         self.client = make_policy_client(
-            ep.scheme, ep.host, ep.port, timeout_s=30.0, logger=self.logger.child("transport")
+            ep.scheme, ep.host, ep.port, timeout_s=30.0, logger=self.logger.child("transport"),
+            action_dim=ep.action_dim, observation_mapping=ep.observation_mapping,
         )
         try:
             self.client.wait_healthy(timeout_s=health_timeout_s)
