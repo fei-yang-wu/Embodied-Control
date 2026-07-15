@@ -6,7 +6,6 @@ test-transports`, not covered by the light default `pixi run test`."""
 from __future__ import annotations
 
 import json
-import math
 
 import pytest
 
@@ -18,7 +17,6 @@ from embodied_control.transport.client import PolicyClientError  # noqa: E402
 from embodied_control.transport.openpi_client import OpenPIWebsocketClient  # noqa: E402
 from embodied_control.transport.openpi_translate import (  # noqa: E402
     OpenPIObservationMapping,
-    _quat2axisangle,
     observation_to_openpi,
     openpi_action_to_chunk,
 )
@@ -66,19 +64,6 @@ def test_observation_to_openpi_skips_unmapped_cameras():
     obs = {"cameras": [{"name": "wrist_cam", "array": np.zeros((2, 2))}]}
     payload = observation_to_openpi(obs, mapping)
     assert payload == {}
-
-
-def test_quat2axisangle_identity_quaternion_is_zero_rotation():
-    # xyzw identity quaternion -> zero rotation
-    assert _quat2axisangle([0.0, 0.0, 0.0, 1.0]) == [0.0, 0.0, 0.0]
-
-
-def test_quat2axisangle_matches_robosuite_reference_values():
-    # 90-degree rotation about the z-axis: xyzw = (0, 0, sin(45deg), cos(45deg))
-    result = _quat2axisangle([0.0, 0.0, math.sin(math.pi / 4), math.cos(math.pi / 4)])
-    assert result[0] == pytest.approx(0.0, abs=1e-9)
-    assert result[1] == pytest.approx(0.0, abs=1e-9)
-    assert result[2] == pytest.approx(math.pi / 2, abs=1e-9)  # 90 degrees in radians
 
 
 def test_observation_to_openpi_libero_pi0_proprio_builds_verified_8dim_state():

@@ -80,6 +80,8 @@ embodiment:
 rollout:
   num_episodes: 2
   max_steps_per_episode: 200
+  record_video: true
+  video_fps: 20   # LIBERO's control_freq default is 20Hz
 
 outputs:
   root_dir: ./runs

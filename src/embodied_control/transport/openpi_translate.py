@@ -29,10 +29,11 @@ mean anything.
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, field
 
 import numpy as np
+
+from embodied_control.transport.libero_proprio import eef_pose_and_gripper
 
 
 @dataclass
@@ -51,48 +52,13 @@ class OpenPIObservationMapping:
     libero_pi0_proprio: bool = False
 
 
-def _quat2axisangle(quat: list[float]) -> list[float]:
-    """Direct port of robosuite's quat2axisangle (via OpenPI's own copy in
-    examples/libero/main.py::_quat2axisangle) -- xyzw quaternion -> 3-vector
-    axis-angle. NOT the same as a raw quaternion; a pi0-LIBERO checkpoint
-    was trained on this representation specifically."""
-    qx, qy, qz, qw = quat
-    qw = min(1.0, max(-1.0, qw))
-    den = math.sqrt(1.0 - qw * qw)
-    if math.isclose(den, 0.0):
-        return [0.0, 0.0, 0.0]
-    scale = (2.0 * math.acos(qw)) / den
-    return [qx * scale, qy * scale, qz * scale]
-
-
-def _extract_named(names: list[str], values: list[float], prefix: str) -> list[float]:
-    """Pull ``prefix[0]``, ``prefix[1]``, ... (or bare ``prefix`` if
-    unindexed) out of our flattened proprio names/values, in index order --
-    the inverse of libero_eval.py::_wire_observation's flattening."""
-    indexed = sorted(
-        ((int(n[len(prefix) + 1:-1]), v) for n, v in zip(names, values) if n.startswith(prefix + "[")),
-    )
-    if indexed:
-        return [v for _, v in indexed]
-    return [v for n, v in zip(names, values) if n == prefix]
-
-
 def _libero_pi0_state(proprio: dict) -> np.ndarray:
-    names, values = proprio.get("names") or [], proprio.get("values") or []
-    eef_pos = _extract_named(names, values, "robot0_eef_pos")
-    eef_quat = _extract_named(names, values, "robot0_eef_quat")
-    gripper_qpos = _extract_named(names, values, "robot0_gripper_qpos")
-    if len(eef_pos) != 3 or len(eef_quat) != 4 or len(gripper_qpos) != 2:
-        raise ValueError(
-            "libero_pi0_proprio expects robot0_eef_pos(3)/robot0_eef_quat(4)/"
-            f"robot0_gripper_qpos(2) in the wire proprio; got "
-            f"{len(eef_pos)}/{len(eef_quat)}/{len(gripper_qpos)} -- names present: {names}"
-        )
+    eef_pos, axisangle, gripper_qpos = eef_pose_and_gripper(proprio)
     # Must be a real ndarray, not a plain list: verified live against a real
     # server that its normalization pipeline calls `.shape` on this value
     # (AttributeError: 'list' object has no attribute 'shape' otherwise) --
     # msgpack-numpy only special-cases actual ndarrays over the wire.
-    return np.asarray(eef_pos + _quat2axisangle(eef_quat) + gripper_qpos, dtype=np.float32)
+    return np.asarray(eef_pos + axisangle + gripper_qpos, dtype=np.float32)
 
 
 def _flip_180(array):

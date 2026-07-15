@@ -68,6 +68,62 @@ def test_gr00t_action_to_chunk_raises_on_missing_key():
         gr00t_action_to_chunk({"wrong_key": []}, mapping)
 
 
+# --- libero_gr00t_proprio / libero_gr00t_action presets (nvidia/GR00T-N1.7-LIBERO) ---
+
+def test_observation_to_gr00t_libero_preset_splits_proprio_into_seven_keys():
+    # Verified against gr00t/eval/sim/LIBERO/libero_env.py::_process_observation --
+    # NOT one array like OpenPI's checkpoint, seven individual state.* keys.
+    mapping = Gr00tObservationMapping(libero_gr00t_proprio=True)
+    obs = {
+        "proprio": {
+            "names": [
+                "robot0_eef_pos[0]", "robot0_eef_pos[1]", "robot0_eef_pos[2]",
+                "robot0_eef_quat[0]", "robot0_eef_quat[1]", "robot0_eef_quat[2]", "robot0_eef_quat[3]",
+                "robot0_gripper_qpos[0]", "robot0_gripper_qpos[1]",
+            ],
+            "values": [0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 1.0, 0.04, -0.04],
+        },
+    }
+    payload = observation_to_gr00t(obs, mapping)
+    assert payload["state.x"] == [0.1]
+    assert payload["state.y"] == [0.2]
+    assert payload["state.z"] == [0.3]
+    assert payload["state.roll"] == pytest.approx([0.0])
+    assert payload["state.pitch"] == pytest.approx([0.0])
+    assert payload["state.yaw"] == pytest.approx([0.0])
+    assert payload["state.gripper"] == [0.04, -0.04]
+
+
+def test_libero_gr00t_action_to_chunk_concatenates_and_transforms_gripper():
+    # Verified against gr00t/eval/sim/LIBERO/libero_env.py::step +
+    # normalize_gripper_action/invert_gripper_action -- gripper needs
+    # [0,1]->[-1,1], binarize, then sign flip; the other six dims pass through.
+    mapping = Gr00tObservationMapping(libero_gr00t_action=True)
+    action = {
+        "action.x": [0.1, 0.2], "action.y": [0.0, 0.0], "action.z": [0.0, 0.0],
+        "action.roll": [0.0, 0.0], "action.pitch": [0.0, 0.0], "action.yaw": [0.0, 0.0],
+        "action.gripper": [1.0, 0.0],  # 1.0 (open, raw) -> normalize/binarize/-1 -> -1.0
+                                        # 0.0 (close, raw) -> ... -> +1.0
+    }
+    chunk = gr00t_action_to_chunk(action, mapping)
+    assert chunk == [[0.1, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0], [0.2, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]]
+
+
+def test_libero_gr00t_action_to_chunk_raises_on_missing_key():
+    mapping = Gr00tObservationMapping(libero_gr00t_action=True)
+    action = {"action.x": [0.1]}  # missing the rest
+    with pytest.raises(KeyError):
+        gr00t_action_to_chunk(action, mapping)
+
+
+def test_observation_to_gr00t_flips_images_180_when_enabled():
+    mapping = Gr00tObservationMapping(camera_keys={"agentview_image": "video.image"}, flip_images_180=True)
+    array = np.arange(9).reshape(3, 3, 1)
+    obs = {"cameras": [{"name": "agentview_image", "array": array}]}
+    result = observation_to_gr00t(obs, mapping)["video.image"]
+    assert np.array_equal(result, array[::-1, ::-1])
+
+
 # --- real wire round-trip against a fake GR00T-protocol server ------------
 
 def _get_action(observation, options=None):
