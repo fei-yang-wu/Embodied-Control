@@ -113,3 +113,21 @@ def test_real_policy_adapter_example_jobs_load_and_validate():
         assert job.policy.endpoint.scheme == scheme
         assert job.policy.endpoint.action_dim == job.sim.action_dim
         assert job.policy.endpoint.observation_mapping.get("proprio_key")
+
+
+def test_runtime_command_override_launches_and_produces_valid_run(tmp_path):
+    """End-to-end proof that RuntimeSpec.command actually gets launched (not
+    just resolved correctly in isolation, per test_config_and_planner.py) --
+    stands in for a real policy server launch command using the debug server
+    module itself as an arbitrary target, since the point being tested is
+    'the supervisor launches exactly this command', not which server it is."""
+    import sys
+
+    job = _job(tmp_path, num_ep=1, steps=5)
+    job.policy.runtime.command = [
+        sys.executable, "-m", "embodied_control.policies.debug_server",
+        "--type", "random", "--action-dim", "3", "--host", "{host}", "--port", "{port}",
+    ]
+    result = run_eval(job)
+    assert result.status == "succeeded", result
+    assert result.metrics.num_episodes_completed == 1

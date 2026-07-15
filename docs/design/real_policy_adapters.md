@@ -239,10 +239,27 @@ same pattern as M2).
 
 ### M5 — deferred, explicitly out of scope for now
 
-Managed launching of real policy servers (generalizing
-`PolicyServiceSupervisor` beyond the debug server's CLI), GPU passthrough
-for containerized serving, batched multi-env against real servers,
-IsaacLab-Arena as a sim backend.
+GPU passthrough for containerized serving, batched multi-env against real
+servers, IsaacLab-Arena as a sim backend.
+
+**Partially done, ahead of schedule**: "managed launching of real policy
+servers" turned out to have a cheap, testable slice that didn't need to wait
+for M3's GPU/checkpoint access — `RuntimeSpec.command` (with `{host}`/
+`{port}` substitution) lets a job override the built-in debug-server launch
+command entirely, so a real OpenPI/GR00T server's actual CLI (once known)
+can be launched the same way the debug server is today, through the same
+`PolicyServiceSupervisor`/`DockerRuntimeAdapter`/`LocalRuntimeAdapter`
+machinery. Building the *Docker images* that wrap real serving scripts (with
+real GPU deps, real checkpoints mounted) is still M3's job, not this — this
+just means the orchestrator no longer needs new code to launch them once
+that image exists. Caught and fixed a real, separate bug while doing this:
+`orchestration/planner.py` and `orchestration/supervisor.py` used to build
+the launch command independently in two places, and the one persisted into
+`resolved_job.yaml` (the planner's copy) had silently drifted from the one
+actually executed (the supervisor's copy was missing
+`--max-action-horizon`). Consolidated into one function in `planner.py`;
+`supervisor.py` now just launches `plan.policy_runtime.command` instead of
+recomputing it.
 
 ## Risks / open questions
 

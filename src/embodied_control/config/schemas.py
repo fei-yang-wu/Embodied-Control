@@ -40,6 +40,13 @@ class RuntimeSpec(BaseModel):
     mounts: list[MountSpec] = Field(default_factory=list)
     container_port: int = 8000  # port the service binds *inside* a container
     shm_size: str | None = None  # docker-only; left None so it is honorable on all engines
+    # Explicit launch command, verbatim (each element may reference "{host}"/
+    # "{port}", substituted at launch time). Overrides the built-in debug-
+    # server command builder -- required for launching anything other than
+    # our own debug policy service, since a real server's CLI shape (e.g.
+    # OpenPI's serve_policy.py, GR00T's start_server) isn't something we can
+    # derive from job.policy.type. See docs/design/real_policy_adapters.md.
+    command: list[str] | None = None
 
 
 class EndpointSpec(BaseModel):

@@ -82,6 +82,38 @@ def test_planner_docker_requires_image():
     assert plan.policy_runtime.host_port and plan.policy_runtime.container_port == 8000
 
 
+def test_planner_builds_debug_server_command_with_max_action_horizon(tmp_path):
+    """Regression guard: the command persisted into resolved_job.yaml must be
+    the exact command the supervisor launches (see
+    orchestration/planner.py::_resolve_policy_command) -- these two used to
+    drift, with the persisted one silently missing --max-action-horizon."""
+    job = load_job(EXAMPLES / "mujoco_zero_local.yaml")
+    plan = planner_mod.build_plan(
+        job, action_dim=2, action_schema_id="a", observation_schema_id="o",
+        now=datetime(2026, 7, 7, 21, 0, 0),
+    )
+    command = plan.policy_runtime.command
+    assert "--max-action-horizon" in command
+    assert command[0:1] == [__import__("sys").executable]
+    assert "embodied_control.policies.debug_server" in command
+
+
+def test_runtime_command_override_is_used_verbatim_with_host_port_substitution(tmp_path):
+    """A job author's explicit runtime.command (needed for a real policy
+    server whose CLI shape we can't derive -- see
+    docs/design/real_policy_adapters.md) replaces the built-in debug-server
+    command entirely, with {host}/{port} substituted."""
+    job = load_job(EXAMPLES / "mujoco_zero_local.yaml")
+    job.policy.runtime.command = ["fake-server", "--listen", "{host}:{port}", "--checkpoint", "/ckpt"]
+    plan = planner_mod.build_plan(
+        job, action_dim=2, action_schema_id="a", observation_schema_id="o",
+        now=datetime(2026, 7, 7, 21, 0, 0),
+    )
+    assert plan.policy_runtime.command == [
+        "fake-server", "--listen", f"127.0.0.1:{plan.policy_endpoint.port}", "--checkpoint", "/ckpt",
+    ]
+
+
 def test_planner_dedupes_run_id_when_run_dir_already_exists(tmp_path):
     """Two plans built for the same job/seed/timestamp must not collide on the
     same run_dir (which would silently overwrite the first run's artifacts and,

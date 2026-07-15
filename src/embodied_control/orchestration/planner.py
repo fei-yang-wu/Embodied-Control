@@ -25,6 +25,41 @@ from embodied_control.config.schemas import (
 )
 from embodied_control.runtime.ports import allocate_free_port
 
+_POLICY_MAX_ACTION_HORIZON = 32  # headroom above any example's requested_action_horizon
+
+
+def _resolve_policy_command(
+    pol, action_dim: int, action_schema_id: str, seed: int, host: str, port: int, local: bool
+) -> list[str]:
+    """The actual command a runtime adapter launches -- built once here (the
+    single source of truth persisted into ``resolved_job.yaml``/the manifest)
+    rather than recomputed independently by the supervisor, which used to
+    silently drift from what got persisted (the persisted command was missing
+    ``--max-action-horizon`` before this).
+
+    ``pol.runtime.command``, if set, overrides the built-in debug-server
+    command entirely (each element may reference ``"{host}"``/``"{port}"``,
+    substituted here) -- this is what a real policy server (OpenPI, GR00T)
+    needs, since their CLI shape isn't something we can derive from
+    ``job.policy.type``. See ``docs/design/real_policy_adapters.md``.
+    """
+    if pol.runtime.command is not None:
+        return [part.format(host=host, port=port) for part in pol.runtime.command]
+    flags = [
+        "--type", pol.type,
+        "--action-dim", str(action_dim),
+        "--action-schema-id", action_schema_id,
+        "--host", host,
+        "--port", str(port),
+        "--seed", str(seed),
+        "--max-action-horizon", str(_POLICY_MAX_ACTION_HORIZON),
+    ]
+    if local:
+        # Docker images' ENTRYPOINT already invokes the debug server module;
+        # a local subprocess has to spell it out.
+        return [sys.executable, "-m", "embodied_control.policies.debug_server"] + flags
+    return flags
+
 
 def _slug(text: str) -> str:
     return re.sub(r"[^a-zA-Z0-9]+", "_", text).strip("_").lower() or "job"
@@ -107,14 +142,9 @@ def build_plan(
             container_name=container_name,
             host_port=host_port,
             container_port=container_port,
-            command=[
-                "--type", pol.type,
-                "--action-dim", str(action_dim),
-                "--action-schema-id", action_schema_id,
-                "--host", "0.0.0.0",
-                "--port", str(container_port),
-                "--seed", str(job.seed),
-            ],
+            command=_resolve_policy_command(
+                pol, action_dim, action_schema_id, job.seed, "0.0.0.0", container_port, local=False
+            ),
         )
         endpoint = ResolvedEndpoint(scheme="http", host="127.0.0.1", port=host_port)
     else:  # local subprocess
@@ -123,15 +153,9 @@ def build_plan(
             name="policy",
             type="local",
             host_port=host_port,
-            command=[
-                sys.executable, "-m", "embodied_control.policies.debug_server",
-                "--type", pol.type,
-                "--action-dim", str(action_dim),
-                "--action-schema-id", action_schema_id,
-                "--host", "127.0.0.1",
-                "--port", str(host_port),
-                "--seed", str(job.seed),
-            ],
+            command=_resolve_policy_command(
+                pol, action_dim, action_schema_id, job.seed, "127.0.0.1", host_port, local=True
+            ),
         )
         endpoint = ResolvedEndpoint(scheme="http", host="127.0.0.1", port=host_port)
 
