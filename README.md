@@ -363,10 +363,11 @@ scripts/            build_*_image.sh, push_image.sh (-> ghcr.io)
 ## Tests
 
 ```bash
-pixi run test              # light env: schemas, transport, policies (incl. camera wire protocol),
-                            # metrics, validation, logging, runtime adapters, delegated eval
-                            # (mujoco eval skipped)
-pixi run -e sim test-sim   # full suite incl. end-to-end MuJoCo evals
+pixi run test                          # light env: schemas, transport, policies (incl. camera wire
+                                        # protocol), metrics, validation, logging, runtime adapters,
+                                        # delegated eval (mujoco + openpi/gr00t adapter tests skipped)
+pixi run -e sim test-sim               # full suite incl. end-to-end MuJoCo evals
+pixi run -e transports test-transports # OpenPI + GR00T client adapter tests (websockets/pyzmq/msgpack)
 ```
 
 Delegated-mode tests run in the light default env (no mujoco/docker needed):
@@ -379,19 +380,49 @@ in particular is too heavy (image build, CPU rendering) for a test suite that
 should stay fast; it was verified manually end to end (zero and random
 policies, real task, real success/failure signal, artifacts validated).
 
+## Real VLA policy transports (OpenPI, GR00T)
+
+`transport/openpi_client.py` and `transport/gr00t_client.py` speak OpenPI's
+(websocket + msgpack-numpy) and GR00T's (ZeroMQ + msgpack) real wire
+protocols directly, verified against each project's actual server/client
+source — not our own HTTP/JSON forced onto them. Point a job at an
+already-running server with no launch config needed:
+
+```yaml
+policy:
+  endpoint:
+    scheme: openpi_websocket   # or gr00t_zmq
+    host: 127.0.0.1
+    port: 8000
+    action_dim: 7              # asserted by you; checked against the env's action_dim
+    observation_mapping:       # translates our neutral observation into the
+      proprio_key: "observation/state"   # checkpoint's expected keys — see
+      prompt_key: "prompt"               # transport/openpi_translate.py /
+      camera_keys:                       # transport/gr00t_translate.py
+        agentview_image: "observation/image"
+```
+
+Test with `pixi run -e transports test-transports` (websockets/pyzmq/msgpack/
+numpy — kept out of the light default env; see `pixi.toml`'s `transports`
+feature). Both adapters are exercised against fake servers speaking the real
+wire protocol (`tests/fake_openpi_server.py`, `tests/fake_gr00t_server.py`),
+including a full `run_eval()` run — see `docs/design/real_policy_adapters.md`
+for what's built, what's deliberately scoped down (e.g. GR00T's
+`ModalityConfig` is unwrapped into a plain dict rather than reconstructed as
+a real object, to avoid depending on the full `gr00t` package), and why
+wiring in an actual checkpoint (not just the transport) is the next step.
+
 ## Not in this milestone
 
-Real VLA services (GR00T/OpenPI) on LIBERO — the harness drives real LIBERO
-episodes and now sends real camera observations over the wire (see "LIBERO"
-above), but only our own debug policies (zero/random/`image_stats`) actually
-connect to it so far; a real model still needs its own client wired in.
-OpenPI and GR00T each speak their own transport (websocket+msgpack and ZMQ
-respectively, not our HTTP/JSON), so that's new client code behind the
-existing `PolicyClient`-shaped interface, not a wire-protocol change. Also not
-yet: gRPC/ZMQ transports for *our own* protocol (not needed yet — HTTP/JSON
-payloads are small at 128×128; would matter at higher resolution/frequency),
-JPEG/compressed image encoding (raw is small enough for now), GPU passthrough
-for LIBERO's containerized rendering (works today via CPU OSMesa; EGL would
-need NVIDIA Container Toolkit configured on the Docker daemon), Apptainer/HPC,
+**A real checkpoint actually loaded and answering** — the transports above
+are proven against fake servers, not a real trained model; that needs a GPU
+host and downloaded weights (`docs/design/real_policy_adapters.md`'s M3).
+Also not yet: managed launching of a real policy server (today you point at
+one that's already running; `PolicyServiceSupervisor` still only knows how
+to launch our own debug server), gRPC transport for *our own* protocol (not
+needed — HTTP/JSON payloads are small at 128×128), JPEG/compressed image
+encoding (raw is small enough for now), GPU passthrough for LIBERO's
+containerized rendering (works today via CPU OSMesa; EGL would need NVIDIA
+Container Toolkit configured on the Docker daemon), Apptainer/HPC,
 IsaacLab-Arena, CI-based image builds, and cross-run comparison reporting.
 See the design doc for the sequencing.

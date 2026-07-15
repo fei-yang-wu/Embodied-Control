@@ -1,0 +1,55 @@
+# Delegated-mode eval driven against an OpenPI server that's already running
+# somewhere reachable (a GPU workstation, a lab server) -- the host doesn't
+# launch anything for the policy, just connects and speaks its real
+# websocket+msgpack-numpy protocol (transport/openpi_client.py). Same fake
+# sim backend as fake_delegated_local.yaml so this proves the transport/
+# orchestration wiring without needing LIBERO's own dependency risk on top.
+#
+# Not runnable as-is: point `policy.endpoint.host`/`port` at a real running
+# OpenPI server (`python scripts/serve_policy.py ...` from the openpi repo)
+# and fill in `observation_mapping` with that checkpoint's actual expected
+# keys (see docs/design/real_policy_adapters.md, M3 -- the mapping below is
+# illustrative, not verified against any specific checkpoint).
+api_version: ec.eval/v1alpha1
+name: fake_delegated_openpi_external
+seed: 11
+tags:
+  backend: fake_delegated
+  mode: delegated
+  policy: openpi_external
+
+sim:
+  backend: fake_delegated
+  mode: delegated
+  action_dim: 7
+  runtime:
+    type: local
+  timeout_s: 60
+  backend_config:
+    task_id: fake_reach_task
+
+policy:
+  endpoint:
+    scheme: openpi_websocket
+    host: 127.0.0.1
+    port: 8000              # wherever your OpenPI serve_policy.py is listening
+    action_dim: 7            # asserted here; checked against sim.action_dim at policy_describe
+    observation_mapping:
+      proprio_key: "observation/state"
+      prompt_key: "prompt"
+      camera_keys:
+        agentview_image: "observation/image"
+        robot0_eye_in_hand_image: "observation/wrist_image"
+  requested_action_horizon: 10  # advisory only for a real checkpoint -- see transport/openpi_client.py
+
+embodiment:
+  observation_schema_id: ec.obs.fake_delegated/v1
+  action_schema_id: ec.action.fake_delegated/v1
+
+rollout:
+  num_episodes: 2
+  max_steps_per_episode: 40
+
+outputs:
+  root_dir: ./runs
+  run_name_template: "{date}_{name}_{seed}"

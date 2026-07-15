@@ -98,3 +98,18 @@ def test_libero_example_job_loads_and_validates():
     assert job.sim.runtime.type == "docker"
     assert job.sim.backend_config["suite"] == "libero_spatial"
     assert isinstance(job.sim.backend_config["task_index"], int)
+
+
+def test_real_policy_adapter_example_jobs_load_and_validate():
+    # Schema-only, like the LIBERO example above: these point at an external
+    # server that isn't actually running in CI (see docs/design/
+    # real_policy_adapters.md M3), so real execution isn't automated here --
+    # this just guards the YAML/schema contract itself from silently drifting.
+    for name, scheme in [
+        ("fake_delegated_openpi_external.yaml", "openpi_websocket"),
+        ("fake_delegated_gr00t_external.yaml", "gr00t_zmq"),
+    ]:
+        job = load_job(EXAMPLES / name)
+        assert job.policy.endpoint.scheme == scheme
+        assert job.policy.endpoint.action_dim == job.sim.action_dim
+        assert job.policy.endpoint.observation_mapping.get("proprio_key")

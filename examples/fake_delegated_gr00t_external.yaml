@@ -1,0 +1,48 @@
+# Same shape as fake_delegated_openpi_external.yaml but for a GR00T server
+# (ZeroMQ REQ/REP + msgpack, transport/gr00t_client.py). Not runnable as-is --
+# point at a real running GR00T PolicyServer and fill in observation_mapping
+# with that checkpoint's actual modality keys (call get_modality_config() /
+# check describe()'s recorded output once a real server exists; the mapping
+# below is illustrative, not verified against any specific checkpoint).
+api_version: ec.eval/v1alpha1
+name: fake_delegated_gr00t_external
+seed: 11
+tags:
+  backend: fake_delegated
+  mode: delegated
+  policy: gr00t_external
+
+sim:
+  backend: fake_delegated
+  mode: delegated
+  action_dim: 7
+  runtime:
+    type: local
+  timeout_s: 60
+  backend_config:
+    task_id: fake_reach_task
+
+policy:
+  endpoint:
+    scheme: gr00t_zmq
+    host: 127.0.0.1
+    port: 5555               # GR00T's DEFAULT_MODEL_SERVER_PORT
+    action_dim: 7
+    observation_mapping:
+      proprio_key: "state.joint_position"
+      prompt_key: "annotation.human.action.task_description"
+      camera_keys:
+        agentview_image: "video.ego_view"
+  requested_action_horizon: 16  # advisory only for a real checkpoint -- see transport/gr00t_client.py
+
+embodiment:
+  observation_schema_id: ec.obs.fake_delegated/v1
+  action_schema_id: ec.action.fake_delegated/v1
+
+rollout:
+  num_episodes: 2
+  max_steps_per_episode: 40
+
+outputs:
+  root_dir: ./runs
+  run_name_template: "{date}_{name}_{seed}"
