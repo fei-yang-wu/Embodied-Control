@@ -408,15 +408,19 @@ feature). Both adapters are exercised against fake servers speaking the real
 wire protocol (`tests/fake_openpi_server.py`, `tests/fake_gr00t_server.py`),
 including a full `run_eval()` run.
 
-**A real checkpoint has actually been run and succeeded**: OpenPI's public
-`pi05_libero`, driven through this repo's own orchestrator against real
-LIBERO episodes — `examples/libero_openpi_external.yaml`,
-`docs/design/real_policy_adapters.md`'s M3 section has the full result and
-the (real, only-found-by-actually-running-it) bugs that surfaced along the
-way. **Important**: the process running `ec eval run` needs the same
-transport deps as the job's `policy.endpoint.scheme` — use
-`pixi run -e transports ec eval run <job>.yaml` for any job with
-`scheme: openpi_websocket`/`gr00t_zmq`, not the light default env.
+**Both real checkpoints have actually been run and succeeded**: OpenPI's
+public `pi05_libero` (`examples/libero_openpi_external.yaml`) and NVIDIA's
+public `GR00T-N1.7-LIBERO` (`examples/libero_gr00t_external.yaml`), each
+driven through this repo's own orchestrator against real LIBERO episodes
+with video evidence. `docs/design/real_policy_adapters.md`'s M3/M4 sections
+have the full results and the real, only-found-by-actually-running-them
+bugs that surfaced along the way — a *different* wire-envelope mismatch for
+each transport, neither one catchable by reading source or running the
+fixture-based unit tests alone. **Important**: the process running
+`ec eval run` needs the same transport deps as the job's
+`policy.endpoint.scheme` — use `pixi run -e transports ec eval run
+<job>.yaml` for any job with `scheme: openpi_websocket`/`gr00t_zmq`, not the
+light default env.
 
 ## Not in this milestone
 

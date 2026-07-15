@@ -1,7 +1,10 @@
 """GR00T-native transport client: ZeroMQ (REQ/REP) + msgpack.
 
-Speaks GR00T's actual wire protocol, verified against
-``gr00t/policy/server_client.py`` (NVIDIA/Isaac-GR00T, 2026-07-14):
+Speaks GR00T's actual wire protocol, verified live against a real,
+locally-running server (``NVIDIA/Isaac-GR00T``, checked out at a 2026-04-17
+commit -- see ``gr00t_msgpack.py``'s docstring for why "verified against
+source" isn't enough on its own; this project's ``main`` branch had already
+diverged by the time it was researched):
 
 - Raw ZeroMQ, ``zmq.REQ`` client / ``zmq.REP`` server, ``tcp://{host}:{port}``,
   default port 5555. REQ/REP is strictly synchronous -- one request in
@@ -16,18 +19,21 @@ Speaks GR00T's actual wire protocol, verified against
   input ``{"observation": ..., "options": ...}``, returns a 2-list
   ``[action, info]``), ``reset`` (input ``{"options": ...}``),
   ``get_modality_config`` (describe, no input).
+- Wire serialization is ``gr00t_msgpack.py`` -- a faithful port of this
+  server's *actual* ``MsgSerializer`` (npy-embedded-in-msgpack for arrays),
+  not the generic ``msgpack-numpy`` package this module used before a live
+  round-trip proved it wire-incompatible (arrays arrived server-side as
+  undecoded dicts, not a transport error).
 
 **Deliberate scope-down from the real client**: GR00T's own
 ``MsgSerializer`` decodes a ``ModalityConfig`` marker into a real
 ``gr00t.data.types.ModalityConfig`` dataclass -- reconstructing that
 would require depending on the full (heavy, GPU-oriented) ``gr00t``
 package, not a small client library, defeating the point of a lightweight
-adapter. ``_from_bytes`` below unwraps the same wire marker into a plain
-dict (via its embedded JSON payload) instead of a live object -- enough to
-inspect/log/persist the checkpoint's declared modality shapes, not enough
-to be a drop-in for code written against the real ``PolicyClient``. The
-pickle-refusal behavior *is* mirrored (both directions) since that's a wire
-security property, not a GR00T-package dependency.
+adapter. ``gr00t_msgpack.py`` unwraps the same wire marker into a plain
+dict instead of a live object -- enough to inspect/log/persist the
+checkpoint's declared modality shapes, not enough to be a drop-in for code
+written against the real ``PolicyClient``.
 
 Scoped to a single env per client connection (see
 ``docs/design/real_policy_adapters.md``, "Single-env scoping for real
@@ -36,51 +42,19 @@ adapters").
 
 from __future__ import annotations
 
-import json
 import time
 from typing import Any
 
-import msgpack
-import msgpack_numpy as mnp
-import numpy as np
 import zmq
 
 from embodied_control.logging.logger import EcLogger
+from embodied_control.transport import gr00t_msgpack
 from embodied_control.transport.client import PolicyClientError
 from embodied_control.transport.gr00t_translate import (
     Gr00tObservationMapping,
     gr00t_action_to_chunk,
     observation_to_gr00t,
 )
-
-
-def _encode(obj: Any) -> Any:
-    if isinstance(obj, np.ndarray) and obj.dtype.kind == "O":
-        raise ValueError(f"refusing to encode object-dtype ndarray (shape={obj.shape})")
-    return mnp.encode(obj)
-
-
-def _decode(obj: Any) -> Any:
-    if isinstance(obj, dict):
-        marker = obj.get("__ModalityConfig__", obj.get(b"__ModalityConfig__"))
-        if marker:
-            payload = obj.get("as_json", obj.get(b"as_json"))
-            if isinstance(payload, bytes):
-                payload = payload.decode()
-            return json.loads(payload) if isinstance(payload, str) else payload
-        nd_val = obj.get(b"nd", obj.get("nd"))
-        kind_val = obj.get(b"kind", obj.get("kind"))
-        if nd_val and kind_val in (b"O", "O"):
-            raise ValueError("refusing to decode object-dtype ndarray payload (pickle-bearing)")
-    return mnp.decode(obj)
-
-
-def _to_bytes(data: Any) -> bytes:
-    return msgpack.packb(data, default=_encode)
-
-
-def _from_bytes(data: bytes) -> Any:
-    return msgpack.unpackb(data, object_hook=_decode, raw=False)
 
 
 class Gr00tZmqClient:
@@ -129,7 +103,7 @@ class Gr00tZmqClient:
             request["api_token"] = self.api_token
 
         try:
-            self._socket.send(_to_bytes(request))
+            self._socket.send(gr00t_msgpack.to_bytes(request))
             message = self._socket.recv()
         except zmq.error.Again as exc:
             # REQ socket is now in an invalid state (waiting for a reply that
@@ -153,7 +127,7 @@ class Gr00tZmqClient:
                 f"gr00t policy server returned a raw error on {endpoint!r} "
                 "(malformed request or wrong policy loaded)"
             )
-        response = _from_bytes(message)
+        response = gr00t_msgpack.from_bytes(message)
         if isinstance(response, dict) and "error" in response:
             raise PolicyClientError(f"gr00t policy server error on {endpoint!r}: {response['error']}")
         return response

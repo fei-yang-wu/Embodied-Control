@@ -85,13 +85,20 @@ def test_observation_to_gr00t_libero_preset_splits_proprio_into_seven_keys():
         },
     }
     payload = observation_to_gr00t(obs, mapping)
-    assert payload["state.x"] == [0.1]
-    assert payload["state.y"] == [0.2]
-    assert payload["state.z"] == [0.3]
-    assert payload["state.roll"] == pytest.approx([0.0])
-    assert payload["state.pitch"] == pytest.approx([0.0])
-    assert payload["state.yaw"] == pytest.approx([0.0])
-    assert payload["state.gripper"] == [0.04, -0.04]
+    # (B=1, T=1, D) float32 -- Gr00tSimPolicyWrapper.check_observation
+    # requires this exact shape/dtype, verified live against a real server
+    # (see gr00t_translate.py's module docstring).
+    for key in ("state.x", "state.y", "state.z", "state.roll", "state.pitch", "state.yaw"):
+        assert payload[key].shape == (1, 1, 1)
+        assert payload[key].dtype == np.float32
+    assert payload["state.gripper"].shape == (1, 1, 2)
+    assert payload["state.x"][0, 0, 0] == pytest.approx(0.1)
+    assert payload["state.y"][0, 0, 0] == pytest.approx(0.2)
+    assert payload["state.z"][0, 0, 0] == pytest.approx(0.3)
+    assert payload["state.roll"][0, 0, 0] == pytest.approx(0.0)
+    assert payload["state.pitch"][0, 0, 0] == pytest.approx(0.0)
+    assert payload["state.yaw"][0, 0, 0] == pytest.approx(0.0)
+    assert payload["state.gripper"][0, 0].tolist() == pytest.approx([0.04, -0.04])
 
 
 def test_libero_gr00t_action_to_chunk_concatenates_and_transforms_gripper():
@@ -124,6 +131,31 @@ def test_observation_to_gr00t_flips_images_180_when_enabled():
     assert np.array_equal(result, array[::-1, ::-1])
 
 
+def test_observation_to_gr00t_libero_preset_batches_video_with_flip():
+    # Gr00tSimPolicyWrapper.check_observation requires (B=1, T=1, H, W, 3)
+    # uint8 for every video.* key -- verified live against a real server.
+    mapping = Gr00tObservationMapping(
+        camera_keys={"agentview_image": "video.image"},
+        flip_images_180=True, libero_gr00t_proprio=True,
+    )
+    array = np.arange(27, dtype=np.uint8).reshape(3, 3, 3)
+    obs = {
+        "cameras": [{"name": "agentview_image", "array": array}],
+        "proprio": {
+            "names": [
+                "robot0_eef_pos[0]", "robot0_eef_pos[1]", "robot0_eef_pos[2]",
+                "robot0_eef_quat[0]", "robot0_eef_quat[1]", "robot0_eef_quat[2]", "robot0_eef_quat[3]",
+                "robot0_gripper_qpos[0]", "robot0_gripper_qpos[1]",
+            ],
+            "values": [0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 1.0, 0.04, -0.04],
+        },
+    }
+    result = observation_to_gr00t(obs, mapping)["video.image"]
+    assert result.shape == (1, 1, 3, 3, 3)
+    assert result.dtype == np.uint8
+    assert np.array_equal(result[0, 0], array[::-1, ::-1])
+
+
 # --- real wire round-trip against a fake GR00T-protocol server ------------
 
 def _get_action(observation, options=None):
@@ -133,7 +165,10 @@ def _get_action(observation, options=None):
 
 
 def _get_modality_config():
-    return {"__ModalityConfig__": True, "as_json": json.dumps({"video.ego_view": {"shape": [224, 224, 3]}})}
+    # Real marker/shape verified live against gr00t/policy/server_client.py::
+    # MsgSerializer -- "__ModalityConfig_class__" (not "__ModalityConfig__"),
+    # "as_json" a plain dict (not a JSON string).
+    return {"__ModalityConfig_class__": True, "as_json": {"video.ego_view": {"shape": [224, 224, 3]}}}
 
 
 def test_act_round_trips_real_msgpack_frames():

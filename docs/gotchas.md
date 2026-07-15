@@ -29,9 +29,47 @@ used by both the real client and the test fixture now, so they can no
 longer silently agree on the wrong thing. **Lesson**: a test fixture that
 you also wrote is not independent verification of wire compatibility with a
 *third party's* real implementation — it only proves self-consistency.
-GR00T's real server was checked against this same risk and found *not*
-affected (its `MsgSerializer` calls the generic package's own `encode`/
-`decode` functions directly, verified in `gr00t/policy/server_client.py`).
+
+**Corollary, caught the same way for GR00T**: this doc originally claimed
+GR00T's real server was *not* affected by the risk above, because its
+`MsgSerializer` "calls the generic package's own `encode`/`decode`
+functions directly" — that was true of `NVIDIA/Isaac-GR00T`'s `main` branch
+as read via `gh api` during initial research, but the *actual,
+locally-running* server used for real verification (a checkout pinned to an
+April 2026 commit, already older than `main` by the time it was researched)
+turned out to use a **third, different** envelope entirely:
+`{"__ndarray_class__": True, "as_npy": <np.save bytes>}`. Same failure
+shape as the OpenPI bug (`"Video key 'image' must be a numpy array. Got
+<class 'dict'>"`, not a transport error), fixed the same way
+(`transport/gr00t_msgpack.py`, a faithful port of the *actually running*
+server's real `MsgSerializer`). **The lesson generalizes past "verify
+against source"**: two clones of "the same" upstream project, or a local
+checkout vs. that project's current `main`, can genuinely disagree — verify
+wire compatibility against the specific server version actually being
+talked to, not against whichever commit a research pass happened to land
+on, even when that research quoted real source correctly at the time.
+
+**GR00T's server rejects a flat `video.image`/`state.x`-style observation
+by default — `--use-sim-policy-wrapper` is required, not optional, for the
+shape this repo's LIBERO evaluator (and GR00T's own reference LIBERO env
+wrapper) produces.** Without that flag, `Gr00tPolicy.check_observation`
+expects a *nested* `{"video": {"image": ...}, "state": {"x": ...}}`
+structure and every request fails immediately with `"Observation must
+contain a 'video' key"`. `Gr00tSimPolicyWrapper` (enabled by the flag)
+accepts the flat keys and reshapes them internally.
+
+**Even with the sim policy wrapper enabled, every array needs explicit
+batch and time dimensions, not just the right key names.**
+`Gr00tSimPolicyWrapper.check_observation` asserts `ndim==3`, shape
+`(B=1, T=1, D)`, dtype `float32` for every `state.*` key, and `ndim==5`,
+shape `(B=1, T=1, H, W, 3)`, dtype `uint8` for every `video.*` key — a bare
+`(H, W, 3)` image or an unbatched Python list of floats fails with a clear
+`AssertionError`, not a silent wrong-shape bug (better than OpenPI's
+silent-corruption failure mode, but still only discoverable by actually
+running a request through). Fixed in `transport/gr00t_translate.py`
+(`_batch_state`/`_batch_video` on the way in, `_unbatch` — a flat reshape,
+not an assumed exact shape, since the wrapper's own docstring only commits
+to `ndim==3` — on the way out).
 
 **A real OpenPI server's normalization pipeline requires `observation/state`
 to be a numpy ndarray, not a plain Python list** — `AttributeError: 'list'
@@ -40,6 +78,15 @@ transform otherwise. msgpack-numpy only special-cases actual `np.ndarray`/
 `np.generic` objects over the wire; a Python list survives the round-trip as
 a list. Fixed in `transport/openpi_translate.py` (`_libero_pi0_state` and
 the generic proprio path both now build `np.asarray(..., dtype=np.float32)`).
+
+**GR00T's `run_gr00t_server` defaults to binding all network interfaces
+(`host="*"`), not localhost.** Launching it without an explicit `--host
+127.0.0.1` exposes an unauthenticated ZeroMQ inference listener to the
+whole network, not just this machine — always pass `--host 127.0.0.1`
+explicitly for local development/testing unless remote access is
+genuinely intended and access-controlled some other way. Caught before
+this mattered: the harness's own auto-mode classifier flagged the
+default-bind launch command before it ran.
 
 **`ec eval run` needs the same transport dependencies as the job's
 `policy.endpoint.scheme`, in the process running the CLI itself — not just

@@ -9,12 +9,22 @@ defaults are placeholders, not verified against any specific checkpoint.
 checkpoint-specific preprocessing verified against GR00T's own reference
 LIBERO env wrapper (``gr00t/eval/sim/LIBERO/libero_env.py``,
 NVIDIA/Isaac-GR00T, 2026-07-15) for the public `nvidia/GR00T-N1.7-LIBERO`
-checkpoint. **Structurally different from OpenPI's LIBERO preset, not just a
-renamed copy**: GR00T-LIBERO splits proprioception into seven individual
-``state.x``/``state.y``/``state.z``/``state.roll``/``state.pitch``/
-``state.yaw``/``state.gripper`` keys (not one ``observation/state`` array),
-and the action side is the mirror image -- seven separate ``action.*`` keys
-in the response, concatenated back into a single 7-vector here, with the
+checkpoint, served with ``--use-sim-policy-wrapper`` (``gr00t/policy/
+gr00t_policy.py::Gr00tSimPolicyWrapper``). **Structurally different from
+OpenPI's LIBERO preset, not just a renamed copy**: GR00T-LIBERO splits
+proprioception into seven individual ``state.x``/``state.y``/``state.z``/
+``state.roll``/``state.pitch``/``state.yaw``/``state.gripper`` keys (not one
+``observation/state`` array), each a real ``float32`` ndarray with explicit
+batch+time dims -- ``Gr00tSimPolicyWrapper.check_observation`` asserts
+``ndim==3``, shape ``(B, T, D)``, dtype ``float32`` for every state key, and
+``ndim==5``, shape ``(B, T, H, W, 3)``, dtype ``uint8`` for every video key
+(``B=T=1`` here -- one env, one current-timestep observation, no history).
+A Python list/scalar or a mismatched dtype fails validation server-side with
+an ``AssertionError``, not a silent wrong-shape bug -- verified live against
+the real server, not assumed from source alone. The action side is the
+mirror image -- seven separate batched ``action.*`` keys in the response
+(shape roughly ``(1, horizon, 1)``, squeezed here via a flat reshape rather
+than assumed exact), concatenated back into a single 7-vector, with the
 gripper dimension needing a `[0,1]->[-1,1]` normalize-and-binarize plus a
 sign flip (`normalize_gripper_action`/`invert_gripper_action` in GR00T's own
 ``libero_env.py`` -- copied here, not invented) before it matches what
@@ -26,6 +36,8 @@ robosuite rendering vs. training-time preprocessing convention).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+
+import numpy as np
 
 from embodied_control.transport.libero_proprio import eef_pose_and_gripper
 
@@ -59,12 +71,27 @@ def _flip_180(array):
     return array[::-1, ::-1]
 
 
+def _batch_state(values: list[float]) -> np.ndarray:
+    """(D,) -> (B=1, T=1, D) float32 -- Gr00tSimPolicyWrapper.check_observation
+    asserts ndim==3 and dtype float32 for every state.* key (see module
+    docstring)."""
+    return np.asarray(values, dtype=np.float32).reshape(1, 1, -1)
+
+
+def _batch_video(array) -> np.ndarray:
+    """(H, W, C) -> (B=1, T=1, H, W, C) uint8 -- Gr00tSimPolicyWrapper.
+    check_observation asserts ndim==5 and dtype uint8 for every video.* key."""
+    return np.asarray(array, dtype=np.uint8)[np.newaxis, np.newaxis]
+
+
 def _libero_gr00t_state(proprio: dict) -> dict:
     eef_pos, axisangle, gripper_qpos = eef_pose_and_gripper(proprio)
     return {
-        "state.x": [eef_pos[0]], "state.y": [eef_pos[1]], "state.z": [eef_pos[2]],
-        "state.roll": [axisangle[0]], "state.pitch": [axisangle[1]], "state.yaw": [axisangle[2]],
-        "state.gripper": gripper_qpos,
+        "state.x": _batch_state([eef_pos[0]]), "state.y": _batch_state([eef_pos[1]]),
+        "state.z": _batch_state([eef_pos[2]]),
+        "state.roll": _batch_state([axisangle[0]]), "state.pitch": _batch_state([axisangle[1]]),
+        "state.yaw": _batch_state([axisangle[2]]),
+        "state.gripper": _batch_state(gripper_qpos),
     }
 
 
@@ -76,7 +103,9 @@ def observation_to_gr00t(obs: dict, mapping: Gr00tObservationMapping) -> dict:
         their_key = mapping.camera_keys.get(camera["name"])
         if their_key is not None:
             array = camera["array"]
-            payload[their_key] = _flip_180(array) if mapping.flip_images_180 else array
+            if mapping.flip_images_180:
+                array = _flip_180(array)
+            payload[their_key] = _batch_video(array) if mapping.libero_gr00t_proprio else array
 
     proprio = obs.get("proprio") or {}
     if mapping.libero_gr00t_proprio:
@@ -102,15 +131,25 @@ def _normalize_and_invert_gripper(raw: float) -> float:
     return binarized * -1.0
 
 
+def _unbatch(value) -> list[float]:
+    """Flatten whatever batch/time/feature dims Gr00tSimPolicyWrapper's
+    response carries (roughly (B=1, horizon, D=1), not asserted exact here
+    since the wrapper's own check_action docstring only commits to ndim==3,
+    not precise sizes) down to the flat per-horizon-step sequence -- correct
+    as long as B=1 and D=1 per key, true for this single-env, scalar-per-key
+    LIBERO action space."""
+    return np.asarray(value, dtype=np.float64).reshape(-1).tolist()
+
+
 def _libero_gr00t_action_to_chunk(action: dict) -> list[list[float]]:
     columns = []
     for key in _LIBERO_ACTION_KEYS:
         if key not in action:
             raise KeyError(f"gr00t response missing {key!r}; keys present: {sorted(action)}")
-        columns.append([float(v) for v in action[key]])
+        columns.append(_unbatch(action[key]))
     if "action.gripper" not in action:
         raise KeyError(f"gr00t response missing 'action.gripper'; keys present: {sorted(action)}")
-    gripper = [_normalize_and_invert_gripper(float(v)) for v in action["action.gripper"]]
+    gripper = [_normalize_and_invert_gripper(v) for v in _unbatch(action["action.gripper"])]
 
     horizon = len(columns[0])
     if any(len(col) != horizon for col in columns) or len(gripper) != horizon:

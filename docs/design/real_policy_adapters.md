@@ -1,10 +1,13 @@
 # Plan: wiring in real VLA policies (OpenPI, GR00T)
 
-Status: M1, M2, M3, and M4 all done — a real trained checkpoint (OpenPI's
-public `pi05_libero`) has been run end-to-end through this repo's own
-orchestrator against real LIBERO episodes, with a genuine 100% success rate
-on 2 episodes (see M3 below for the full result and the real bugs that
-running it for real surfaced). Builds on the research in
+Status: M1, M2, M3, and M4 all done — **both** real trained checkpoints
+(OpenPI's public `pi05_libero` and NVIDIA's public `GR00T-N1.7-LIBERO`) have
+been run end-to-end through this repo's own orchestrator against real
+LIBERO episodes, each a genuine 100% success rate on 2 episodes, each with
+video evidence (see M3 and M4 below for the full results and the real bugs
+that running each one for real surfaced — a different wire-envelope
+mismatch for each transport, neither catchable by source-reading or
+fixture-based tests alone). Builds on the research in
 `docs/transport-comparison.md` (protocol details verified against OpenPI and
 GR00T source, then validated against how StarVLA and Isaac Lab-Arena solved
 the same problem). Last updated: 2026-07-15.
@@ -256,35 +259,80 @@ to-224. Since both are square aspect ratios this is a resize-only
 close enough to work, but it hasn't been A/B'd against the exact reference
 preprocessing.
 
-### M4 — GR00T adapter — DONE
+### M4 — GR00T adapter — DONE, and verified against a real checkpoint (2026-07-15)
 
 Built the same way as M2: `transport/gr00t_translate.py` (pure functions),
-`transport/gr00t_client.py` (`Gr00tZmqClient`, pyzmq + msgpack, wire
-behavior verified against GR00T's actual `server_client.py` source —
-`{"endpoint": ..., "data": ...}` request shape, `ping`/`get_action`/`reset`/
-`get_modality_config` endpoints, and the REQ-socket-becomes-unusable-after-
-a-timeout recovery behavior its own client has), `tests/fake_gr00t_server.py`
-+ `tests/test_gr00t_client.py` (8 tests: translation, transport round-trip,
-error path, multi-env rejection, full `run_eval()` integration). Scheme
-`gr00t_zmq` added to `transport/factory.py` (now fully implemented — the
-`PLANNED_SCHEMES` placeholder is empty).
+`transport/gr00t_client.py` (`Gr00tZmqClient`), `tests/fake_gr00t_server.py`
++ `tests/test_gr00t_client.py`. Scheme `gr00t_zmq` wired through
+`transport/factory.py`.
+
+**Then actually run against `nvidia/GR00T-N1.7-LIBERO`** (the public
+LIBERO-spatial checkpoint — `uv run hf download nvidia/GR00T-N1.7-LIBERO
+--include "libero_spatial/*" ...`, ~2.5GB, no training needed) — same
+"prove it for real, not just against a fixture" bar as M3.
+
+**Result**: `run_id=20260715_100833_libero_spatial_task0_gr00t_n17_0`, 2/2
+episodes succeeded, both terminating early on genuine success (76/76 steps
+of a 200-step cap), 10 total real inference calls, `mean_action_horizon=16.0`
+(the checkpoint's real chunk length), full artifact contract validated,
+video evidence confirmed genuine (arm visibly reaches the bowls by the last
+frame — see `examples/libero_gr00t_external.yaml`'s videos).
+
+**Three more real bugs, found only by running it — the fixture-based unit
+tests all passed throughout, same lesson as M3's OpenPI bug**:
+
+1. **The wire envelope claim in the original M4 write-up was wrong.**
+   It said GR00T's server "calls the generic msgpack-numpy package's own
+   encode/decode functions directly" — true of the `NVIDIA/Isaac-GR00T`
+   `main` branch as fetched via `gh api` earlier this session, but the
+   *actual, locally-running* server (a checkout pinned to an April 2026
+   commit, already older than `main` by the time this was researched) uses
+   a **third, different envelope**:
+   `{"__ndarray_class__": True, "as_npy": <bytes from np.save(...,
+   allow_pickle=False)>}`, decoded with `np.load`. An array encoded with
+   the generic package's envelope arrived server-side as an unrecognized
+   plain dict — `"Video key 'image' must be a numpy array. Got <class
+   'dict'>"` — not a transport error, exactly the same failure *shape* as
+   M3's OpenPI envelope bug, caused by trusting "verified against source"
+   research done against a different point in time/branch than what's
+   actually running. Fixed with `transport/gr00t_msgpack.py`, a faithful
+   port of the real, running server's actual `MsgSerializer`. **The lesson
+   generalizes beyond this one bug**: two clones of "the same" upstream
+   project can disagree; verify wire compatibility against the specific
+   server actually being talked to, not against whichever commit a
+   `gh api`/`WebFetch` research pass happened to land on.
+2. **`--use-sim-policy-wrapper` is required, not optional, for this flat
+   observation format to work at all.** Without it, `gr00t/policy/
+   gr00t_policy.py::Gr00tPolicy.check_observation` expects a *nested*
+   `{"video": {"image": ...}, "state": {"x": ...}, ...}` structure and
+   every request fails immediately (`"Observation must contain a 'video'
+   key"`). `Gr00tSimPolicyWrapper` (enabled by that flag) is what accepts
+   the flat `video.image`/`state.x` keys `gr00t/eval/sim/LIBERO/
+   libero_env.py` (and this adapter) actually produce.
+3. **The sim policy wrapper requires explicit batch+time dimensions on
+   every array, not just the right keys.** `Gr00tSimPolicyWrapper.
+   check_observation` asserts `ndim==3`, shape `(B=1, T=1, D)`, dtype
+   `float32` for every `state.*` key, and `ndim==5`, shape `(B=1, T=1, H, W,
+   3)`, dtype `uint8` for every `video.*` key — a bare `(H, W, 3)` array or
+   a plain Python list fails validation with a clear `AssertionError`, not
+   a silent wrong-shape bug. `transport/gr00t_translate.py::_batch_state`/
+   `_batch_video` add these; the response side is unbatched back down with
+   a flat reshape (`_unbatch`) since the exact response shape wasn't
+   asserted in the wrapper's own docstring, only "ndim==3", so a robust
+   reshape was safer than assuming an exact shape.
 
 Two scope decisions, made deliberately rather than accidentally:
 
 - **`get_modality_config()`'s `ModalityConfig` objects are unwrapped into
-  plain dicts, not reconstructed as real objects.** GR00T's own client
-  decodes them via `gr00t.data.types.ModalityConfig`, which lives in the
-  full (GPU-oriented, heavy) `gr00t` package — depending on that would
-  defeat the point of a lightweight client adapter. Our client unwraps the
-  same wire marker (`__ModalityConfig__`/`as_json`) into its JSON payload
-  directly. Good enough to inspect/log/persist; not a drop-in for code
-  written against GR00T's real `PolicyClient`.
-- **Full auto-validation from `get_modality_config()` isn't built** — same
-  caveat as M2's OpenPI adapter: `describe()` persists the real modality
-  config into `manifest.json` for inspection, but doesn't yet cross-check
-  it against `observation_mapping`. Worth doing once a real GR00T
-  checkpoint's actual modality config shape is known (mirrors M3's
-  reasoning, deferred for the same cause: nothing to validate against yet).
+  plain dicts, not reconstructed as real objects** — same reasoning as
+  before, now against the *correct* marker key (`__ModalityConfig_class__`,
+  not the originally-assumed `__ModalityConfig__` — also fixed as part of
+  bug 1 above).
+- **Full auto-validation from `get_modality_config()` isn't built** —
+  `describe()` persists the real modality config into `manifest.json` (now
+  confirmed genuinely useful: this is exactly the config that revealed the
+  checkpoint's real `state`/`video`/`action` key names and horizons ahead
+  of writing the translation preset).
 
 A real bug caught while building the fixture, not the client: ZMQ REQ
 sockets that time out must be closed with `linger=0` before being dropped —
@@ -295,9 +343,9 @@ in `_call`'s exception handlers, documented inline since it's exactly the
 kind of thing that's silent until it isn't.
 
 **Accept when**: unit tests round-trip real msgpack frames against the
-fixture — done (8/8 passing); scheme wired through the full orchestrator —
-done (verified via a `run_eval()` integration test against a fake server,
-same pattern as M2).
+fixture — done (13/13 passing); scheme wired through the full orchestrator
+— done; **a real checkpoint actually succeeds** — done, genuinely, with
+video evidence.
 
 ### M5 — deferred, explicitly out of scope for now
 

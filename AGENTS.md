@@ -103,32 +103,40 @@ if the symptom is stranger than plain permission-denied).
 
 ## Current status (2026-07-15)
 
-All four milestones in `docs/design/real_policy_adapters.md` are done. A
-**real trained VLA checkpoint is wired in and has actually succeeded**:
-OpenPI's public `pi05_libero` checkpoint, run through this repo's own
-orchestrator against real LIBERO episodes, 2/2 episodes succeeded
-(`run_id=20260715_073801_libero_spatial_task0_openpi_pi05_0`). This host now
+All four milestones in `docs/design/real_policy_adapters.md` are done. **Both
+real trained VLA checkpoints are wired in and have actually succeeded**:
+OpenPI's public `pi05_libero` and NVIDIA's public `GR00T-N1.7-LIBERO`, each
+run through this repo's own orchestrator against real LIBERO episodes, 2/2
+episodes succeeded each, both with video evidence
+(`run_id=20260715_073801_libero_spatial_task0_openpi_pi05_0` and
+`run_id=20260715_100833_libero_spatial_task0_gr00t_n17_0`). This host now
 has NVIDIA Container Toolkit configured (a real GPU was present the whole
 time, just not passed through to Docker — see `docs/gotchas.md`).
 
 `transport/openpi_client.py` and `transport/gr00t_client.py` speak their
 real wire protocols and are wired all the way through the orchestrator
 (`EndpointSpec.scheme`, `transport/factory.py`, `orchestration/supervisor.py`,
-the delegated evaluators). Running the real thing surfaced two more bugs
-that reading source alone hadn't caught: OpenPI's server uses its own
-msgpack ndarray envelope, not the generic `msgpack-numpy` package's
-(`transport/openpi_msgpack.py` fixes this — every unit test had passed
-throughout, because the test fixture shared the same wrong-but-consistent
-envelope), and `observation/state` must be a real ndarray, not a Python
-list. Also: **`ec eval run` needs the same transport deps as the job's
-`policy.endpoint.scheme` in the process that runs it, not just inside a
-delegated container** — use `pixi run -e transports ec eval run ...` for
-any job with a real-policy endpoint scheme.
+the delegated evaluators). Running each one for real surfaced its own wire
+envelope bug that reading source alone hadn't caught — and couldn't have:
+OpenPI's server uses its own msgpack ndarray envelope, not the generic
+`msgpack-numpy` package's; GR00T's *actual, locally-running* server used a
+still-different envelope than what its GitHub `main` branch showed when
+researched (two clones/points-in-time of "the same" project disagreed).
+`transport/openpi_msgpack.py` and `transport/gr00t_msgpack.py` fix each —
+every unit test had passed throughout both times, because the test
+fixtures shared the same wrong-but-consistent envelope as their clients.
+Also real: `observation/state` must be a real ndarray not a Python list
+(OpenPI), GR00T's server needs `--use-sim-policy-wrapper` plus explicit
+batch+time dimensions on every array, and **`ec eval run` needs the same
+transport deps as the job's `policy.endpoint.scheme` in the process that
+runs it, not just inside a delegated container** — use
+`pixi run -e transports ec eval run ...` for any job with a real-policy
+endpoint scheme.
 
 The underlying protocol research is `docs/transport-comparison.md`; the
-full story (including the fixed bugs, verified checkpoint/CLI details, and
+full story (including every fixed bug, verified checkpoint/CLI details, and
 what's still a known simplification) is in
-`docs/design/real_policy_adapters.md`'s M3 section. Read both before
+`docs/design/real_policy_adapters.md`'s M3/M4 sections. Read both before
 touching this area — they encode decisions and hard-won details that aren't
 obvious from the code alone.
 

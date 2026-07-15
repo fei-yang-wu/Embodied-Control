@@ -1,0 +1,102 @@
+# Real LIBERO delegated backend against a real GR00T-served checkpoint --
+# the GR00T counterpart of libero_openpi_external.yaml. VERIFIED WORKING
+# (2026-07-15): run_id=20260715_100833_libero_spatial_task0_gr00t_n17_0,
+# 2/2 episodes succeeded against the real public GR00T-N1.7-LIBERO
+# checkpoint (both terminating early on genuine success, 76/76 steps of a
+# 200-step cap). See docs/design/real_policy_adapters.md's M4 section for
+# the full result and the real bugs fixed along the way -- in particular,
+# transport/gr00t_msgpack.py (required, not optional: this checkpoint's
+# server uses a wire envelope that turned out to differ from BOTH the
+# generic msgpack-numpy package AND from what an earlier source-only read of
+# NVIDIA/Isaac-GR00T's GitHub main branch showed -- verified against the
+# actual locally-running server, not assumed) and --use-sim-policy-wrapper
+# (required for GR00T's server to accept this flat observation format at
+# all; without it every request fails with "Observation must contain a
+# 'video' key").
+#
+# To reproduce:
+# 1. NVIDIA Container Toolkit must be configured (see docs/gotchas.md).
+# 2. Clone NVIDIA/Isaac-GR00T and download the public LIBERO-spatial
+#    checkpoint (no training needed -- ~50s to download, ~2.5GB):
+#      git clone https://github.com/NVIDIA/Isaac-GR00T.git && cd Isaac-GR00T
+#      uv sync   # or however this repo's own env is set up
+#      uv run hf download nvidia/GR00T-N1.7-LIBERO \
+#        --include "libero_spatial/config.json" "libero_spatial/embodiment_id.json" \
+#        "libero_spatial/model-*.safetensors" "libero_spatial/model.safetensors.index.json" \
+#        "libero_spatial/processor_config.json" "libero_spatial/statistics.json" \
+#        --local-dir checkpoints/GR00T-N1.7-LIBERO
+# 3. Launch the server -- IMPORTANT: pass --host 127.0.0.1 explicitly (the
+#    library's own default binds all interfaces, host="*", exposing an
+#    unauthenticated inference listener to the whole network) AND
+#    --use-sim-policy-wrapper (required for this flat key format -- see above):
+#      uv run python -m gr00t.eval.run_gr00t_server \
+#        --model-path checkpoints/GR00T-N1.7-LIBERO/libero_spatial \
+#        --embodiment-tag LIBERO_PANDA --host 127.0.0.1 --port 5555 \
+#        --use-sim-policy-wrapper
+# 4. Point `policy.endpoint.host` below at that host (127.0.0.1 if same
+#    machine, which is what was actually verified).
+# 5. Build/run: `pixi run build-libero-image` then, IMPORTANT, run via the
+#    `transports` env (the host process itself needs pyzmq/msgpack too, not
+#    just the LIBERO container -- see docs/gotchas.md):
+#      pixi run -e transports ec eval run examples/libero_gr00t_external.yaml
+api_version: ec.eval/v1alpha1
+name: libero_spatial_task0_gr00t_n17
+seed: 0
+tags:
+  backend: libero
+  mode: delegated
+  policy: gr00t_external
+  checkpoint: GR00T-N1.7-LIBERO/libero_spatial
+
+sim:
+  backend: libero
+  mode: delegated
+  action_dim: 7   # OSC_POSE controller: dx,dy,dz,droll,dpitch,dyaw,gripper -- matches the
+                  # 6 action.{x,y,z,roll,pitch,yaw} + action.gripper keys, concatenated.
+  runtime:
+    type: docker
+    image: ec-libero-eval:latest
+  timeout_s: 900
+  backend_config:
+    suite: libero_spatial
+    task_index: 0
+    # GR00T-LIBERO's own env wrapper renders at 256x256 (gr00t/eval/sim/LIBERO/
+    # libero_env.py::LiberoEnv.__init__, camera_heights=camera_widths=256) --
+    # different from OpenPI's 224x224 checkpoint, verified separately.
+    camera_height: 256
+    camera_width: 256
+    health_timeout_s: 120
+
+policy:
+  endpoint:
+    scheme: gr00t_zmq
+    host: 127.0.0.1   # <-- set to your GPU host's address
+    port: 5555         # gr00t's DEFAULT_MODEL_SERVER_PORT
+    action_dim: 7
+    observation_mapping:
+      # Verified exactly against gr00t/eval/sim/LIBERO/libero_env.py -- not a guess.
+      camera_keys:
+        agentview_image: "video.image"
+        robot0_eye_in_hand_image: "video.wrist_image"
+      prompt_key: "annotation.human.action.task_description"
+      # All three required for the real GR00T-N1.7-LIBERO checkpoint -- see
+      # transport/gr00t_translate.py's module docstring for exactly what
+      # each does and where it was verified.
+      flip_images_180: true
+      libero_gr00t_proprio: true
+      libero_gr00t_action: true
+  requested_action_horizon: 8  # advisory only -- GR00T's real chunk length is checkpoint-fixed
+
+embodiment:
+  observation_schema_id: ec.obs.libero/v1
+  action_schema_id: ec.action.libero_osc_pose/v1
+
+rollout:
+  num_episodes: 2
+  max_steps_per_episode: 200
+  record_video: true
+  video_fps: 20   # LIBERO's control_freq default is 20Hz
+
+outputs:
+  root_dir: ./runs
+  run_name_template: "{date}_{name}_{seed}"

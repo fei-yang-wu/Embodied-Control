@@ -3,23 +3,29 @@ msgpack), for testing ``Gr00tZmqClient`` without a real checkpoint or GPU.
 Mirrors ``gr00t/policy/server_client.py::PolicyServer`` closely enough to be
 a faithful transport-layer stand-in -- see ``transport/gr00t_client.py``'s
 docstring for the exact behaviors this reproduces.
+
+Uses ``transport.gr00t_msgpack`` (the real, locally-verified envelope) --
+using the generic ``msgpack-numpy`` package here would make this fixture
+self-consistent with a client that had the same bug, silently hiding the
+exact wire-incompatibility a live server round-trip caught (see
+``gr00t_msgpack.py``'s docstring for the full story).
 """
 
 from __future__ import annotations
 
 import threading
 
-import msgpack
-import msgpack_numpy as mnp
 import zmq
+
+from embodied_control.transport import gr00t_msgpack
 
 
 def _to_bytes(data):
-    return msgpack.packb(data, default=mnp.encode)
+    return gr00t_msgpack.to_bytes(data)
 
 
 def _from_bytes(data):
-    return msgpack.unpackb(data, object_hook=mnp.decode, raw=False)
+    return gr00t_msgpack.from_bytes(data)
 
 
 class FakeGr00tServer:
