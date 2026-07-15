@@ -1,9 +1,9 @@
 # Plan: wiring in real VLA policies (OpenPI, GR00T)
 
-Status: M1 and M2 done. Builds on the research in `docs/transport-comparison.md`
-(protocol details verified against OpenPI and GR00T source, then validated
-against how StarVLA and Isaac Lab-Arena solved the same problem).
-Last updated: 2026-07-14.
+Status: M1, M2, and M4 done. M3 blocked on external GPU infra (see M3 below).
+Builds on the research in `docs/transport-comparison.md` (protocol details
+verified against OpenPI and GR00T source, then validated against how StarVLA
+and Isaac Lab-Arena solved the same problem). Last updated: 2026-07-14.
 
 ## Goal
 
@@ -173,7 +173,7 @@ LIBERO smoke runs against blank actions produce the full artifact contract
 — done (`smoke-libero`, `smoke-libero-image-stats`, both rebuilt images,
 `manifest.json.policy_describe` confirmed populated).
 
-### M3 — real end-to-end: π0-LIBERO
+### M3 — real end-to-end: π0-LIBERO — BLOCKED on external infra, not started
 
 OpenPI ships LIBERO-finetuned checkpoints and a serving script, and LIBERO
 is our proven backend — this is the cheapest possible first real model.
@@ -184,18 +184,58 @@ config: `agentview_image` / `robot0_eye_in_hand_image` / proprio / task
 language → the checkpoint's expected keys (OpenPI normalizes server-side,
 so the client sends raw observations with the right keys and resolution).
 
+This milestone needs a GPU host and a downloaded checkpoint — infrastructure
+an agent can't provision unilaterally. M2's adapter, translation layer, and
+orchestration wiring are all done and waiting; M3 is a matter of pointing
+`EndpointSpec` at a real server and writing the actual key-mapping config
+once that server exists, not further plumbing work.
+
 **Accept when**: a multi-episode LIBERO run against the real checkpoint
 completes with a nonzero success rate and full artifacts — the first
 number this repo produces that reflects an actual model.
 
-### M4 — GR00T adapter
+### M4 — GR00T adapter — DONE
 
-`transport/gr00t_client.py` (pyzmq + msgpack, GR00T's
-`{"endpoint": ..., "data": ...}` request shape), ZMQ REP echo fixture,
-scheme `gr00t_zmq`, `get_modality_config()` driving handshake validation
-(GR00T tells us the expected shape — use it instead of hand-writing the
-mapping blind). After OpenPI because there's no ready-made GR00T×LIBERO
-checkpoint synergy.
+Built the same way as M2: `transport/gr00t_translate.py` (pure functions),
+`transport/gr00t_client.py` (`Gr00tZmqClient`, pyzmq + msgpack, wire
+behavior verified against GR00T's actual `server_client.py` source —
+`{"endpoint": ..., "data": ...}` request shape, `ping`/`get_action`/`reset`/
+`get_modality_config` endpoints, and the REQ-socket-becomes-unusable-after-
+a-timeout recovery behavior its own client has), `tests/fake_gr00t_server.py`
++ `tests/test_gr00t_client.py` (8 tests: translation, transport round-trip,
+error path, multi-env rejection, full `run_eval()` integration). Scheme
+`gr00t_zmq` added to `transport/factory.py` (now fully implemented — the
+`PLANNED_SCHEMES` placeholder is empty).
+
+Two scope decisions, made deliberately rather than accidentally:
+
+- **`get_modality_config()`'s `ModalityConfig` objects are unwrapped into
+  plain dicts, not reconstructed as real objects.** GR00T's own client
+  decodes them via `gr00t.data.types.ModalityConfig`, which lives in the
+  full (GPU-oriented, heavy) `gr00t` package — depending on that would
+  defeat the point of a lightweight client adapter. Our client unwraps the
+  same wire marker (`__ModalityConfig__`/`as_json`) into its JSON payload
+  directly. Good enough to inspect/log/persist; not a drop-in for code
+  written against GR00T's real `PolicyClient`.
+- **Full auto-validation from `get_modality_config()` isn't built** — same
+  caveat as M2's OpenPI adapter: `describe()` persists the real modality
+  config into `manifest.json` for inspection, but doesn't yet cross-check
+  it against `observation_mapping`. Worth doing once a real GR00T
+  checkpoint's actual modality config shape is known (mirrors M3's
+  reasoning, deferred for the same cause: nothing to validate against yet).
+
+A real bug caught while building the fixture, not the client: ZMQ REQ
+sockets that time out must be closed with `linger=0` before being dropped —
+leaving one open (even just dereferencing it) can hang the whole process at
+interpreter/context teardown waiting to flush an unacknowledged outbound
+message. Caught by a test that hung under pytest, passed standalone; fixed
+in `_call`'s exception handlers, documented inline since it's exactly the
+kind of thing that's silent until it isn't.
+
+**Accept when**: unit tests round-trip real msgpack frames against the
+fixture — done (8/8 passing); scheme wired through the full orchestrator —
+done (verified via a `run_eval()` integration test against a fake server,
+same pattern as M2).
 
 ### M5 — deferred, explicitly out of scope for now
 

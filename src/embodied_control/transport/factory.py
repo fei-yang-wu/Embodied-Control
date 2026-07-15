@@ -23,9 +23,8 @@ from typing import Any
 from embodied_control.logging.logger import EcLogger
 from embodied_control.transport.client import PolicyClient
 
-SUPPORTED_SCHEMES = ("http", "openpi_websocket")
-# Planned, not yet implemented — surfaced so config validation can give a clear error:
-PLANNED_SCHEMES = ("gr00t_zmq",)
+SUPPORTED_SCHEMES = ("http", "openpi_websocket", "gr00t_zmq")
+PLANNED_SCHEMES: tuple[str, ...] = ()
 
 
 def make_policy_client(
@@ -47,6 +46,16 @@ def make_policy_client(
             raise ValueError("openpi_websocket requires action_dim (see EndpointSpec.action_dim)")
         mapping = OpenPIObservationMapping(**(observation_mapping or {}))
         return OpenPIWebsocketClient(
+            host, port, action_dim=action_dim, mapping=mapping, timeout_s=timeout_s, logger=logger
+        )
+    if scheme == "gr00t_zmq":
+        from embodied_control.transport.gr00t_client import Gr00tZmqClient
+        from embodied_control.transport.gr00t_translate import Gr00tObservationMapping
+
+        if action_dim is None:
+            raise ValueError("gr00t_zmq requires action_dim (see EndpointSpec.action_dim)")
+        mapping = Gr00tObservationMapping(**(observation_mapping or {}))
+        return Gr00tZmqClient(
             host, port, action_dim=action_dim, mapping=mapping, timeout_s=timeout_s, logger=logger
         )
     if scheme in PLANNED_SCHEMES:

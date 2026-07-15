@@ -1,0 +1,186 @@
+"""GR00T transport adapter: translation (pure functions) + real ZeroMQ
+round-trip against a fake GR00T-protocol server. Requires pyzmq/msgpack/numpy
+(the `transports` pixi feature) -- run with `pixi run -e transports
+test-transports`, not covered by the light default `pixi run test`."""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+np = pytest.importorskip("numpy")
+pytest.importorskip("zmq")
+pytest.importorskip("msgpack_numpy")
+
+from embodied_control.transport.client import PolicyClientError  # noqa: E402
+from embodied_control.transport.gr00t_client import Gr00tZmqClient  # noqa: E402
+from embodied_control.transport.gr00t_translate import (  # noqa: E402
+    Gr00tObservationMapping,
+    gr00t_action_to_chunk,
+    observation_to_gr00t,
+)
+
+from fake_gr00t_server import FakeGr00tServer  # noqa: E402
+
+from embodied_control.config.schemas import (  # noqa: E402
+    EndpointSpec,
+    EvalJob,
+    OutputSpec,
+    PolicyBinding,
+    RolloutSpec,
+    RuntimeSpec,
+    SimSpec,
+)
+from embodied_control.orchestration.runner import run_eval  # noqa: E402
+
+
+# --- translation (pure functions, no server needed) ----------------------
+
+def test_observation_to_gr00t_maps_cameras_proprio_and_prompt():
+    mapping = Gr00tObservationMapping(
+        camera_keys={"agentview_image": "video.ego_view"},
+        proprio_key="state.joint_position",
+        prompt_key="annotation.human.action.task_description",
+    )
+    obs = {
+        "env_id": 0, "episode_id": 0,
+        "proprio": {"names": ["x", "y"], "values": [1.0, 2.0]},
+        "cameras": [{"name": "agentview_image", "array": np.zeros((4, 4, 3), dtype=np.uint8)}],
+        "task": {"task_id": "t", "language_instruction": "pick up the cup"},
+    }
+    payload = observation_to_gr00t(obs, mapping)
+    assert payload["state.joint_position"] == [1.0, 2.0]
+    assert payload["annotation.human.action.task_description"] == ["pick up the cup"]
+    assert payload["video.ego_view"].shape == (4, 4, 3)
+
+
+def test_gr00t_action_to_chunk_converts_ndarray_to_float_lists():
+    mapping = Gr00tObservationMapping(action_key="action")
+    action = {"action": np.array([[0.1, 0.2], [0.3, 0.4]])}
+    chunk = gr00t_action_to_chunk(action, mapping)
+    assert chunk == [[0.1, 0.2], [0.3, 0.4]]
+
+
+def test_gr00t_action_to_chunk_raises_on_missing_key():
+    mapping = Gr00tObservationMapping(action_key="action")
+    with pytest.raises(KeyError):
+        gr00t_action_to_chunk({"wrong_key": []}, mapping)
+
+
+# --- real wire round-trip against a fake GR00T-protocol server ------------
+
+def _get_action(observation, options=None):
+    state = observation.get("state.joint_position", [0.0])
+    chunk = np.array([[state[0] + i for _ in range(2)] for i in range(3)])
+    return [{"action": chunk}, {"server_timing_ms": 0.0}]
+
+
+def _get_modality_config():
+    return {"__ModalityConfig__": True, "as_json": json.dumps({"video.ego_view": {"shape": [224, 224, 3]}})}
+
+
+def test_act_round_trips_real_msgpack_frames():
+    server = FakeGr00tServer({
+        "get_action": (True, _get_action),
+        "reset": (True, lambda options=None: {"status": "ok"}),
+        "get_modality_config": (False, _get_modality_config),
+    })
+    server.start_background()
+    try:
+        client = Gr00tZmqClient(
+            "127.0.0.1", server.port, action_dim=2,
+            mapping=Gr00tObservationMapping(proprio_key="state.joint_position"),
+            timeout_s=5.0,
+        )
+        health = client.wait_healthy(timeout_s=5.0)
+        assert health["status"] == "ok"
+
+        desc = client.describe()
+        assert desc["action_dim"] == 2
+        assert desc["modality_config"] == {"video.ego_view": {"shape": [224, 224, 3]}}
+
+        client.reset([[0, 0]], seed=7)
+
+        obs = {"env_id": 0, "episode_id": 0, "proprio": {"names": ["x"], "values": [10.0]}}
+        resp = client.act("req-1", [[0, 0]], [obs], requested_horizon=3)
+        assert resp["status"] == "ok"
+        chunk = resp["actions"][0]["action_chunk"]
+        assert chunk == [[10.0, 10.0], [11.0, 11.0], [12.0, 12.0]]
+        assert "total_ms" in resp["timing"]
+    finally:
+        server.shutdown()
+
+
+def test_act_raises_policy_client_error_on_server_exception():
+    def _raising_get_action(observation, options=None):
+        raise ValueError("boom")
+
+    server = FakeGr00tServer({"get_action": (True, _raising_get_action)})
+    server.start_background()
+    try:
+        client = Gr00tZmqClient("127.0.0.1", server.port, action_dim=2, timeout_s=5.0)
+        client.wait_healthy(timeout_s=5.0)
+        with pytest.raises(PolicyClientError, match="boom"):
+            client.act("req-1", [[0, 0]], [{"env_id": 0, "episode_id": 0}], requested_horizon=1)
+    finally:
+        server.shutdown()
+
+
+def test_act_rejects_multi_env_batches():
+    server = FakeGr00tServer({"get_action": (True, _get_action)})
+    server.start_background()
+    try:
+        client = Gr00tZmqClient("127.0.0.1", server.port, action_dim=2, timeout_s=5.0)
+        client.wait_healthy(timeout_s=5.0)
+        with pytest.raises(PolicyClientError, match="exactly one"):
+            client.act("req-1", [[0, 0], [0, 1]], [{"env_id": 0}, {"env_id": 1}], requested_horizon=1)
+    finally:
+        server.shutdown()
+
+
+def test_wait_healthy_raises_when_unreachable():
+    client = Gr00tZmqClient("127.0.0.1", 1, action_dim=2, timeout_s=0.5)
+    with pytest.raises(PolicyClientError):
+        client.wait_healthy(timeout_s=1.0)
+
+
+# --- end-to-end: run_eval() against a real gr00t_zmq external endpoint ----
+
+def test_run_eval_against_external_gr00t_endpoint_produces_full_artifacts(tmp_path):
+    server = FakeGr00tServer({
+        "get_action": (True, _get_action),
+        "reset": (True, lambda options=None: {"status": "ok"}),
+        "get_modality_config": (False, _get_modality_config),
+    })
+    server.start_background()
+    try:
+        job = EvalJob(
+            name="test_gr00t_external",
+            seed=1,
+            sim=SimSpec(
+                backend="fake_delegated", mode="delegated", action_dim=2,
+                runtime=RuntimeSpec(type="local"), timeout_s=30,
+                backend_config={"task_id": "gr00t_smoke_task"},
+            ),
+            policy=PolicyBinding(
+                endpoint=EndpointSpec(
+                    scheme="gr00t_zmq", host="127.0.0.1", port=server.port,
+                    action_dim=2, observation_mapping={"proprio_key": "state.joint_position"},
+                ),
+                requested_action_horizon=3,
+            ),
+            rollout=RolloutSpec(num_episodes=1, max_steps_per_episode=6),
+            outputs=OutputSpec(root_dir=str(tmp_path / "runs")),
+        )
+        result = run_eval(job)
+    finally:
+        server.shutdown()
+
+    assert result.status == "succeeded", result
+    assert result.metrics.num_episodes_completed == 1
+
+    run_dir = tmp_path / "runs" / result.run_id
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    assert manifest["schemas"]["policy_endpoint_scheme"] == "gr00t_zmq"
+    assert manifest["policy_describe"]["action_dim"] == 2

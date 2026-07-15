@@ -39,7 +39,7 @@ incompatible with the host's Python 3.13.
 ```bash
 pixi run test                          # default env: ~49 tests, ~6s — run this after every change
 pixi run -e sim test-sim               # full suite incl. real MuJoCo evals: ~54 tests, ~11s
-pixi run -e transports test-transports # OpenPI/GR00T client adapter tests (websockets/msgpack/numpy)
+pixi run -e transports test-transports # OpenPI + GR00T client adapter tests (websockets/pyzmq/msgpack/numpy)
 pixi run doctor                        # host + dependency check (imageio, offscreen renderer, docker, ...)
 ```
 
@@ -104,20 +104,24 @@ if the symptom is stranger than plain permission-denied).
 ## Current status (2026-07-14)
 
 Everything is still exercised only with our own blank debug policies
-(`zero`/`random`/`image_stats`) and, as of M2, a fake OpenPI-protocol test
-server — **no real trained VLA model has been wired in yet.** The adopted
-plan is `docs/design/real_policy_adapters.md` (milestones M1–M4:
-chunk-scheduler refactor → OpenPI adapter → real π0-LIBERO end-to-end →
-GR00T adapter); M1 and M2 are done. `transport/openpi_client.py` +
-`transport/openpi_translate.py` speak OpenPI's real websocket+msgpack-numpy
-protocol (verified against its actual source, not assumed) and are wired all
-the way through the orchestrator (`EndpointSpec.scheme="openpi_websocket"`,
-`transport/factory.py`, `orchestration/supervisor.py`) — what's missing is a
-real checkpoint's translation config (M3), not plumbing. The underlying
-protocol research is `docs/transport-comparison.md`. Read both before
-touching this area — the plan encodes decisions (neutral observations,
-partial-vs-full handshake validation, why chunking stays stdlib-only) that
-aren't obvious from the code alone.
+(`zero`/`random`/`image_stats`) and fake OpenPI/GR00T-protocol test servers
+— **no real trained VLA model has been wired in yet.** The adopted plan is
+`docs/design/real_policy_adapters.md` (milestones M1–M4: chunk-scheduler
+refactor → OpenPI adapter → real π0-LIBERO end-to-end → GR00T adapter); M1,
+M2, and M4 are done — both `transport/openpi_client.py` and
+`transport/gr00t_client.py` speak their real wire protocols (verified
+against each project's actual source, not assumed) and are wired all the
+way through the orchestrator (`EndpointSpec.scheme`, `transport/factory.py`,
+`orchestration/supervisor.py`, and the delegated evaluators, which used to
+hardcode HTTP regardless of scheme — a real bug caught and fixed while
+wiring this up). **M3 (a real checkpoint end-to-end) is blocked on a GPU
+host and downloaded weights** — infrastructure this agent can't provision;
+the plumbing is ready and waiting. The underlying protocol research is
+`docs/transport-comparison.md`. Read both before touching this area — the
+plan encodes decisions (neutral observations, partial-vs-full handshake
+validation, why chunking stays stdlib-only, why GR00T's `ModalityConfig` is
+deliberately not reconstructed as a real object) that aren't obvious from
+the code alone.
 
 Also not yet built: Apptainer/HPC support, IsaacLab-Arena backend, GPU
 passthrough for containerized rendering (works today via CPU/OSMesa),
