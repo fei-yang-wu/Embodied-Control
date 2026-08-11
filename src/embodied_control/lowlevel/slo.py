@@ -15,8 +15,9 @@ from typing import Any
 
 import numpy as np
 
-# Initial engineering budgets from wiki/tracker-runtime-v2-architecture.md.
-# Replace with recorded baselines once R1 measurements stabilize.
+# Budgets from wiki/tracker-runtime-v2-architecture.md. The strict wake
+# budgets are the HARDWARE profile: they assume a tuned robot host (idle
+# states capped, no co-hosted GPU planner on the control cores).
 SLO_TARGETS: dict[str, float] = {
     "control_tick_compute_p99_ms": 2.0,
     "control_tick_compute_max_ms": 5.0,
@@ -27,6 +28,17 @@ SLO_TARGETS: dict[str, float] = {
     "response_overruns": 0,
     "damp_ticks": 0,
     "fault": 0,
+}
+
+# Measured sim-rehearsal baseline (2026-08-11, workstation, co-hosted GR00T
+# GPU service): wake-late maxima reach ~3.3 ms under quiet, loaded, and
+# SCHED_FIFO+mlock runs alike — platform wake latency (idle-state exit),
+# not scheduling. Budget = measured max + margin. Compute and deadline
+# budgets stay strict; a rehearsal run that misses THOSE is a real defect.
+SIM_REHEARSAL_TARGETS: dict[str, float] = {
+    **SLO_TARGETS,
+    "control_wake_late_max_us": 5000.0,
+    "plant_wake_late_max_us": 5000.0,
 }
 
 
