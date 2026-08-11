@@ -50,6 +50,7 @@ mujoco = ">=3,<4"
 numpy = ">=1.24"
 imageio = ">=2.30"
 imageio-ffmpeg = ">=0.4"
+ffmpeg = ">=6"
 
 [feature.sim.tasks]
 # These require MuJoCo, so they live in the sim environment: `pixi run -e sim smoke`.
@@ -85,6 +86,48 @@ pyzmq = ">=25"
 [feature.transports.tasks]
 test-transports = "pytest -q tests/test_openpi_client.py tests/test_gr00t_client.py"
 
+# --- lowlevel feature: the 50 Hz G1 tracker runtime (policy bundles) ---
+# Torch stays out of the light default env. The lowlevel package needs numpy;
+# its torch engine is lazy-imported so every other module works without torch.
+# tests/lowlevel/ is skipped entirely in envs without numpy (see its conftest).
+[feature.lowlevel.dependencies]
+numpy = ">=1.24"
+pytorch = ">=2.4,<3"
+msgpack-python = ">=1.0"
+pyzmq = ">=25"
+pyyaml = ">=6,<7"
+
+[feature.lowlevel.tasks]
+test-lowlevel = "pytest -q tests/lowlevel"
+# Self-contained closed-loop smoke (synthetic bundle + fake env, no assets):
+smoke-lowlevel = "pytest -q tests/lowlevel/test_torch_engine_e2e.py -k end_to_end"
+
+# --- native feature: C++ hot-path modules (ec_native) via scikit-build-core ---
+# Toolchain comes from conda-forge so builds are hermetic; install with
+# --no-build-isolation so THIS cmake/compiler/pybind11 set is the one used.
+# Pattern follows ~/Documents/SL/rcd with its gaps fixed (environment-provided
+# dependencies, one explicit rebuild command, and no stale isolated-build
+# Python path on import).
+[feature.native.dependencies]
+cmake = ">=3.27"
+ninja = "*"
+cxx-compiler = "*"
+pybind11 = ">=2.12"
+onnx = ">=1.17,<2"
+mujoco = ">=3,<4"
+pip = "*"
+scikit-build-core = ">=0.10"
+
+[feature.native.pypi-dependencies]
+ec-native = { path = "native/ec_native", editable = true }
+
+[feature.native.tasks]
+build-native = "pixi reinstall -e native ec-native && python -c \"import ec_native; print(ec_native.__version__)\""
+test-native = "pytest -q tests/lowlevel/test_native_shm.py tests/lowlevel/test_native_core.py"
+
 [environments]
 sim = ["sim"]
 transports = ["transports"]
+lowlevel = ["lowlevel"]
+lowlevel-sim = ["lowlevel", "sim"]
+native = ["lowlevel", "native"]

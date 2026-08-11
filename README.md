@@ -61,6 +61,104 @@ pixi run doctor         # check host + dependencies
 The default env is intentionally light (no MuJoCo). The MuJoCo backend lives in
 the `sim` feature env, so eval commands run with `pixi run -e sim ...`.
 
+### Native G1 tracker
+
+The low-latency G1 path is a separate scikit-build-core package. C++ owns the
+50 Hz scheduler, observation assembly, ONNX encoder and policy inference,
+action decode, and planner shared-memory slots. A separate absolute 200 Hz
+C++ thread owns MuJoCo physics and PD actuation. Python only configures the
+run and reads diagnostics.
+
+```bash
+pixi install -e native
+pixi run -e native build-native
+pixi run -e native test-native
+
+pixi run -e native ec lowlevel verify-native-bundle /absolute/path/to/bundle
+pixi run -e native ec lowlevel bench-native /absolute/path/to/bundle --ticks 3000
+
+# Target-computer timing gate. Choose an isolated CPU and permitted FIFO level.
+pixi run -e native ec lowlevel bench-native /absolute/path/to/bundle \
+  --ticks 500 --paced --cpu <cpu> --fifo-priority <priority> \
+  --lock-memory --require-realtime
+```
+
+Native deployment bundles must contain static batch-one opset-18
+`policy.onnx`, an `encoder.onnx` for latent chunk input, exact input/output
+names and shapes, parity tolerances, hashes, gains, joint order, and joint
+limits. The C++ runtime rejects incomplete contracts before it starts.
+Native chunk encoding currently requires `root_qpos` with macro stride 1;
+another stride is rejected instead of receiving consecutive frames silently.
+
+For asynchronous language-conditioned GR00T inference, start the planner
+worker first. The language goal is an explicit argument to the GR00T service.
+RTC overlap is off by default; add `--rtc` only after that planner checkpoint
+passes its own stability test. The planner worker owns both shared-memory
+slots. Start exactly one owner; the C++ tracker connects to those slots.
+
+```bash
+# Terminal 1: non-real-time GR00T process owns the two mailbox files.
+pixi run -e native ec lowlevel planner-worker \
+  --request-slot /ec_g1_request --response-slot /ec_g1_response \
+  --create-slots -- \
+  pixi run --manifest-path ../../pixi.toml -e gr00t python -m \
+  imitation_experiments.planner.gr00t_chunk_service \
+  --checkpoint /absolute/path/to/gr00t_head.pt \
+  --goal-features /absolute/path/to/goal_features.pt \
+  --goal walk_arc_cw_start_R_slow_001_A443
+
+# Terminal 2: C++ owns separate 50 Hz control and 200 Hz physics schedules.
+pixi run -e native ec lowlevel mujoco-native /absolute/path/to/bundle \
+  --model /absolute/path/to/g1_29dof_rev_1_0.xml \
+  --request-slot /ec_g1_request --response-slot /ec_g1_response \
+  --connect-slots
+```
+
+For reference-streaming oracle evaluation, replace the GR00T worker with the
+oracle worker and select the source explicitly. This mode streams a 5 Hz
+expert `root_qpos` window into the same native encoder as the VLA path. It is
+not the paper protocol's direct 50 Hz oracle ceiling.
+
+```bash
+# Terminal 1: preload and hash-check one reference motion.
+pixi run -e native ec lowlevel oracle-worker /absolute/path/to/bundle \
+  --reference-root /absolute/path/to/reference_arrays/root_qpos_v1 \
+  --motion walk_arc_cw_start_R_slow_001_A443 \
+  --request-slot /ec_g1_request --response-slot /ec_g1_response \
+  --create-slots --report /absolute/path/to/oracle_worker.json
+
+# Terminal 2: the native 50 Hz loop performs re-expression and ONNX encoding.
+pixi run -e native ec lowlevel mujoco-native /absolute/path/to/bundle \
+  --model /absolute/path/to/g1_29dof_rev_1_0.xml \
+  --command-source oracle \
+  --request-slot /ec_g1_request --response-slot /ec_g1_response \
+  --connect-slots --report /absolute/path/to/oracle_eval.json
+```
+
+Native oracle encoding is fixed to a robot-anchored `root_qpos` window of ten
+38-value frames at stride 1. The runtime refuses another encoder contract.
+The Unitree path also refuses this mode until it has a valid live pelvis world
+position estimate.
+
+MuJoCo deployment evaluation is always wall-clock paced. Use `--cpu` and
+`--physics-cpu` to place the two schedules on different cores. Their wake
+lateness and deadline misses are reported separately. FIFO and memory-lock
+options also have separate control and physics forms; use them only on a
+host configured for real-time scheduling.
+
+The optional Unitree backend uses SDK2 from an explicit source tree:
+
+```bash
+EC_UNITREE_SDK_ROOT=/absolute/path/to/unitree_sdk2 \
+  pixi run -e native build-native
+```
+
+`ec lowlevel unitree` keeps DDS writes off by default. Enabling them needs
+both `--enable-writes` and `--confirm ENABLE_G1_LOWLEVEL`. This build must
+still pass target-host jitter tests and supervised DAMP drills before a
+standing test. Hardware defaults to one ONNX Runtime inference thread so the
+FIFO control thread does not wait on normal-priority worker threads.
+
 ## Run an eval
 
 **Policy as a local subprocess (no Docker needed):**

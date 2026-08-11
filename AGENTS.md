@@ -40,8 +40,23 @@ incompatible with the host's Python 3.13.
 pixi run test                          # default env: ~49 tests, ~6s — run this after every change
 pixi run -e sim test-sim               # full suite incl. real MuJoCo evals: ~54 tests, ~11s
 pixi run -e transports test-transports # OpenPI + GR00T client adapter tests (websockets/pyzmq/msgpack/numpy)
+pixi run -e lowlevel test-lowlevel     # 50 Hz tracker runtime: buffers, bundle, loop, torch engine
+pixi run -e lowlevel smoke-lowlevel    # self-contained closed-loop smoke (synthetic bundle, fake env)
+pixi run -e native build-native        # build the ec_native C++ extension (scikit-build-core + pybind11)
+pixi run -e native test-native         # shm command-buffer semantics + cross-process tests
 pixi run doctor                        # host + dependency check (imageio, offscreen renderer, docker, ...)
 ```
+
+`src/embodied_control/lowlevel/` is the 50 Hz G1 tracker runtime: it consumes
+a **policy bundle** exported by the IsaacLab-Imitation repo (TorchScript
+policy + observation/action contracts + provenance hashes) and runs it against
+an eval-env backend (fake now, MuJoCo next, Unitree DDS later) with commands
+arriving through a command buffer (in-process publishers or ZMQ). Design and
+milestones: `wiki/embodied-control-tracker-runtime.md` in the
+IsaacLab-Imitation repo. Entry points: `ec lowlevel run <job.yaml>` and
+`ec lowlevel verify-bundle <dir>` (both need `-e lowlevel`). The lowlevel
+tests live in `tests/lowlevel/`, which self-skips in envs without numpy so
+the light `pixi run test` stays green.
 
 Docker-runtime examples (`smoke-docker`, `smoke-delegated-docker`,
 `smoke-libero*`) are **not** covered by `pixi run test` — they need images
