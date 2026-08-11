@@ -391,6 +391,14 @@ def _cmd_lowlevel_planner_worker(args) -> int:
     return 0 if worker.last_error is None else 1
 
 
+def _cmd_lowlevel_certify_report(args) -> int:
+    from embodied_control.lowlevel.slo import certify_report_file
+
+    certificate = certify_report_file(args.report, args.output or None)
+    print(json.dumps(certificate, indent=2))
+    return 0 if certificate["pass"] else 1
+
+
 def _cmd_lowlevel_oracle_worker(args) -> int:
     import numpy as np
 
@@ -638,6 +646,13 @@ def build_parser() -> argparse.ArgumentParser:
     lnoracle.add_argument("--create-slots", action="store_true")
     lnoracle.add_argument("--report", default="")
     lnoracle.set_defaults(func=_cmd_lowlevel_oracle_worker)
+
+    lcert = lows.add_parser(
+        "certify-report", help="grade a native runtime report against the timing SLOs"
+    )
+    lcert.add_argument("report")
+    lcert.add_argument("--output", default="")
+    lcert.set_defaults(func=_cmd_lowlevel_certify_report)
     lunitree = lows.add_parser(
         "unitree", help="run the native G1 DDS tracker (writes off by default)"
     )
