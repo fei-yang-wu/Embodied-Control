@@ -300,12 +300,51 @@ def _cmd_lowlevel_mujoco_native(args) -> int:
         policy_threads=args.policy_threads,
         command_source=args.command_source,
     )
+    from embodied_control.logging import EcLogger, LogConfig
+    from embodied_control.lowlevel.telemetry import TelemetryRecorder
+
+    telemetry_dir = Path(args.telemetry_dir).resolve() if args.telemetry_dir else None
+    logger = EcLogger.null()
+    if telemetry_dir is not None:
+        telemetry_dir.mkdir(parents=True, exist_ok=True)
+        logger = EcLogger.create(
+            LogConfig(level="INFO", console=False, log_dir=str(telemetry_dir)),
+            telemetry_dir.name,
+        )
+    recorder = TelemetryRecorder(
+        runtime, logger=logger.child("telemetry"), sample_hz=args.telemetry_hz
+    )
+    mpjpe_motion = None
+    if args.mpjpe:
+        if args.command_source != "oracle":
+            raise SystemExit("--mpjpe needs --command-source oracle (a reference motion)")
+        if not args.reference_root or not args.motion:
+            raise SystemExit("--mpjpe needs --reference-root and --motion")
+        from embodied_control.lowlevel.reference import ReferenceArrays
+
+        mpjpe_motion = ReferenceArrays(args.reference_root).motion(args.motion)
+        # Match the Isaac protocol: the episode starts ON reference frame 0.
+        runtime.set_initial_pose(
+            np.concatenate(
+                [
+                    mpjpe_motion.anchor_pos_w[0],
+                    mpjpe_motion.anchor_quat_w[0],
+                    mpjpe_motion.joint_qpos[0],
+                ]
+            )
+        )
     try:
+        recorder.start()
         runtime.start(args.ticks, paced=True)
         runtime.wait()
     except KeyboardInterrupt:
         runtime.stop()
         runtime.wait()
+    finally:
+        recorder.stop()
+    telemetry_record = recorder.collect()
+    if telemetry_dir is not None:
+        recorder.save(telemetry_dir, telemetry_record)
     heights = runtime.base_heights()
     heights = heights[np.isfinite(heights)]
     reference_errors = runtime.reference_joint_mae()
@@ -332,6 +371,17 @@ def _cmd_lowlevel_mujoco_native(args) -> int:
             else None
         ),
     }
+    if args.mpjpe:
+        from embodied_control.lowlevel.metrics import oracle_tracking_metrics
+
+        motion = mpjpe_motion
+        tracking = oracle_tracking_metrics(
+            bundle.manifest.action, args.model, motion, telemetry_record
+        )
+        per_frame = tracking.pop("per_frame")
+        if telemetry_dir is not None:
+            np.savez_compressed(telemetry_dir / "mpjpe_per_frame.npz", **per_frame)
+        report["tracking_mpjpe"] = {**tracking, "motion": motion.name}
     if args.report:
         output = Path(args.report).resolve()
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -522,6 +572,46 @@ def _cmd_lowlevel_unitree(args) -> int:
     )
 
 
+def _cmd_lowlevel_plant(args) -> int:
+    import numpy as np
+
+    from embodied_control.lowlevel.bundle import PolicyBundle
+    from embodied_control.lowlevel.native_core import NativeDdsPlant
+
+    plant = NativeDdsPlant(
+        PolicyBundle.load(args.bundle),
+        args.model,
+        args.network,
+        timestep=args.timestep,
+        mode_machine=args.mode_machine,
+        physics_cpu=args.physics_cpu,
+        physics_fifo_priority=args.physics_fifo_priority,
+        lock_memory=args.lock_memory,
+        require_realtime=args.require_realtime,
+    )
+    if args.initial_pose:
+        plant.set_initial_pose(np.load(args.initial_pose))
+        plant.reset()
+    plant.start()
+    print("PLANT_READY", flush=True)
+    deadline = time.monotonic() + args.seconds if args.seconds > 0 else None
+    try:
+        while plant.running and (deadline is None or time.monotonic() < deadline):
+            time.sleep(0.05)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        plant.stop()
+        plant.wait_for_stop()
+    report = plant.stats()
+    if args.report:
+        output = Path(args.report).resolve()
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(report, indent=2) + "\n")
+    print(json.dumps(report, indent=2))
+    return 0 if not report["physics_fault"] and report["publishes"] > 0 else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="ec", description="Embodied-Control eval orchestrator"
@@ -617,6 +707,12 @@ def build_parser() -> argparse.ArgumentParser:
     lnmj.add_argument("--physics-lock-memory", action="store_true")
     lnmj.add_argument("--physics-require-realtime", action="store_true")
     lnmj.add_argument("--report", default="")
+    lnmj.add_argument("--mpjpe", action="store_true",
+                      help="compute MPJPE-L/G; needs oracle source + --reference-root/--motion")
+    lnmj.add_argument("--reference-root", default="")
+    lnmj.add_argument("--motion", default="")
+    lnmj.add_argument("--telemetry-dir", default="")
+    lnmj.add_argument("--telemetry-hz", type=float, default=1.0)
     lnmj.set_defaults(func=_cmd_lowlevel_mujoco_native)
     lnplanner = lows.add_parser(
         "planner-worker",
@@ -676,6 +772,28 @@ def build_parser() -> argparse.ArgumentParser:
     lunitree.add_argument("--enable-writes", action="store_true")
     lunitree.add_argument("--confirm", default="")
     lunitree.set_defaults(func=_cmd_lowlevel_unitree)
+    lplant = lows.add_parser(
+        "plant", help="serve MuJoCo physics on the G1 hardware DDS protocol"
+    )
+    lplant.add_argument("bundle")
+    lplant.add_argument("--model", required=True)
+    lplant.add_argument("--network", default="lo")
+    lplant.add_argument("--timestep", type=float, default=0.002)
+    lplant.add_argument("--mode-machine", type=int, default=5)
+    lplant.add_argument(
+        "--seconds", type=float, default=0.0, help="0 serves until Ctrl-C"
+    )
+    lplant.add_argument(
+        "--initial-pose",
+        default="",
+        help=".npy with the 36-value Isaac-order start pose",
+    )
+    lplant.add_argument("--physics-cpu", type=int, default=-1)
+    lplant.add_argument("--physics-fifo-priority", type=int, default=0)
+    lplant.add_argument("--lock-memory", action="store_true")
+    lplant.add_argument("--require-realtime", action="store_true")
+    lplant.add_argument("--report", default="")
+    lplant.set_defaults(func=_cmd_lowlevel_plant)
 
     return p
 

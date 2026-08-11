@@ -143,6 +143,11 @@ void NativeFakeRuntime::start(std::size_t max_ticks, bool paced) {
   base_heights_.assign(max_ticks, std::numeric_limits<float>::quiet_NaN());
   reference_joint_mae_.assign(
       max_ticks, std::numeric_limits<float>::quiet_NaN());
+  reference_frames_.assign(max_ticks, -1);
+  joint_position_log_.assign(max_ticks * kJointCount,
+                             std::numeric_limits<float>::quiet_NaN());
+  anchor_pose_log_.assign(max_ticks * 7,
+                          std::numeric_limits<float>::quiet_NaN());
   backend_->reset();
   robot_state_ = backend_->read_state();
   planner_history_initialized_ = false;
@@ -562,6 +567,16 @@ bool NativeFakeRuntime::accept_reference_chunk(std::uint32_t length) noexcept {
 void NativeFakeRuntime::record_reference_metrics() noexcept {
   if (loop_tick_ < base_heights_.size()) {
     base_heights_[loop_tick_] = static_cast<float>(backend_->base_height());
+    std::copy(robot_state_.joint_position.begin(),
+              robot_state_.joint_position.end(),
+              joint_position_log_.begin() + loop_tick_ * kJointCount);
+    if (robot_state_.anchor_pose_valid) {
+      float* pose = anchor_pose_log_.data() + loop_tick_ * 7;
+      std::copy(robot_state_.anchor_position_w.begin(),
+                robot_state_.anchor_position_w.end(), pose);
+      std::copy(robot_state_.anchor_quaternion_w.begin(),
+                robot_state_.anchor_quaternion_w.end(), pose + 3);
+    }
   }
   if (!planner_.oracle_reference || active_reference_length_ == 0 ||
       loop_tick_ < active_reference_tick_ ||
@@ -575,6 +590,10 @@ void NativeFakeRuntime::record_reference_metrics() noexcept {
   if (frame >= available_frames || frame >= active_reference_valid_frames_) {
     return;
   }
+  // `frame` is the slot inside the active window; the absolute reference
+  // frame is offset by the window's start frame.
+  reference_frames_[loop_tick_] =
+      static_cast<std::int32_t>(active_reference_tick_ + frame);
   const float* reference = active_reference_chunk_.data() +
                            kReferenceHeaderWidth +
                            frame * kRawReferenceWidth;
@@ -723,6 +742,26 @@ std::vector<float> NativeFakeRuntime::base_heights() const {
 std::vector<float> NativeFakeRuntime::reference_joint_mae() const {
   const std::size_t count = static_cast<std::size_t>(ticks_.load());
   return {reference_joint_mae_.begin(), reference_joint_mae_.begin() + count};
+}
+
+void NativeFakeRuntime::set_initial_pose(std::span<const float> pose) {
+  backend_->set_initial_pose(pose);
+}
+
+std::vector<std::int32_t> NativeFakeRuntime::reference_frames() const {
+  const std::size_t count = static_cast<std::size_t>(ticks_.load());
+  return {reference_frames_.begin(), reference_frames_.begin() + count};
+}
+
+std::vector<float> NativeFakeRuntime::joint_position_log() const {
+  const std::size_t count = static_cast<std::size_t>(ticks_.load());
+  return {joint_position_log_.begin(),
+          joint_position_log_.begin() + count * kJointCount};
+}
+
+std::vector<float> NativeFakeRuntime::anchor_pose_log() const {
+  const std::size_t count = static_cast<std::size_t>(ticks_.load());
+  return {anchor_pose_log_.begin(), anchor_pose_log_.begin() + count * 7};
 }
 
 RobotState NativeFakeRuntime::state() const {

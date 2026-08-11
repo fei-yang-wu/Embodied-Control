@@ -28,6 +28,10 @@ class NativeRobotBackend {
  public:
   virtual ~NativeRobotBackend() = default;
   virtual void reset() = 0;
+  // Optional frame-0 start: [root pos 3 | root quat XYZW 4 | joints 29].
+  virtual void set_initial_pose(std::span<const float> pose) {
+    static_cast<void>(pose);
+  }
   virtual void start(bool paced) {
     static_cast<void>(paced);
   }
@@ -81,6 +85,7 @@ class NativeMujocoBackend final : public NativeRobotBackend {
   NativeMujocoBackend& operator=(const NativeMujocoBackend&) = delete;
 
   void reset() override;
+  void set_initial_pose(std::span<const float> pose) override;
   void start(bool paced) override;
   void stop() noexcept override;
   void wait_for_stop() noexcept override;
@@ -115,6 +120,8 @@ class NativeMujocoBackend final : public NativeRobotBackend {
   std::unique_ptr<StateSlot> state_slot_;
   std::unique_ptr<CommandSlot> command_slot_;
   std::array<float, kJointCount> default_joint_position_{};
+  std::array<float, 36> initial_pose_{};
+  bool has_initial_pose_ = false;
   std::array<float, kJointCount> stiffness_{};
   std::array<float, kJointCount> damping_{};
   std::array<std::size_t, kJointCount> actuator_to_isaac_{};

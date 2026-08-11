@@ -46,6 +46,31 @@ _SCENE_TEMPLATE = """
 """
 
 
+def load_scene_model(model_path: str | Path):
+    """Load the G1 MJCF wrapped in the light/camera scene.
+
+    Mesh paths in the MJCF resolve relative to the main model file, so the
+    wrapper scene is written beside it while loading.
+    """
+    import os
+    import tempfile
+
+    import mujoco
+
+    model_path = Path(model_path).resolve()
+    if not model_path.is_file():
+        raise FileNotFoundError(f"MJCF not found: {model_path}")
+    wrapper = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".xml", dir=model_path.parent, delete=False
+    )
+    try:
+        wrapper.write(_SCENE_TEMPLATE.format(model=model_path.name))
+        wrapper.close()
+        return mujoco.MjModel.from_xml_path(wrapper.name)
+    finally:
+        os.unlink(wrapper.name)
+
+
 class _SimClock:
     def __init__(self, backend: "MujocoBackend"):
         self._backend = backend
@@ -77,23 +102,7 @@ class MujocoBackend:
                 "the MuJoCo backend needs armature and effort_limit in the "
                 "action contract; re-export the bundle"
             )
-        model_path = Path(model_path).resolve()
-        if not model_path.is_file():
-            raise FileNotFoundError(f"MJCF not found: {model_path}")
-        # Mesh paths in the MJCF resolve relative to the main model file, so
-        # the wrapper scene must live in the same directory while loading.
-        import os
-        import tempfile
-
-        wrapper = tempfile.NamedTemporaryFile(
-            mode="w", suffix=".xml", dir=model_path.parent, delete=False
-        )
-        try:
-            wrapper.write(_SCENE_TEMPLATE.format(model=model_path.name))
-            wrapper.close()
-            self.model = mujoco.MjModel.from_xml_path(wrapper.name)
-        finally:
-            os.unlink(wrapper.name)
+        self.model = load_scene_model(model_path)
         self.data = mujoco.MjData(self.model)
         self._action = action
         self._decimation = int(decimation)

@@ -123,7 +123,7 @@ ec-native = { path = "native/ec_native", editable = true }
 
 [feature.native.tasks]
 build-native = "pixi reinstall -e native ec-native && python -c \"import ec_native; print(ec_native.__version__)\""
-test-native = "pytest -q tests/lowlevel/test_native_shm.py tests/lowlevel/test_native_core.py"
+test-native = "pytest -q tests/lowlevel/test_native_shm.py tests/lowlevel/test_native_core.py tests/lowlevel/test_metrics_and_telemetry.py tests/lowlevel/test_dds_plant.py"
 
 [environments]
 sim = ["sim"]

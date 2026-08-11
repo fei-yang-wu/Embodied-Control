@@ -219,6 +219,19 @@ class NativeFakeLoop:
     def state(self) -> dict[str, np.ndarray]:
         return self._runtime.state()
 
+    def set_initial_pose(self, pose: np.ndarray) -> None:
+        """Frame-0 start: [root pos 3 | root quat XYZW 4 | joints 29]."""
+        self._runtime.set_initial_pose(np.ascontiguousarray(pose, dtype=np.float32))
+
+    def reference_frames(self) -> np.ndarray:
+        return np.asarray(self._runtime.reference_frames())
+
+    def joint_position_log(self) -> np.ndarray:
+        return np.asarray(self._runtime.joint_position_log())
+
+    def anchor_pose_log(self) -> np.ndarray:
+        return np.asarray(self._runtime.anchor_pose_log())
+
     def tick_durations_ns(self) -> np.ndarray:
         return np.asarray(self._runtime.tick_durations_ns(), dtype=np.uint64)
 
@@ -469,6 +482,107 @@ class NativeUnitreeLoop(NativeFakeLoop):
         return dict(self._runtime.writer_stats())
 
 
+class NativeDdsPlant:
+    """MuJoCo physics serving the exact G1 hardware DDS protocol.
+
+    The Digit-style unified plant interface: the controller runs the one
+    hardware code path (``NativeUnitreeLoop``) against this plant on
+    interface ``lo`` and against the robot on its NIC; nothing else changes.
+    Per-joint data crosses the wire in SDK motor order, so this wrapper
+    derives the SDK-ordered tables from the bundle's Isaac-order contract.
+    """
+
+    def __init__(
+        self,
+        bundle: PolicyBundle,
+        model_path: str,
+        network_interface: str = "lo",
+        *,
+        timestep: float = 0.002,
+        mode_machine: int = 5,
+        physics_cpu: int = -1,
+        physics_fifo_priority: int = 0,
+        lock_memory: bool = False,
+        require_realtime: bool = False,
+    ) -> None:
+        try:
+            import ec_native
+        except ImportError as exc:  # pragma: no cover - optional build
+            raise ImportError(
+                "NativeDdsPlant needs the Unitree-enabled native build"
+            ) from exc
+        if not ec_native.WITH_UNITREE:
+            raise RuntimeError(
+                "ec_native was built without Unitree SDK2; set "
+                "EC_UNITREE_SDK_ROOT and run `pixi run -e native build-native`"
+            )
+        action = bundle.manifest.action
+        if not action.isaac_to_sdk:
+            raise ValueError("the DDS plant requires isaac_to_sdk in the bundle")
+        if not action.armature or not action.effort_limit:
+            raise ValueError(
+                "the DDS plant requires armature and effort_limit in the bundle"
+            )
+        self._isaac_to_sdk = [int(v) for v in action.isaac_to_sdk]
+        count = len(self._isaac_to_sdk)
+        sdk_joint_names = [""] * count
+        for isaac, sdk in enumerate(self._isaac_to_sdk):
+            sdk_joint_names[sdk] = action.isaac_joint_names[isaac]
+        self.bundle = bundle
+        self._plant = ec_native.MujocoDdsPlant(
+            str(model_path),
+            str(network_interface),
+            sdk_joint_names,
+            self._to_sdk(action.default_joint_pos),
+            self._to_sdk(action.armature),
+            self._to_sdk(action.effort_limit),
+            self._to_sdk(action.stiffness),
+            self._to_sdk(action.damping),
+            float(timestep),
+            int(mode_machine),
+            int(physics_cpu),
+            int(physics_fifo_priority),
+            bool(lock_memory),
+            bool(require_realtime),
+        )
+
+    def _to_sdk(self, values) -> np.ndarray:
+        isaac = np.asarray(values, dtype=np.float32)
+        sdk = np.empty_like(isaac)
+        sdk[self._isaac_to_sdk] = isaac
+        return sdk
+
+    def set_initial_pose(self, pose) -> None:
+        """Isaac-order start pose [pos 3 | quat XYZW 4 | joints 29]."""
+        values = np.asarray(pose, dtype=np.float32)
+        if values.size == 0:
+            self._plant.set_initial_pose(np.zeros(0, np.float32))
+            return
+        if values.shape != (36,):
+            raise ValueError("initial pose must have 36 values")
+        converted = np.concatenate([values[:7], self._to_sdk(values[7:])])
+        self._plant.set_initial_pose(converted)
+
+    def reset(self) -> None:
+        self._plant.reset()
+
+    def start(self) -> None:
+        self._plant.start()
+
+    def stop(self) -> None:
+        self._plant.stop()
+
+    def wait_for_stop(self) -> None:
+        self._plant.wait_for_stop()
+
+    @property
+    def running(self) -> bool:
+        return bool(self._plant.running)
+
+    def stats(self) -> dict[str, float | int | bool]:
+        return dict(self._plant.stats())
+
+
 def verify_native_bundle(
     bundle: PolicyBundle, *, warmup_iterations: int = 8
 ) -> dict[str, float | int]:
@@ -581,6 +695,7 @@ def benchmark_native_bundle(
 
 
 __all__ = [
+    "NativeDdsPlant",
     "NativeFakeLoop",
     "NativeMujocoLoop",
     "NativeTracker",

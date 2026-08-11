@@ -18,6 +18,7 @@
 #include "native_fake_runtime.hpp"
 #include "shm_command_slot.hpp"
 #ifdef EC_WITH_UNITREE
+#include "mujoco_dds_plant.hpp"
 #include "unitree_backend.hpp"
 #endif
 
@@ -347,6 +348,37 @@ class NativeFakeRuntimeBinding {
     return result;
   }
 
+  void set_initial_pose(const FloatArray& pose) {
+    const auto info = pose.request();
+    runtime_->set_initial_pose(std::span<const float>(
+        static_cast<const float*>(info.ptr),
+        static_cast<std::size_t>(info.size)));
+  }
+
+  py::array_t<std::int32_t> reference_frames() const {
+    const auto values = runtime_->reference_frames();
+    py::array_t<std::int32_t> result(static_cast<py::ssize_t>(values.size()));
+    std::memcpy(result.mutable_data(), values.data(),
+                sizeof(std::int32_t) * values.size());
+    return result;
+  }
+
+  py::array_t<float> joint_position_log() const {
+    const auto values = runtime_->joint_position_log();
+    py::array_t<float> result(static_cast<py::ssize_t>(values.size()));
+    std::memcpy(result.mutable_data(), values.data(),
+                sizeof(float) * values.size());
+    return result;
+  }
+
+  py::array_t<float> anchor_pose_log() const {
+    const auto values = runtime_->anchor_pose_log();
+    py::array_t<float> result(static_cast<py::ssize_t>(values.size()));
+    std::memcpy(result.mutable_data(), values.data(),
+                sizeof(float) * values.size());
+    return result;
+  }
+
   double backend_time() const { return runtime_->backend_time(); }
 
   double base_height() const { return runtime_->base_height(); }
@@ -630,6 +662,78 @@ class NativeUnitreeRuntimeBinding : public NativeFakeRuntimeBinding {
 
   ec_native::NativeUnitreeBackend* backend_ = nullptr;
 };
+
+class MujocoDdsPlantBinding {
+ public:
+  MujocoDdsPlantBinding(
+      const std::string& model_path, const std::string& network_interface,
+      const std::vector<std::string>& sdk_joint_names,
+      const FloatArray& default_joint_position, const FloatArray& armature,
+      const FloatArray& effort_limit, const FloatArray& hold_stiffness,
+      const FloatArray& hold_damping, double timestep, int mode_machine,
+      int physics_cpu, int physics_fifo_priority, bool lock_memory,
+      bool require_realtime)
+      : plant_(model_path, network_interface, sdk_joint_names,
+               vector_from_array(default_joint_position, ec_native::kJointCount,
+                                 "default_joint_position"),
+               vector_from_array(armature, ec_native::kJointCount, "armature"),
+               vector_from_array(effort_limit, ec_native::kJointCount,
+                                 "effort_limit"),
+               vector_from_array(hold_stiffness, ec_native::kJointCount,
+                                 "hold_stiffness"),
+               vector_from_array(hold_damping, ec_native::kJointCount,
+                                 "hold_damping"),
+               timestep, static_cast<std::uint8_t>(mode_machine), physics_cpu,
+               physics_fifo_priority, lock_memory, require_realtime) {
+    if (mode_machine < 0 || mode_machine > 255) {
+      throw std::runtime_error("mode_machine must fit in one byte");
+    }
+  }
+
+  void start() { plant_.start(); }
+  void stop() { plant_.stop(); }
+  void wait_for_stop() {
+    py::gil_scoped_release release;
+    plant_.wait_for_stop();
+  }
+  bool running() const { return plant_.running(); }
+  void reset() { plant_.reset(); }
+
+  void set_initial_pose(const FloatArray& pose) {
+    const auto values =
+        vector_from_array(pose, 36, "initial_pose", /*allow_empty=*/true);
+    plant_.set_initial_pose(values);
+  }
+
+  py::dict stats() const {
+    const ec_native::PlantStats values = plant_.stats();
+    py::dict result;
+    result["steps"] = values.steps;
+    result["publishes"] = values.publishes;
+    result["publish_failures"] = values.publish_failures;
+    result["commands_received"] = values.commands_received;
+    result["crc_errors"] = values.crc_errors;
+    result["wake_late_ns_max"] = values.wake_late_ns_max;
+    result["deadline_misses"] = values.deadline_misses;
+    result["holding"] = values.holding;
+    result["physics_fault"] = values.physics_fault;
+    result["realtime_configured"] = values.realtime_configured;
+    result["last_command_age_ms"] = values.last_command_age_ms;
+    result["time"] = values.time;
+    result["base_height"] = values.base_height;
+    result["min_base_height"] = values.min_base_height;
+    result["applied_kp_min"] = values.applied_kp_min;
+    result["applied_kp_max"] = values.applied_kp_max;
+    result["applied_kd_min"] = values.applied_kd_min;
+    result["applied_kd_max"] = values.applied_kd_max;
+    result["applied_q_absmax"] = values.applied_q_absmax;
+    result["applied_extra_absmax"] = values.applied_extra_absmax;
+    return result;
+  }
+
+ private:
+  ec_native::MujocoDdsPlant plant_;
+};
 #endif
 
 class OnnxEngineBinding {
@@ -769,6 +873,12 @@ PYBIND11_MODULE(_ec_native, m) {
       .def("state", &NativeFakeRuntimeBinding::state)
       .def("tick_durations_ns",
            &NativeFakeRuntimeBinding::tick_durations_ns)
+      .def("set_initial_pose", &NativeFakeRuntimeBinding::set_initial_pose,
+           py::arg("pose"))
+      .def("reference_frames", &NativeFakeRuntimeBinding::reference_frames)
+      .def("joint_position_log",
+           &NativeFakeRuntimeBinding::joint_position_log)
+      .def("anchor_pose_log", &NativeFakeRuntimeBinding::anchor_pose_log)
       .def("base_heights", &NativeFakeRuntimeBinding::base_heights)
       .def("reference_joint_mae",
            &NativeFakeRuntimeBinding::reference_joint_mae)
@@ -852,6 +962,28 @@ PYBIND11_MODULE(_ec_native, m) {
       .def_property_readonly("unitree_mode",
                              &NativeUnitreeRuntimeBinding::unitree_mode)
       .def("writer_stats", &NativeUnitreeRuntimeBinding::writer_stats);
+
+  py::class_<MujocoDdsPlantBinding>(m, "MujocoDdsPlant")
+      .def(py::init<const std::string&, const std::string&,
+                    const std::vector<std::string>&, const FloatArray&,
+                    const FloatArray&, const FloatArray&, const FloatArray&,
+                    const FloatArray&, double, int, int, int, bool, bool>(),
+           py::arg("model_path"), py::arg("network_interface"),
+           py::arg("sdk_joint_names"), py::arg("default_joint_position"),
+           py::arg("armature"), py::arg("effort_limit"),
+           py::arg("hold_stiffness"), py::arg("hold_damping"),
+           py::arg("timestep") = 0.002, py::arg("mode_machine") = 5,
+           py::arg("physics_cpu") = -1, py::arg("physics_fifo_priority") = 0,
+           py::arg("lock_memory") = false,
+           py::arg("require_realtime") = false)
+      .def("start", &MujocoDdsPlantBinding::start)
+      .def("stop", &MujocoDdsPlantBinding::stop)
+      .def("wait_for_stop", &MujocoDdsPlantBinding::wait_for_stop)
+      .def_property_readonly("running", &MujocoDdsPlantBinding::running)
+      .def("reset", &MujocoDdsPlantBinding::reset)
+      .def("set_initial_pose", &MujocoDdsPlantBinding::set_initial_pose,
+           py::arg("pose"))
+      .def("stats", &MujocoDdsPlantBinding::stats);
 #endif
 
 #ifdef VERSION_INFO

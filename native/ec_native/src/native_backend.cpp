@@ -269,6 +269,18 @@ void NativeMujocoBackend::set_gains(
   }
 }
 
+void NativeMujocoBackend::set_initial_pose(std::span<const float> pose) {
+  if (pose.empty()) {
+    has_initial_pose_ = false;
+    return;
+  }
+  if (pose.size() != initial_pose_.size()) {
+    throw std::runtime_error("initial pose must have 36 values");
+  }
+  std::copy(pose.begin(), pose.end(), initial_pose_.begin());
+  has_initial_pose_ = true;
+}
+
 void NativeMujocoBackend::reset() {
   stop();
   wait_for_stop();
@@ -277,17 +289,31 @@ void NativeMujocoBackend::reset() {
   if (impl_->model->nq < 7 || impl_->model->nv < 6) {
     throw std::runtime_error("MuJoCo model has no floating base");
   }
-  data->qpos[0] = 0.0;
-  data->qpos[1] = 0.0;
-  data->qpos[2] = 0.76;
-  data->qpos[3] = 1.0;
-  data->qpos[4] = 0.0;
-  data->qpos[5] = 0.0;
-  data->qpos[6] = 0.0;
+  if (has_initial_pose_) {
+    data->qpos[0] = initial_pose_[0];
+    data->qpos[1] = initial_pose_[1];
+    data->qpos[2] = initial_pose_[2];
+    // Runtime quaternions are XYZW; MuJoCo stores WXYZ.
+    data->qpos[3] = initial_pose_[6];
+    data->qpos[4] = initial_pose_[3];
+    data->qpos[5] = initial_pose_[4];
+    data->qpos[6] = initial_pose_[5];
+  } else {
+    data->qpos[0] = 0.0;
+    data->qpos[1] = 0.0;
+    data->qpos[2] = 0.76;
+    data->qpos[3] = 1.0;
+    data->qpos[4] = 0.0;
+    data->qpos[5] = 0.0;
+    data->qpos[6] = 0.0;
+  }
   for (std::size_t actuator = 0; actuator < kJointCount; ++actuator) {
     const std::size_t isaac = actuator_to_isaac_[actuator];
-    data->qpos[qpos_address_[actuator]] = default_joint_position_[isaac];
-    data->ctrl[actuator] = default_joint_position_[isaac];
+    const float joint = has_initial_pose_
+                            ? initial_pose_[7 + isaac]
+                            : default_joint_position_[isaac];
+    data->qpos[qpos_address_[actuator]] = joint;
+    data->ctrl[actuator] = joint;
   }
   set_gains(stiffness_, damping_);
   mj_forward(impl_->model, data);

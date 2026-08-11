@@ -43,7 +43,7 @@ pixi run -e transports test-transports # OpenPI + GR00T client adapter tests (we
 pixi run -e lowlevel test-lowlevel     # 50 Hz tracker runtime: buffers, bundle, loop, torch engine
 pixi run -e lowlevel smoke-lowlevel    # self-contained closed-loop smoke (synthetic bundle, fake env)
 pixi run -e native build-native        # build the ec_native C++ extension (scikit-build-core + pybind11)
-pixi run -e native test-native         # shm command-buffer semantics + cross-process tests
+pixi run -e native test-native         # shm slots, native loops, MPJPE/telemetry, DDS-plant loopback
 pixi run doctor                        # host + dependency check (imageio, offscreen renderer, docker, ...)
 ```
 

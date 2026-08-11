@@ -51,10 +51,10 @@ class _MarkerEncoder(torch.nn.Module):
         return window[:, :6]
 
 
-def _native_bundle(tmp_path, latent_manifest, *, with_encoder=False):
+def _native_bundle(tmp_path, latent_manifest, *, with_encoder=False, model=None):
     root = tmp_path / "native_bundle"
     root.mkdir()
-    model = _FirstActionTerms().eval()
+    model = (_FirstActionTerms() if model is None else model).eval()
     torch.onnx.export(
         model,
         torch.zeros(1, 101),

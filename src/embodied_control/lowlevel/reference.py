@@ -24,6 +24,8 @@ class ReferenceMotion:
     joint_qpos: np.ndarray     # [T, 29] Isaac order
     anchor_pos_w: np.ndarray   # [T, 3]
     anchor_quat_w: np.ndarray  # [T, 4] XYZW
+    body_names: tuple[str, ...] = ()
+    body_pos_w: np.ndarray | None = None  # [T, B, 3] tracked-body world positions
 
     @property
     def length(self) -> int:
@@ -37,13 +39,26 @@ class ReferenceArrays:
         if not manifest_path.is_file():
             raise FileNotFoundError(f"not a reference-array tree: {manifest_path}")
         manifest = json.loads(manifest_path.read_text())
+        # The tree is produced by IsaacLab-Imitation's reference-buffer
+        # pipeline (ImitationLearningTools side); this reader is the frozen
+        # consumer contract, pinned by the format version.
+        version = manifest.get("format_version")
+        if version != 1:
+            raise ValueError(
+                f"unsupported reference-array format_version {version!r}; this "
+                "reader understands version 1"
+            )
         self.manifest = manifest
         key = manifest["key"]
         self.joint_names: list[str] = list(key["joint_names"])
         self.anchor_body: str = key["anchor_body"]
+        self.body_names: tuple[str, ...] = tuple(key.get("body_names", ()))
         arrays = key["arrays"]
         self._qpos = self._open(arrays, "qpos")
         self._anchor_pos = self._open(arrays, "anchor_pos_w")
+        self._body_pos = (
+            self._open(arrays, "body_pos_w") if "body_pos_w" in arrays else None
+        )
         anchor_quat = self._open(arrays, "anchor_quat_w")
         order = arrays["anchor_quat_w"].get("quaternion_order")
         if order == "wxyz":
@@ -84,6 +99,12 @@ class ReferenceArrays:
             joint_qpos=np.asarray(self._qpos[start:end, 7:], dtype=np.float32),
             anchor_pos_w=np.asarray(self._anchor_pos[start:end], dtype=np.float32),
             anchor_quat_w=np.asarray(self._anchor_quat[start:end], dtype=np.float32),
+            body_names=self.body_names,
+            body_pos_w=(
+                None
+                if self._body_pos is None
+                else np.asarray(self._body_pos[start:end], dtype=np.float32)
+            ),
         )
 
 

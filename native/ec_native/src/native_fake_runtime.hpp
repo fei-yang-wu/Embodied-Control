@@ -120,10 +120,14 @@ class NativeFakeRuntime {
   void wait();
   bool running() const noexcept { return running_.load(); }
 
+  void set_initial_pose(std::span<const float> pose);
   NativeRuntimeStats stats() const noexcept;
   std::vector<std::uint64_t> tick_durations_ns() const;
   std::vector<float> base_heights() const;
   std::vector<float> reference_joint_mae() const;
+  std::vector<std::int32_t> reference_frames() const;
+  std::vector<float> joint_position_log() const;
+  std::vector<float> anchor_pose_log() const;
   RobotState state() const;
   double backend_time() const;
   double base_height() const;
@@ -194,6 +198,9 @@ class NativeFakeRuntime {
   std::vector<std::uint64_t> tick_durations_;
   std::vector<float> base_heights_;
   std::vector<float> reference_joint_mae_;
+  std::vector<std::int32_t> reference_frames_;
+  std::vector<float> joint_position_log_;  // ticks x kJointCount
+  std::vector<float> anchor_pose_log_;     // ticks x 7 (pos, quat XYZW)
 
   std::atomic<std::uint64_t> ticks_{0};
   std::atomic<std::uint64_t> control_ticks_{0};
