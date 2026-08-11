@@ -1,0 +1,27 @@
+[build-system]
+requires = ["scikit-build-core>=0.10", "pybind11>=2.12"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "ec-native"
+version = "0.1.0"
+description = "Native (C++/pybind11) hot-path modules for embodied_control.lowlevel"
+requires-python = ">=3.10"
+dependencies = ["numpy"]
+
+# Pattern from ~/Documents/SL/rcd, with its silent gaps fixed:
+# - pybind11 comes from the environment (pixi) via find_package(CONFIG), not a
+#   git submodule; build with `pip install --no-build-isolation` so the
+#   pixi-provided cmake/ninja/compiler/pybind11 are the ones used.
+# - build-dir keeps the CMake cache for explicit developer rebuilds.
+# - import-time rebuild is disabled because isolated editable builds cache a
+#   temporary Python executable. `pixi run -e native build-native` is the one
+#   deterministic rebuild command after C++ or CMake changes.
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+build-dir = "build/{wheel_tag}"
+editable.rebuild = false
+editable.verbose = true
+
+[tool.scikit-build.wheel.packages]
+ec_native = "python/ec_native"
