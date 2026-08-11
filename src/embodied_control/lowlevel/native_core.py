@@ -32,27 +32,26 @@ def _direct_command_tag(bundle: PolicyBundle) -> int:
 
 
 def _require_supported_encoder_cadence(bundle: PolicyBundle) -> None:
-    command = bundle.manifest.command
-    if (
-        bundle.manifest.models.get("encoder_onnx") is not None
-        and command.macro_frame_stride != 1
-    ):
-        raise ValueError(
-            "native chunk encoding currently requires macro_frame_stride=1"
-        )
+    del bundle
 
 
 def _oracle_enabled(bundle: PolicyBundle, command_source: str) -> bool:
     if command_source not in {"vla", "oracle"}:
         raise ValueError("command_source must be 'vla' or 'oracle'")
     oracle = command_source == "oracle"
+    command = bundle.manifest.command
+    expected_anchor = {
+        "root_qpos": "robot",
+        "joint_qpos_qvel_anchor_ori": "robot_heading",
+    }.get(command.encoder_state_interface)
     if oracle and (
-        bundle.manifest.command.encoder_state_interface != "root_qpos"
-        or bundle.manifest.command.macro_anchor_mode != "robot"
+        expected_anchor is None
+        or command.macro_anchor_mode != expected_anchor
+        or command.macro_frame_stride is None
         or bundle.manifest.models.get("encoder_onnx") is None
     ):
         raise ValueError(
-            "oracle command_source needs a robot-anchored root_qpos ONNX encoder"
+            "oracle command_source needs a supported robot-anchored ONNX encoder"
         )
     return oracle
 
@@ -72,7 +71,17 @@ class NativeTracker:
         artifact = bundle.manifest.models.get("policy_onnx")
         if artifact is None:
             raise ValueError("native tracker requires a policy_onnx model artifact")
-        terms = [(term.name, term.width) for term in bundle.manifest.obs.terms]
+        terms = [
+            (
+                term.name,
+                term.width,
+                term.history_length,
+                term.history_stride,
+                term.history_order,
+                term.reset_fill,
+            )
+            for term in bundle.manifest.obs.terms
+        ]
         command_width = sum(
             term.width
             for term in bundle.manifest.obs.terms
@@ -97,6 +106,7 @@ class NativeTracker:
             np.asarray(upper, dtype=np.float32),
             np.asarray(fsq_half, dtype=np.float32),
             fsq_z_dim,
+            float(action.raw_action_clip or 0.0),
             int(intra_op_threads),
         )
 
@@ -189,6 +199,9 @@ class NativeFakeLoop:
             command.phase_mode == "sin_cos",
             _direct_command_tag(bundle),
             oracle_reference,
+            str(command.encoder_state_interface or "root_qpos"),
+            int(command.macro_frame_stride or 1),
+            str(command.encoder_trigger),
             encoder_path,
             encoder_input_name,
             encoder_output_name,
@@ -335,6 +348,9 @@ class NativeMujocoLoop(NativeFakeLoop):
             command.phase_mode == "sin_cos",
             _direct_command_tag(bundle),
             oracle_reference,
+            str(command.encoder_state_interface or "root_qpos"),
+            int(command.macro_frame_stride or 1),
+            str(command.encoder_trigger),
             encoder_path,
             encoder_input_name,
             encoder_output_name,
@@ -426,6 +442,11 @@ class NativeUnitreeLoop(NativeFakeLoop):
             "z_dim": int(command.z_dim or self.tracker.command_width),
             "sin_cos_phase": command.phase_mode == "sin_cos",
             "direct_tag": _direct_command_tag(bundle),
+            "reference_encoder_layout": str(
+                command.encoder_state_interface or "root_qpos"
+            ),
+            "encoder_frame_stride": int(command.macro_frame_stride or 1),
+            "encoder_trigger": str(command.encoder_trigger),
             "encoder_path": encoder_path,
             "encoder_input_name": encoder_input_name,
             "encoder_output_name": encoder_output_name,

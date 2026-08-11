@@ -57,7 +57,7 @@ def _native_bundle(tmp_path, latent_manifest, *, with_encoder=False, model=None)
     model = (_FirstActionTerms() if model is None else model).eval()
     torch.onnx.export(
         model,
-        torch.zeros(1, 101),
+        torch.zeros(1, latent_manifest.obs.total_width),
         root / "policy.onnx",
         input_names=["obs"],
         output_names=["action"],
@@ -84,7 +84,7 @@ def _native_bundle(tmp_path, latent_manifest, *, with_encoder=False, model=None)
     (root / "action_contract.json").write_text(latent_manifest.action.model_dump_json())
     np.savez(
         root / "golden_trace.npz",
-        obs=np.zeros((1, 101), dtype=np.float32),
+        obs=np.zeros((1, latent_manifest.obs.total_width), dtype=np.float32),
         action=np.zeros((1, 29), dtype=np.float32),
     )
     raw = latent_manifest.model_dump()
@@ -94,7 +94,7 @@ def _native_bundle(tmp_path, latent_manifest, *, with_encoder=False, model=None)
             path="policy.onnx",
             input_name="obs",
             output_name="action",
-            input_shape=[1, 101],
+            input_shape=[1, latent_manifest.obs.total_width],
             output_shape=[1, 29],
             opset=18,
             parity_atol=1e-5,
@@ -156,6 +156,8 @@ def _write_reference_tree(root, joint_names, frames=20):
     qpos[:, 2] = 0.76
     qpos[:, 3] = 1.0
     qpos[:, 7:] = np.arange(frames, dtype=np.float32)[:, None] * 0.01
+    qvel = np.zeros((frames, 6 + len(joint_names)), dtype=np.float32)
+    qvel[:, 6:] = np.arange(frames, dtype=np.float32)[:, None] * 0.02
     anchor_pos = np.zeros((frames, 3), dtype=np.float32)
     anchor_pos[:, 0] = np.arange(frames, dtype=np.float32) * 0.002
     anchor_pos[:, 2] = 0.76
@@ -164,6 +166,7 @@ def _write_reference_tree(root, joint_names, frames=20):
     specs = {}
     for name, values, quaternion_order in (
         ("qpos", qpos, None),
+        ("qvel", qvel, None),
         ("anchor_pos_w", anchor_pos, None),
         ("anchor_quat_w", anchor_quat, "xyzw"),
     ):
@@ -233,6 +236,33 @@ def test_native_projected_gravity_matches_python():
     np.testing.assert_allclose(actual, expected, atol=1e-6)
 
 
+def test_native_joint_reference_window_matches_term_major_sonic_layout():
+    raw = np.zeros((55, 62), dtype=np.float32)
+    for frame in range(55):
+        raw[frame, :29] = frame * 100 + np.arange(29)
+        raw[frame, 29:58] = frame * 1000 + np.arange(29)
+        raw[frame, 61] = 1.0
+    actual = ec_native.pack_joint_qpos_qvel_anchor_ori_window(
+        raw, 2, 10, 5, np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
+    )
+    orientation = np.array([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], dtype=np.float32)
+    selected = raw[2 : 2 + 10 * 5 : 5]
+    blocks = []
+    for block in range(5):
+        blocks.extend(
+            [selected[2 * block, :29], selected[2 * block + 1, :29], orientation]
+        )
+    for block in range(5):
+        blocks.extend(
+            [
+                selected[2 * block, 29:58],
+                selected[2 * block + 1, 29:58],
+                orientation,
+            ]
+        )
+    np.testing.assert_array_equal(actual, np.concatenate(blocks))
+
+
 def test_native_oracle_worker_streams_raw_world_frames(tmp_path, latent_manifest):
     command = latent_manifest.command.model_copy(
         update={
@@ -286,6 +316,61 @@ def test_native_oracle_worker_streams_raw_world_frames(tmp_path, latent_manifest
     assert worker.padded_frames == 17
 
 
+def test_native_oracle_encodes_stride_five_reference_on_every_control_tick(
+    tmp_path, latent_manifest
+):
+    command = latent_manifest.command.model_copy(
+        update={
+            "state_dim": 64,
+            "encoder_state_interface": "joint_qpos_qvel_anchor_ori",
+            "macro_anchor_mode": "robot_heading",
+            "macro_frame_stride": 5,
+            "encoder_trigger": "every_control_tick",
+        }
+    )
+    manifest = latent_manifest.model_copy(update={"command": command})
+    bundle = _native_bundle(tmp_path, manifest, with_encoder=True)
+    reference_root = tmp_path / "reference_stride5"
+    qpos, anchor_pos, anchor_quat = _write_reference_tree(
+        reference_root, bundle.manifest.action.isaac_joint_names, frames=60
+    )
+    request_name = _shm_name("oracle_stride5_request")
+    response_name = _shm_name("oracle_stride5_response")
+    worker = NativeOracleWorker(
+        request_name,
+        response_name,
+        bundle,
+        reference_root,
+        "motion",
+        create_slots=True,
+    )
+    worker.start()
+    loop = NativeFakeLoop(
+        bundle,
+        request_slot=request_name,
+        response_slot=response_name,
+        create_slots=False,
+        command_source="oracle",
+        hold_steps=5,
+        lead_ticks=2,
+        command_stale_ms=1000.0,
+    )
+    loop.set_initial_pose(
+        np.concatenate([anchor_pos[0], anchor_quat[0], qpos[0, 7:]])
+    )
+    try:
+        loop.start(12, paced=True)
+        loop.wait()
+    finally:
+        worker.close()
+    stats = loop.stats()
+    assert worker.last_error is None
+    assert stats["fault"] == 0
+    assert stats["control_ticks"] == 12
+    assert stats["encoder_inferences"] == 12
+    assert stats["planner_requests"] >= 3
+
+
 def test_native_step_assembles_and_decodes(tmp_path, latent_manifest):
     tracker = NativeTracker(_native_bundle(tmp_path, latent_manifest))
     tracker.warmup()
@@ -307,6 +392,37 @@ def test_native_step_assembles_and_decodes(tmp_path, latent_manifest):
 
     second = tracker.step_once(_state(), command)
     np.testing.assert_allclose(second["observation"][-29:], result["action"])
+
+
+def test_native_step_assembles_term_major_strided_history(
+    tmp_path, latent_manifest
+):
+    raw = latent_manifest.model_dump()
+    raw["obs"]["terms"][2].update(
+        {
+            "history_length": 3,
+            "history_stride": 2,
+            "history_order": "oldest_first",
+            "reset_fill": "repeat_first",
+        }
+    )
+    raw["obs"]["total_width"] += 6
+    manifest = type(latent_manifest).model_validate(raw)
+    tracker = NativeTracker(_native_bundle(tmp_path, manifest))
+    command = np.arange(8, dtype=np.float32)
+    for tick in range(5):
+        state = _state()
+        state.base_ang_vel[:] = [tick, tick + 0.1, tick + 0.2]
+        result = tracker.step_once(state, command)
+    history = result["observation"][11:20].reshape(3, 3)
+    np.testing.assert_allclose(history[:, 0], [0.0, 2.0, 4.0])
+    tracker.reset()
+    state = _state()
+    state.base_ang_vel[:] = [7.0, 7.1, 7.2]
+    reset = tracker.step_once(state, command)
+    np.testing.assert_allclose(
+        reset["observation"][11:20].reshape(3, 3)[:, 0], [7.0, 7.0, 7.0]
+    )
 
 
 def test_native_step_rejects_nonfinite_state(tmp_path, latent_manifest):
@@ -515,17 +631,17 @@ def test_native_encoder_bundle_accepts_direct_latent_commands(
     assert loop.stats()["fault"] == 0
 
 
-def test_native_encoder_rejects_unimplemented_macro_stride(tmp_path, latent_manifest):
+def test_native_encoder_accepts_recorded_macro_stride(tmp_path, latent_manifest):
     command = latent_manifest.command.model_copy(update={"macro_frame_stride": 5})
     manifest = latent_manifest.model_copy(update={"command": command})
     bundle = _native_bundle(tmp_path, manifest, with_encoder=True)
-    with pytest.raises(ValueError, match="macro_frame_stride=1"):
-        NativeFakeLoop(
-            bundle,
-            response_slot=_shm_name("stride"),
-            hold_steps=5,
-            lead_ticks=2,
-        )
+    loop = NativeFakeLoop(
+        bundle,
+        response_slot=_shm_name("stride"),
+        hold_steps=5,
+        lead_ticks=2,
+    )
+    assert loop.tracker.observation_width == bundle.manifest.obs.total_width
 
 
 def test_native_mujoco_loop_runs_independent_physics_schedule(

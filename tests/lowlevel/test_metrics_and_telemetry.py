@@ -6,7 +6,12 @@ import numpy as np
 import pytest
 
 from embodied_control.logging import EcLogger
-from embodied_control.lowlevel.metrics import compute_mpjpe, oracle_tracking_metrics
+from embodied_control.lowlevel.metrics import (
+    _set_replay_pose,
+    compute_mpjpe,
+    compute_sonic_success,
+    oracle_tracking_metrics,
+)
 from embodied_control.lowlevel.reference import ReferenceMotion
 from embodied_control.lowlevel.telemetry import TelemetryRecorder
 
@@ -36,14 +41,70 @@ def test_mpjpe_definitions_position_only():
 def test_mpjpe_shape_mismatch_rejected():
     with pytest.raises(ValueError, match="disagree"):
         compute_mpjpe(
-            np.zeros((2, 3, 3)), np.zeros((2, 3)),
-            np.zeros((2, 4, 3)), np.zeros((2, 3)),
+            np.zeros((2, 3, 3)),
+            np.zeros((2, 3)),
+            np.zeros((2, 4, 3)),
+            np.zeros((2, 3)),
         )
+
+
+def test_replay_pose_converts_xyzw_to_mujoco_wxyz():
+    class Data:
+        qpos = np.zeros(12, dtype=np.float64)
+
+    data = Data()
+    _set_replay_pose(
+        data,
+        np.array([7, 9]),
+        np.array([1.25, -2.5]),
+        np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]),
+    )
+    np.testing.assert_allclose(data.qpos[:7], [0.1, 0.2, 0.3, 0.7, 0.4, 0.5, 0.6])
+    np.testing.assert_allclose(data.qpos[[7, 9]], [1.25, -2.5])
+
+
+def test_sonic_success_uses_height_orientation_and_end_effector_thresholds():
+    names = (
+        "pelvis",
+        "left_ankle_roll_link",
+        "right_ankle_roll_link",
+        "left_wrist_yaw_link",
+        "right_wrist_yaw_link",
+    )
+    reference_bodies = np.zeros((3, len(names), 3), dtype=np.float32)
+    reference_anchor = np.zeros((3, 3), dtype=np.float32)
+    identity = np.tile(np.array([0, 0, 0, 1], np.float32), (3, 1))
+    robot_pose = np.concatenate([reference_anchor, identity], axis=1)
+    success = compute_sonic_success(
+        reference_bodies,
+        robot_pose,
+        reference_bodies,
+        reference_anchor,
+        identity,
+        names,
+    )
+    assert success["success"]
+
+    robot_bodies = reference_bodies.copy()
+    robot_bodies[1, names.index("left_wrist_yaw_link"), 2] = 0.26
+    failed = compute_sonic_success(
+        robot_bodies,
+        robot_pose,
+        reference_bodies,
+        reference_anchor,
+        identity,
+        names,
+    )
+    assert not failed["success"]
+    assert failed["failure_tick"] == 1
+    assert failed["failure_cause"] == "ee_body_pos"
 
 
 def test_oracle_tracking_metrics_requires_bodies_and_alignment():
     motion = ReferenceMotion(
-        "m", np.zeros((10, 29), np.float32), np.zeros((10, 3), np.float32),
+        "m",
+        np.zeros((10, 29), np.float32),
+        np.zeros((10, 3), np.float32),
         np.tile(np.array([0, 0, 0, 1], np.float32), (10, 1)),
     )
     telemetry = {
@@ -61,8 +122,13 @@ class _FakeRuntime:
         self._running = False
 
     def stats(self):
-        return {"ticks": self._ticks, "mode": 2, "fault": 0,
-                "deadline_misses": 0, "wake_late_ns_max": 1000}
+        return {
+            "ticks": self._ticks,
+            "mode": 2,
+            "fault": 0,
+            "deadline_misses": 0,
+            "wake_late_ns_max": 1000,
+        }
 
     def running(self):
         return self._running

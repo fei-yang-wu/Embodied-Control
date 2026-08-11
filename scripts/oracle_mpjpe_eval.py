@@ -22,7 +22,11 @@ import uuid
 import numpy as np
 
 from embodied_control.lowlevel.bundle import PolicyBundle
-from embodied_control.lowlevel.metrics import oracle_tracking_metrics
+from embodied_control.lowlevel.metrics import (
+    oracle_tracking_metrics,
+    render_oracle_comparison_video,
+    sonic_success_metrics,
+)
 from embodied_control.lowlevel.native_core import NativeMujocoLoop
 from embodied_control.lowlevel.publishers.native_oracle import NativeOracleWorker
 from embodied_control.lowlevel.reference import ReferenceArrays
@@ -30,20 +34,40 @@ from embodied_control.lowlevel.slo import evaluate_report
 from embodied_control.lowlevel.telemetry import TelemetryRecorder
 
 
-def evaluate_motion(bundle, model, reference_root, name, *, cpu, physics_cpu):
+def evaluate_motion(
+    bundle,
+    model,
+    reference_root,
+    name,
+    *,
+    cpu,
+    physics_cpu,
+    artifact_root=None,
+    render_video=False,
+):
     arrays = ReferenceArrays(reference_root)
     motion = arrays.motion(name)
     ticks = motion.length - 1
     slot = f"/ec_om_{uuid.uuid4().hex[:8]}"
     worker = NativeOracleWorker(
-        f"{slot}_req", f"{slot}_resp", bundle, reference_root, name,
+        f"{slot}_req",
+        f"{slot}_resp",
+        bundle,
+        reference_root,
+        name,
         create_slots=True,
     )
     worker.start()
     loop = NativeMujocoLoop(
-        bundle, model, response_slot=f"{slot}_resp", request_slot=f"{slot}_req",
-        create_slots=False, command_source="oracle", lead_ticks=4,
-        cpu=cpu, physics_cpu=physics_cpu,
+        bundle,
+        model,
+        response_slot=f"{slot}_resp",
+        request_slot=f"{slot}_req",
+        create_slots=False,
+        command_source="oracle",
+        lead_ticks=4,
+        cpu=cpu,
+        physics_cpu=physics_cpu,
     )
     loop.set_initial_pose(
         np.concatenate(
@@ -58,6 +82,21 @@ def evaluate_motion(bundle, model, reference_root, name, *, cpu, physics_cpu):
     stats = record["stats"]
     verdict = evaluate_report({"control": stats}, record["tick_durations_ns"])
     tracking = oracle_tracking_metrics(bundle.manifest.action, model, motion, record)
+    sonic = sonic_success_metrics(bundle.manifest.action, model, motion, record)
+    artifacts = {}
+    if artifact_root is not None:
+        motion_root = Path(artifact_root) / name
+        artifacts["telemetry"] = str(recorder.save(motion_root, record).resolve())
+        if render_video:
+            video = render_oracle_comparison_video(
+                bundle.manifest.action,
+                model,
+                motion,
+                record,
+                motion_root / "reference_left_policy_right.mp4",
+            )
+            artifacts["video"] = video
+            print(f"VIDEO: {video['path']}", flush=True)
     tracking.pop("per_frame")
     tracking.pop("tracked_bodies")
     heights = record["base_heights"]
@@ -66,6 +105,7 @@ def evaluate_motion(bundle, model, reference_root, name, *, cpu, physics_cpu):
         "motion": name,
         "ticks": ticks,
         "no_fall": bool((heights > 0.4).all()),
+        "sonic_success": bool(sonic.pop("success")),
         "base_height_min": round(float(heights.min()), 4),
         "mae_rad": round(float(np.nanmean(record["reference_joint_mae"])), 4),
         **{
@@ -73,10 +113,17 @@ def evaluate_motion(bundle, model, reference_root, name, *, cpu, physics_cpu):
             for key, value in tracking.items()
         },
         "deadline_misses": stats["deadline_misses"],
+        "encoder_inferences": stats["encoder_inferences"],
+        "scheduler_deadlines_missed": stats["scheduler_deadlines_missed"],
         "fault": stats["fault"],
         "tick_p99_ms": round(
             verdict["measured"].get("control_tick_compute_p99_ms", -1), 3
         ),
+        **{
+            key: round(value, 4) if isinstance(value, float) else value
+            for key, value in sonic.items()
+        },
+        "artifacts": artifacts,
     }
 
 
@@ -87,20 +134,47 @@ def main() -> int:
     parser.add_argument("--reference-root", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument(
-        "--motions", nargs="*", default=None,
+        "--motions",
+        nargs="*",
+        default=None,
         help="subset of motion names; default is every motion in the tree",
     )
     parser.add_argument("--cpu", type=int, default=2)
     parser.add_argument("--physics-cpu", type=int, default=3)
+    parser.add_argument(
+        "--artifact-root",
+        default=None,
+        help="optional directory for per-motion telemetry and diagnostic videos",
+    )
+    parser.add_argument(
+        "--video-motions",
+        nargs="*",
+        default=(),
+        help="motion names to render; each must also be selected by --motions",
+    )
     args = parser.parse_args()
 
     bundle = PolicyBundle.load(args.bundle)
     names = args.motions or ReferenceArrays(args.reference_root).motion_names
+    unknown_videos = set(args.video_motions) - set(names)
+    if unknown_videos:
+        parser.error(
+            "--video-motions must be selected by --motions: "
+            + ", ".join(sorted(unknown_videos))
+        )
+    if args.video_motions and args.artifact_root is None:
+        parser.error("--video-motions requires --artifact-root")
     rows = []
     for name in names:
         row = evaluate_motion(
-            bundle, args.model, args.reference_root, name,
-            cpu=args.cpu, physics_cpu=args.physics_cpu,
+            bundle,
+            args.model,
+            args.reference_root,
+            name,
+            cpu=args.cpu,
+            physics_cpu=args.physics_cpu,
+            artifact_root=args.artifact_root,
+            render_video=name in args.video_motions,
         )
         rows.append(row)
         print(json.dumps(row), flush=True)
@@ -109,6 +183,8 @@ def main() -> int:
     l_values = [row["mpjpe_l_mm"] for row in rows]
     g_values = [row["mpjpe_g_mm"] for row in rows]
     total = sum(frames)
+    successful = [row for row in rows if row["sonic_success"]]
+    successful_frames = sum(row["frames"] for row in successful)
     report = {
         "protocol": {
             "stack": (
@@ -125,14 +201,25 @@ def main() -> int:
                 "micro-averaged by frame"
             ),
             "note": (
-                "sim2sim deployment signal on the rehearsal rig, not an Isaac "
-                "paper number; single seed = preliminary"
+                "SONIC thresholds are scored after the full rollout. This is a "
+                "deterministic EC rehearsal-rig result, not the randomized "
+                "Isaac paper protocol; single seed = preliminary"
             ),
         },
         "motions": rows,
         "aggregate": {
             "motions": len(rows),
             "survival": f"{sum(row['no_fall'] for row in rows)}/{len(rows)}",
+            "sonic_success": (f"{len(successful)}/{len(rows)}"),
+            "successful_mpjpe_l_mm_micro": (
+                None
+                if not successful
+                else round(
+                    sum(row["mpjpe_l_mm"] * row["frames"] for row in successful)
+                    / successful_frames,
+                    2,
+                )
+            ),
             "mpjpe_l_mm_micro": round(
                 sum(a * b for a, b in zip(l_values, frames)) / total, 2
             ),
@@ -141,10 +228,11 @@ def main() -> int:
             ),
             "mpjpe_l_mm_range": [round(min(l_values), 2), round(max(l_values), 2)],
             "mpjpe_g_mm_range": [round(min(g_values), 2), round(max(g_values), 2)],
-            "deadline_misses_total": int(
-                sum(row["deadline_misses"] for row in rows)
-            ),
+            "deadline_misses_total": int(sum(row["deadline_misses"] for row in rows)),
             "faults_total": int(sum(row["fault"] != 0 for row in rows)),
+            "scheduler_deadlines_missed_total": int(
+                sum(row["scheduler_deadlines_missed"] for row in rows)
+            ),
         },
     }
     output = Path(args.output).resolve()

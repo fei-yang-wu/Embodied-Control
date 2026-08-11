@@ -93,6 +93,22 @@ void NativeFakeBackend::reset() {
   state_.joint_velocity.fill(0.0F);
   state_.projected_gravity = {0.0F, 0.0F, -1.0F};
   state_.base_angular_velocity.fill(0.0F);
+  state_.anchor_position_w = {0.0F, 0.0F, 0.75F};
+  state_.anchor_quaternion_w = {0.0F, 0.0F, 0.0F, 1.0F};
+  state_.anchor_pose_valid = true;
+}
+
+void NativeFakeBackend::set_initial_pose(std::span<const float> pose) {
+  if (pose.size() != 7 + kJointCount || !finite_values(pose)) {
+    throw std::runtime_error("initial pose must have 36 finite values");
+  }
+  std::copy_n(pose.begin(), 3, state_.anchor_position_w.begin());
+  std::copy_n(pose.begin() + 3, 4, state_.anchor_quaternion_w.begin());
+  std::copy_n(pose.begin() + 7, kJointCount, state_.joint_position.begin());
+  state_.joint_velocity.fill(0.0F);
+  state_.base_angular_velocity.fill(0.0F);
+  state_.anchor_pose_valid = projected_gravity_from_xyzw(
+      state_.anchor_quaternion_w, state_.projected_gravity);
 }
 
 void NativeFakeBackend::write_target(std::span<const float> target) noexcept {

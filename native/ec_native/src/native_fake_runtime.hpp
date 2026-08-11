@@ -47,6 +47,7 @@ struct NativeRuntimeStats {
   std::uint64_t deadline_misses = 0;
   std::uint64_t planner_requests = 0;
   std::uint64_t planner_responses = 0;
+  std::uint64_t encoder_inferences = 0;
   std::uint64_t response_overruns = 0;
   std::uint64_t scheduler_deadlines_missed = 0;
   std::uint64_t tick_ns_max = 0;
@@ -64,12 +65,21 @@ struct NativeRuntimeStats {
 struct NativePlannerConfig {
   std::size_t hold_steps = 10;
   std::size_t lead_ticks = 4;
-  std::size_t root_qpos_width = 38;
+  std::size_t encoder_frame_width = 38;
   std::size_t window_frames = 10;
+  std::size_t encoder_frame_stride = 1;
   std::size_t z_dim = 256;
   bool sin_cos_phase = true;
   std::uint32_t direct_tag = 1;
   bool oracle_reference = false;
+  enum class ReferenceEncoderLayout {
+    kRootQpos,
+    kJointQposQvelAnchorOri,
+  } reference_encoder_layout = ReferenceEncoderLayout::kRootQpos;
+  enum class EncoderTrigger {
+    kOnAcceptance,
+    kEveryControlTick,
+  } encoder_trigger = EncoderTrigger::kOnAcceptance;
 };
 
 struct NativeSchedulerConfig {
@@ -140,7 +150,6 @@ class NativeFakeRuntime {
   static constexpr std::uint32_t kRawReferenceTag = 3;
   static constexpr std::uint32_t kPlannerRequestTag = 10;
   static constexpr std::uint32_t kOracleRequestTag = 11;
-  static constexpr std::size_t kRawReferenceWidth = kJointCount + 3 + 4;
   static constexpr std::size_t kReferenceHeaderWidth = 3;
 
   void run(std::size_t max_ticks, bool paced) noexcept;
@@ -152,6 +161,7 @@ class NativeFakeRuntime {
   bool accept_direct_command(std::uint32_t length) noexcept;
   bool accept_chunk(std::uint32_t length) noexcept;
   bool accept_reference_chunk(std::uint32_t length) noexcept;
+  bool encode_active_reference(std::size_t offset_steps) noexcept;
   void record_reference_metrics() noexcept;
   void transition_to_damp(RuntimeFault fault) noexcept;
   NativeTrackerCore& tracker_;
@@ -167,6 +177,7 @@ class NativeFakeRuntime {
   std::array<float, kMaxCommand> command_{};
   std::array<float, kMaxValues> pending_chunk_{};
   std::array<float, kMaxValues> active_reference_chunk_{};
+  std::array<float, kMaxValues> encoder_raw_window_{};
   std::array<float, kMaxValues> encoder_window_{};
   std::uint32_t pending_chunk_length_ = 0;
   std::uint64_t pending_chunk_sequence_ = 0;
@@ -187,6 +198,9 @@ class NativeFakeRuntime {
   std::uint64_t active_reference_tick_ = 0;
   std::uint32_t active_reference_length_ = 0;
   std::uint32_t active_reference_valid_frames_ = 0;
+  std::size_t raw_reference_width_ = 0;
+  std::uint64_t last_encoder_tick_ = 0;
+  bool encoder_ran_ = false;
   std::uint64_t loop_tick_ = 0;
   std::uint64_t episode_generation_ = 0;
   bool pending_chunk_has_request_timing_ = false;
@@ -209,6 +223,7 @@ class NativeFakeRuntime {
   std::atomic<std::uint64_t> deadline_misses_{0};
   std::atomic<std::uint64_t> planner_requests_{0};
   std::atomic<std::uint64_t> planner_responses_{0};
+  std::atomic<std::uint64_t> encoder_inferences_{0};
   std::atomic<std::uint64_t> response_overruns_{0};
   std::atomic<std::uint64_t> scheduler_deadlines_missed_{0};
   std::atomic<std::uint64_t> tick_ns_max_{0};

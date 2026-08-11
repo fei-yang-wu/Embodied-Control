@@ -9,6 +9,8 @@ namespace {
 
 constexpr std::size_t kRawReferenceWidth = kJointCount + 3 + 4;
 constexpr std::size_t kRootQposWidth = kJointCount + 3 + 6;
+constexpr std::size_t kJointReferenceRawWidth = kJointCount * 2 + 4;
+constexpr std::size_t kJointReferenceFrameWidth = kJointCount * 2 + 6;
 
 bool normalized_quaternion(std::span<const float> input,
                            std::array<float, 4>& output) noexcept {
@@ -168,6 +170,89 @@ bool reexpress_root_qpos_window(
   return true;
 }
 
+bool pack_joint_qpos_qvel_anchor_ori_window(
+    std::span<const float> raw_world_frames, std::size_t available_frames,
+    std::size_t start_frame, std::size_t frame_count,
+    std::size_t frame_stride, std::span<const float> robot_quaternion_w,
+    std::span<float> encoder_window) noexcept {
+  if (frame_count == 0 || frame_count % 2 != 0 || frame_stride == 0 ||
+      raw_world_frames.size() != available_frames * kJointReferenceRawWidth ||
+      encoder_window.size() != frame_count * kJointReferenceFrameWidth ||
+      start_frame + (frame_count - 1) * frame_stride >= available_frames) {
+    return false;
+  }
+  std::array<float, 4> robot_quaternion{};
+  if (!normalized_quaternion(robot_quaternion_w, robot_quaternion)) {
+    return false;
+  }
+  std::array<float, 4> heading = {
+      0.0F, 0.0F, robot_quaternion[2], robot_quaternion[3]};
+  if (!normalized_quaternion(heading, heading)) {
+    return false;
+  }
+  const std::array<float, 4> heading_conjugate = {
+      -heading[0], -heading[1], -heading[2], heading[3]};
+  std::array<std::array<float, 6>, 32> orientations{};
+  if (frame_count > orientations.size()) {
+    return false;
+  }
+  for (std::size_t frame = 0; frame < frame_count; ++frame) {
+    const float* source = raw_world_frames.data() +
+                          (start_frame + frame * frame_stride) *
+                              kJointReferenceRawWidth;
+    if (!std::all_of(source, source + kJointReferenceRawWidth,
+                     [](float value) { return std::isfinite(value); })) {
+      return false;
+    }
+    std::array<float, 4> reference_quaternion{};
+    if (!normalized_quaternion(
+            std::span<const float>(source + kJointCount * 2, 4),
+            reference_quaternion)) {
+      return false;
+    }
+    std::array<float, 4> relative =
+        multiply_quaternions(heading_conjugate, reference_quaternion);
+    if (!normalized_quaternion(relative, relative)) {
+      return false;
+    }
+    const auto matrix = quaternion_matrix(relative);
+    orientations[frame] = {
+        matrix[0], matrix[1], matrix[3],
+        matrix[4], matrix[6], matrix[7],
+    };
+  }
+
+  float* destination = encoder_window.data();
+  const std::size_t half = frame_count / 2;
+  for (std::size_t block = 0; block < half; ++block) {
+    for (std::size_t pair = 0; pair < 2; ++pair) {
+      const std::size_t frame = block * 2 + pair;
+      const float* source = raw_world_frames.data() +
+                            (start_frame + frame * frame_stride) *
+                                kJointReferenceRawWidth;
+      std::copy_n(source, kJointCount, destination);
+      destination += kJointCount;
+    }
+    std::copy(orientations[block].begin(), orientations[block].end(),
+              destination);
+    destination += 6;
+  }
+  for (std::size_t block = 0; block < half; ++block) {
+    for (std::size_t pair = 0; pair < 2; ++pair) {
+      const std::size_t frame = block * 2 + pair;
+      const float* source = raw_world_frames.data() +
+                            (start_frame + frame * frame_stride) *
+                                kJointReferenceRawWidth + kJointCount;
+      std::copy_n(source, kJointCount, destination);
+      destination += kJointCount;
+    }
+    std::copy(orientations[half + block].begin(),
+              orientations[half + block].end(), destination);
+    destination += 6;
+  }
+  return destination == encoder_window.data() + encoder_window.size();
+}
+
 TermKind NativeTrackerCore::parse_term(const std::string& name) {
   if (is_command_term(name)) {
     return TermKind::kCommand;
@@ -193,28 +278,32 @@ TermKind NativeTrackerCore::parse_term(const std::string& name) {
 NativeTrackerCore::NativeTrackerCore(
     const std::string& policy_path, const std::string& input_name,
     const std::string& output_name,
-    const std::vector<std::pair<std::string, std::size_t>>& terms,
+    const std::vector<TermConfig>& terms,
     std::size_t command_width,
     std::span<const float> default_joint_position,
     std::span<const float> action_scale,
     std::span<const float> joint_lower, std::span<const float> joint_upper,
     std::span<const float> fsq_half_levels, std::size_t fsq_z_dim,
+    float raw_action_clip,
     std::size_t intra_op_threads)
     : command_width_(command_width),
       fsq_half_levels_(fsq_half_levels.begin(), fsq_half_levels.end()),
       fsq_z_dim_(fsq_z_dim),
+      raw_action_clip_(raw_action_clip),
       engine_(policy_path, input_name, output_name,
               [&terms]() {
                 std::size_t total = 0;
-                for (const auto& [name, width] : terms) {
-                  static_cast<void>(name);
-                  total += width;
+                for (const auto& term : terms) {
+                  total += term.width * term.history_length;
                 }
                 return total;
               }(),
               kJointCount, intra_op_threads) {
   if (command_width_ == 0 || command_width_ > kMaxCommand) {
     throw std::runtime_error("command width is outside native limits");
+  }
+  if (!std::isfinite(raw_action_clip_) || raw_action_clip_ < 0.0F) {
+    throw std::runtime_error("raw action clip must be finite and non-negative");
   }
   if (default_joint_position.size() != kJointCount ||
       action_scale.size() != kJointCount ||
@@ -250,22 +339,45 @@ NativeTrackerCore::NativeTrackerCore(
 
   std::size_t observation_offset = 0;
   std::size_t command_offset = 0;
-  for (const auto& [name, width] : terms) {
-    const auto kind = parse_term(name);
-    if (width == 0 || observation_offset + width > kMaxObservation) {
+  std::size_t history_offset = 0;
+  for (const auto& config : terms) {
+    const auto kind = parse_term(config.name);
+    if (config.width == 0 || config.history_length == 0 ||
+        config.history_stride == 0) {
+      throw std::runtime_error("observation history fields must be positive");
+    }
+    const std::size_t flat_width = config.width * config.history_length;
+    const std::size_t history_span =
+        1 + (config.history_length - 1) * config.history_stride;
+    const std::size_t history_values = config.width * history_span;
+    if (flat_width / config.history_length != config.width ||
+        history_values / history_span != config.width ||
+        observation_offset + flat_width > kMaxObservation) {
       throw std::runtime_error("observation term exceeds native limits");
     }
     const std::size_t required_width = expected_width(kind);
-    if (required_width != 0 && width != required_width) {
-      throw std::runtime_error("observation term has an invalid width: " + name);
+    if (required_width != 0 && config.width != required_width) {
+      throw std::runtime_error("observation term has an invalid width: " +
+                               config.name);
     }
     const auto source_offset = kind == TermKind::kCommand ? command_offset : 0;
-    terms_.push_back({kind, width, observation_offset, source_offset});
-    observation_offset += width;
+    terms_.push_back({kind,
+                      config.width,
+                      config.history_length,
+                      config.history_stride,
+                      history_span,
+                      config.history_order,
+                      config.reset_fill,
+                      observation_offset,
+                      source_offset,
+                      history_offset});
+    observation_offset += flat_width;
+    history_offset += history_values;
     if (kind == TermKind::kCommand) {
-      command_offset += width;
+      command_offset += config.width;
     }
   }
+  history_storage_.resize(history_offset);
   observation_width_ = observation_offset;
   result_.observation_width = observation_width_;
   if (command_offset != command_width_) {
@@ -274,7 +386,14 @@ NativeTrackerCore::NativeTrackerCore(
   reset();
 }
 
-void NativeTrackerCore::reset() noexcept { last_action_.fill(0.0F); }
+void NativeTrackerCore::reset() noexcept {
+  last_action_.fill(0.0F);
+  std::fill(history_storage_.begin(), history_storage_.end(), 0.0F);
+  for (auto& term : terms_) {
+    term.history_cursor = 0;
+    term.history_initialized = false;
+  }
+}
 
 void NativeTrackerCore::validate_state(const RobotState& state) const {
   if (!all_finite(state.joint_position) ||
@@ -283,6 +402,57 @@ void NativeTrackerCore::validate_state(const RobotState& state) const {
       !all_finite(state.base_angular_velocity)) {
     throw std::runtime_error("robot state contains a non-finite value");
   }
+}
+
+void NativeTrackerCore::update_history(TermSpec& term, const RobotState& state,
+                                       std::span<const float> command) {
+  if (term.history_initialized) {
+    term.history_cursor = (term.history_cursor + 1) % term.history_span;
+  }
+  float* sample = history_storage_.data() + term.history_offset +
+                  term.history_cursor * term.sample_width;
+  switch (term.kind) {
+    case TermKind::kCommand:
+      for (std::size_t index = 0; index < term.sample_width; ++index) {
+        const std::size_t command_index = term.command_offset + index;
+        float value = command[command_index];
+        if (command_index < fsq_z_dim_) {
+          const float half = fsq_half_levels_[command_index];
+          value = std::clamp(std::nearbyint(value * half), -half,
+                             half - 1.0F) /
+                  half;
+        }
+        sample[index] = value;
+      }
+      break;
+    case TermKind::kProjectedGravity:
+      std::copy_n(state.projected_gravity.begin(), term.sample_width, sample);
+      break;
+    case TermKind::kBaseAngularVelocity:
+      std::copy_n(state.base_angular_velocity.begin(), term.sample_width,
+                  sample);
+      break;
+    case TermKind::kJointPositionRelative:
+      for (std::size_t index = 0; index < term.sample_width; ++index) {
+        sample[index] =
+            state.joint_position[index] - default_joint_position_[index];
+      }
+      break;
+    case TermKind::kJointVelocityRelative:
+      std::copy_n(state.joint_velocity.begin(), term.sample_width, sample);
+      break;
+    case TermKind::kLastAction:
+      std::copy_n(last_action_.begin(), term.sample_width, sample);
+      break;
+  }
+  if (!term.history_initialized && term.reset_fill == ResetFill::kRepeatFirst) {
+    for (std::size_t slot = 1; slot < term.history_span; ++slot) {
+      std::copy_n(sample, term.sample_width,
+                  history_storage_.data() + term.history_offset +
+                      slot * term.sample_width);
+    }
+  }
+  term.history_initialized = true;
 }
 
 void NativeTrackerCore::assemble(const RobotState& state,
@@ -294,41 +464,22 @@ void NativeTrackerCore::assemble(const RobotState& state,
                    [](float value) { return std::isfinite(value); })) {
     throw std::runtime_error("command contains a non-finite value");
   }
-  for (const auto& term : terms_) {
+  for (auto& term : terms_) {
+    update_history(term, state, command);
     float* destination = result_.observation.data() + term.observation_offset;
-    switch (term.kind) {
-      case TermKind::kCommand:
-        for (std::size_t index = 0; index < term.width; ++index) {
-          const std::size_t command_index = term.command_offset + index;
-          float value = command[command_index];
-          if (command_index < fsq_z_dim_) {
-            const float half = fsq_half_levels_[command_index];
-            value = std::clamp(std::nearbyint(value * half), -half,
-                               half - 1.0F) /
-                    half;
-          }
-          destination[index] = value;
-        }
-        break;
-      case TermKind::kProjectedGravity:
-        std::copy_n(state.projected_gravity.begin(), term.width, destination);
-        break;
-      case TermKind::kBaseAngularVelocity:
-        std::copy_n(state.base_angular_velocity.begin(), term.width,
-                    destination);
-        break;
-      case TermKind::kJointPositionRelative:
-        for (std::size_t index = 0; index < term.width; ++index) {
-          destination[index] = state.joint_position[index] -
-                               default_joint_position_[index];
-        }
-        break;
-      case TermKind::kJointVelocityRelative:
-        std::copy_n(state.joint_velocity.begin(), term.width, destination);
-        break;
-      case TermKind::kLastAction:
-        std::copy_n(last_action_.begin(), term.width, destination);
-        break;
+    for (std::size_t output_frame = 0;
+         output_frame < term.history_length; ++output_frame) {
+      const std::size_t history_index =
+          term.history_order == HistoryOrder::kOldestFirst
+              ? term.history_length - 1 - output_frame
+              : output_frame;
+      const std::size_t age = history_index * term.history_stride;
+      const std::size_t source_slot =
+          (term.history_cursor + term.history_span - age) % term.history_span;
+      std::copy_n(history_storage_.data() + term.history_offset +
+                      source_slot * term.sample_width,
+                  term.sample_width,
+                  destination + output_frame * term.sample_width);
     }
   }
 }
@@ -343,14 +494,18 @@ const StepResult& NativeTrackerCore::step(const RobotState& state,
     if (!std::isfinite(action[index])) {
       throw std::runtime_error("policy action contains a non-finite value");
     }
-    result_.action[index] = action[index];
+    const float clipped_action =
+        raw_action_clip_ > 0.0F
+            ? std::clamp(action[index], -raw_action_clip_, raw_action_clip_)
+            : action[index];
+    result_.action[index] = clipped_action;
     float target = default_joint_position_[index] +
-                   action_scale_[index] * action[index];
+                   action_scale_[index] * clipped_action;
     if (clamp_joint_targets_) {
       target = std::clamp(target, joint_lower_[index], joint_upper_[index]);
     }
     result_.joint_target[index] = target;
-    last_action_[index] = action[index];
+    last_action_[index] = clipped_action;
   }
   return result_;
 }

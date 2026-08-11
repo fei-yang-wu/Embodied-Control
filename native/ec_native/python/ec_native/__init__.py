@@ -11,6 +11,7 @@ from ._ec_native import (
     WITH_UNITREE,
     __version__,
     monotonic_now,
+    pack_joint_qpos_qvel_anchor_ori_window,
     projected_gravity_from_xyzw,
     reexpress_root_qpos_window,
 )
@@ -25,6 +26,7 @@ __all__ = [
     "WITH_UNITREE",
     "__version__",
     "monotonic_now",
+    "pack_joint_qpos_qvel_anchor_ori_window",
     "projected_gravity_from_xyzw",
     "reexpress_root_qpos_window",
 ]

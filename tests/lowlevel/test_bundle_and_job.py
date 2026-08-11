@@ -21,6 +21,19 @@ def test_obs_contract_width_mismatch_fails(latent_manifest):
         BundleManifest.model_validate(raw)
 
 
+def test_obs_contract_counts_recorded_history(latent_manifest):
+    raw = latent_manifest.model_dump()
+    raw["obs"]["terms"][2].update(
+        {"history_length": 10, "history_stride": 1, "history_order": "oldest_first"}
+    )
+    raw["obs"]["total_width"] += 9 * 3
+    manifest = BundleManifest.model_validate(raw)
+    term = manifest.obs.terms[2]
+    assert term.width == 3
+    assert term.flat_width == 30
+    assert manifest.obs.total_width == 128
+
+
 def test_latent_manifest_requires_z_dim(latent_manifest):
     raw = latent_manifest.model_dump()
     raw["command"]["z_dim"] = None

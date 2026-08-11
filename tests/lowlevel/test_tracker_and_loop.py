@@ -3,7 +3,11 @@ import json
 import numpy as np
 import pytest
 
-from embodied_control.lowlevel.bundle import PolicyBundle
+from embodied_control.lowlevel.bundle import (
+    ObservationContract,
+    ObservationTerm,
+    PolicyBundle,
+)
 from embodied_control.lowlevel.command_buffer import InProcessCommandBuffer
 from embodied_control.lowlevel.contracts import CommandPacket, RobotState
 from embodied_control.lowlevel.envs.fake import FakeBackend
@@ -65,6 +69,65 @@ def test_observation_rejects_wrong_width(latent_manifest):
     sample = BufferedCommandSource(buffer).update(0, _state())
     with pytest.raises(ValueError, match="width"):
         assembler.assemble(_state(), sample, np.zeros(29, dtype=np.float32))
+
+
+def test_observation_history_uses_declared_stride_order_and_reset_fill():
+    contract = ObservationContract(
+        terms=[
+            ObservationTerm(
+                name="base_ang_vel",
+                width=3,
+                history_length=3,
+                history_stride=2,
+                history_order="oldest_first",
+                reset_fill="zero",
+            )
+        ],
+        total_width=9,
+    )
+    assembler = ObservationAssembler(contract)
+    command = BufferedCommandSource(InProcessCommandBuffer()).update(0, _state())
+    for tick in range(5):
+        state = _state()
+        state.base_ang_vel[:] = [tick, tick + 0.1, tick + 0.2]
+        observation = assembler.assemble(
+            state, command, np.zeros(29, dtype=np.float32)
+        ).copy()
+    np.testing.assert_allclose(
+        observation.reshape(3, 3)[:, 0], [0.0, 2.0, 4.0]
+    )
+    assembler.reset()
+    state = _state()
+    state.base_ang_vel[:] = [7.0, 7.1, 7.2]
+    reset_observation = assembler.assemble(
+        state, command, np.zeros(29, dtype=np.float32)
+    )
+    np.testing.assert_allclose(
+        reset_observation.reshape(3, 3)[:, 0], [0.0, 0.0, 7.0]
+    )
+
+
+def test_observation_history_can_emit_newest_first():
+    contract = ObservationContract(
+        terms=[
+            ObservationTerm(
+                name="base_ang_vel",
+                width=3,
+                history_length=3,
+                history_order="newest_first",
+            )
+        ],
+        total_width=9,
+    )
+    assembler = ObservationAssembler(contract)
+    command = BufferedCommandSource(InProcessCommandBuffer()).update(0, _state())
+    for tick in range(3):
+        state = _state()
+        state.base_ang_vel[:] = tick
+        observation = assembler.assemble(
+            state, command, np.zeros(29, dtype=np.float32)
+        ).copy()
+    np.testing.assert_allclose(observation.reshape(3, 3)[:, 0], [2.0, 1.0, 0.0])
 
 
 def test_tracker_step_and_last_action(latent_manifest, fake_engine, tmp_path):

@@ -28,9 +28,9 @@ inline double monotonic_now() {
   return static_cast<double>(ts.tv_sec) + static_cast<double>(ts.tv_nsec) * 1e-9;
 }
 
-// A GR00T root_qpos chunk is normally 30 x 38 = 1,140 values. Keep enough
-// fixed storage for that chunk and for the 10 x 93 causal request history.
-constexpr std::uint32_t kMaxValues = 2048;
+// A stride-5 reference block can carry 55 x 62 = 3,410 values. The extra
+// capacity keeps transport renewal outside the 50 Hz encoder cadence.
+constexpr std::uint32_t kMaxValues = 4096;
 constexpr std::uint64_t kMagic = 0x45434e4154495632ull;  // "ECNATIV2"
 constexpr int kSnapshotAttempts = 8;
 

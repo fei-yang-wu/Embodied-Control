@@ -24,6 +24,7 @@ class ReferenceMotion:
     joint_qpos: np.ndarray     # [T, 29] Isaac order
     anchor_pos_w: np.ndarray   # [T, 3]
     anchor_quat_w: np.ndarray  # [T, 4] XYZW
+    joint_qvel: np.ndarray | None = None  # [T, 29] Isaac order
     body_names: tuple[str, ...] = ()
     body_pos_w: np.ndarray | None = None  # [T, B, 3] tracked-body world positions
 
@@ -55,6 +56,7 @@ class ReferenceArrays:
         self.body_names: tuple[str, ...] = tuple(key.get("body_names", ()))
         arrays = key["arrays"]
         self._qpos = self._open(arrays, "qpos")
+        self._qvel = self._open(arrays, "qvel") if "qvel" in arrays else None
         self._anchor_pos = self._open(arrays, "anchor_pos_w")
         self._body_pos = (
             self._open(arrays, "body_pos_w") if "body_pos_w" in arrays else None
@@ -74,6 +76,10 @@ class ReferenceArrays:
         if self._qpos.shape[1] != 7 + joint_count:
             raise ValueError(
                 f"qpos width {self._qpos.shape[1]} != 7 + {joint_count} joints"
+            )
+        if self._qvel is not None and self._qvel.shape[1] != 6 + joint_count:
+            raise ValueError(
+                f"qvel width {self._qvel.shape[1]} != 6 + {joint_count} joints"
             )
 
     def _open(self, arrays: dict, name: str) -> np.ndarray:
@@ -99,6 +105,11 @@ class ReferenceArrays:
             joint_qpos=np.asarray(self._qpos[start:end, 7:], dtype=np.float32),
             anchor_pos_w=np.asarray(self._anchor_pos[start:end], dtype=np.float32),
             anchor_quat_w=np.asarray(self._anchor_quat[start:end], dtype=np.float32),
+            joint_qvel=(
+                None
+                if self._qvel is None
+                else np.asarray(self._qvel[start:end, 6:], dtype=np.float32)
+            ),
             body_names=self.body_names,
             body_pos_w=(
                 None

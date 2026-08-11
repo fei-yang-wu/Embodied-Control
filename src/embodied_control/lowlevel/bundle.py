@@ -23,6 +23,14 @@ class ObservationTerm(BundleModel):
     name: str
     width: int = Field(gt=0)
     normalize: bool = True
+    history_length: int = Field(default=1, ge=1)
+    history_stride: int = Field(default=1, ge=1)
+    history_order: Literal["oldest_first", "newest_first"] = "oldest_first"
+    reset_fill: Literal["repeat_first", "zero"] = "repeat_first"
+
+    @property
+    def flat_width(self) -> int:
+        return self.width * self.history_length
 
 
 class ObservationContract(BundleModel):
@@ -31,7 +39,7 @@ class ObservationContract(BundleModel):
 
     @model_validator(mode="after")
     def validate_width(self) -> "ObservationContract":
-        actual = sum(term.width for term in self.terms)
+        actual = sum(term.flat_width for term in self.terms)
         if actual != self.total_width:
             raise ValueError(
                 f"observation width is {self.total_width}, but terms total {actual}"
@@ -55,6 +63,7 @@ class ActionContract(BundleModel):
     effort_limit: list[float] = Field(default_factory=list)
     torque_ff: list[float] = Field(default_factory=list)
     last_action_is_raw: bool = True
+    raw_action_clip: float | None = Field(default=None, gt=0)
     joint_limits_lower: list[float] | None = None
     joint_limits_upper: list[float] | None = None
 
@@ -115,6 +124,8 @@ class ActionContract(BundleModel):
             raise ValueError(
                 f"raw action must have shape ({self.width},), got {action.shape}"
             )
+        if self.raw_action_clip is not None:
+            action = np.clip(action, -self.raw_action_clip, self.raw_action_clip)
         q_target = np.asarray(
             self.default_joint_pos, dtype=np.float32
         ) + action * np.asarray(self.action_scale, dtype=np.float32)
@@ -150,12 +161,19 @@ class CommandContract(BundleModel):
     phase_dim: int = 0
     hold_steps: int = Field(default=1, ge=1)
     state_dim: int | None = Field(default=None, gt=0)
-    encoder_state_interface: Literal["root_qpos", "full_body"] | None = None
+    encoder_state_interface: Literal[
+        "root_qpos", "full_body", "joint_qpos_qvel_anchor_ori"
+    ] | None = None
     window_steps: int | None = Field(default=None, ge=0)
     horizon_steps: int | None = Field(default=None, gt=0)
     encoder_window_mode: Literal["full", "intermediate"] | None = None
     macro_frame_stride: int | None = Field(default=None, gt=0)
-    macro_anchor_mode: Literal["robot", "expert_heading"] | None = None
+    macro_anchor_mode: Literal[
+        "robot", "robot_heading", "expert_heading"
+    ] | None = None
+    encoder_trigger: Literal["on_acceptance", "every_control_tick"] = (
+        "on_acceptance"
+    )
     activation: str | None = None
     layer_norm: bool | None = None
     encoder_sha256: str | None = None
@@ -276,9 +294,11 @@ class BundleManifest(BundleModel):
             )
         encoder = self.models.get("encoder_onnx")
         if encoder is not None:
-            interface_width = {"root_qpos": 38, "full_body": 67}.get(
-                self.command.encoder_state_interface
-            )
+            interface_width = {
+                "root_qpos": 38,
+                "full_body": 67,
+                "joint_qpos_qvel_anchor_ori": 64,
+            }.get(self.command.encoder_state_interface)
             if (
                 interface_width is not None
                 and self.command.state_dim != interface_width

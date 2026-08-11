@@ -57,6 +57,7 @@ class NativeFakeBackend final : public NativeRobotBackend {
   NativeFakeBackend(std::span<const float> default_joint_position,
                     std::size_t control_hz, float lag_alpha);
   void reset() override;
+  void set_initial_pose(std::span<const float> pose) override;
   const RobotState& read_state() noexcept override { return state_; }
   void write_target(std::span<const float> target) noexcept override;
   void damp() noexcept override;

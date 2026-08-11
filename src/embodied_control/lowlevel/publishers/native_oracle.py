@@ -19,7 +19,10 @@ from embodied_control.lowlevel.reference import ReferenceArrays
 
 ORACLE_REQUEST_TAG = 11
 RAW_REFERENCE_RESPONSE_TAG = 3
-RAW_REFERENCE_WIDTH = 36
+RAW_REFERENCE_WIDTHS = {
+    "root_qpos": 36,
+    "joint_qpos_qvel_anchor_ori": 62,
+}
 REFERENCE_HEADER_WIDTH = 3
 
 
@@ -43,7 +46,7 @@ class NativeOracleWorker:
         motion: str,
         *,
         start_frame: int = 0,
-        horizon: int = 30,
+        horizon: int | None = None,
         poll_seconds: float = 0.001,
         create_slots: bool = False,
     ) -> None:
@@ -54,16 +57,31 @@ class NativeOracleWorker:
                 "NativeOracleWorker needs the native Pixi environment"
             ) from exc
         command = bundle.manifest.command
+        interface = command.encoder_state_interface
+        expected_anchor = {
+            "root_qpos": "robot",
+            "joint_qpos_qvel_anchor_ori": "robot_heading",
+        }.get(interface)
+        expected_width = {
+            "root_qpos": 38,
+            "joint_qpos_qvel_anchor_ori": 64,
+        }.get(interface)
         if (
-            command.encoder_state_interface != "root_qpos"
-            or command.macro_anchor_mode != "robot"
-            or command.macro_frame_stride != 1
-            or command.state_dim != 38
+            interface not in RAW_REFERENCE_WIDTHS
+            or command.macro_anchor_mode != expected_anchor
+            or command.macro_frame_stride is None
+            or command.state_dim != expected_width
         ):
             raise ValueError(
-                "oracle worker needs root_qpos, robot anchor, stride 1, width 38"
+                "oracle worker encoder interface, anchor, stride, and width disagree"
             )
-        if horizon < int((command.window_steps or 9) + 1):
+        window_frames = int((command.window_steps or 9) + 1)
+        frame_stride = int(command.macro_frame_stride)
+        minimum_horizon = (
+            (window_frames - 1) * frame_stride + int(command.hold_steps)
+        )
+        horizon = minimum_horizon if horizon is None else int(horizon)
+        if horizon < minimum_horizon:
             raise ValueError("oracle horizon is shorter than the encoder window")
         if start_frame < 0:
             raise ValueError("start_frame must be non-negative")
@@ -72,6 +90,8 @@ class NativeOracleWorker:
         if arrays.joint_names != list(bundle.manifest.action.isaac_joint_names):
             raise ValueError("reference and bundle Isaac joint orders differ")
         selected = arrays.motion(motion)
+        if interface == "joint_qpos_qvel_anchor_ori" and selected.joint_qvel is None:
+            raise ValueError("reference encoder interface requires qvel arrays")
         if start_frame >= selected.length:
             raise ValueError(
                 f"start_frame {start_frame} is outside motion length {selected.length}"
@@ -80,6 +100,8 @@ class NativeOracleWorker:
         self._request = ec_native.ShmCommandSlot(request_slot, create_slots)
         self._response_slot = ec_native.ShmCommandSlot(response_slot, create_slots)
         self._motion = selected
+        self.encoder_state_interface = str(interface)
+        self.raw_reference_width = RAW_REFERENCE_WIDTHS[self.encoder_state_interface]
         self.start_frame = int(start_frame)
         self.horizon = int(horizon)
         self.poll_seconds = float(poll_seconds)
@@ -102,7 +124,7 @@ class NativeOracleWorker:
             "motion_length": selected.length,
             "start_frame": self.start_frame,
             "horizon": self.horizon,
-            "raw_reference_width": RAW_REFERENCE_WIDTH,
+            "raw_reference_width": self.raw_reference_width,
         }
 
     def start(self) -> None:
@@ -140,12 +162,18 @@ class NativeOracleWorker:
             cursor + np.arange(self.horizon, dtype=np.int64),
             self._motion.length - 1,
         )
-        raw = np.empty((self.horizon, RAW_REFERENCE_WIDTH), dtype=np.float32)
+        raw = np.empty(
+            (self.horizon, self.raw_reference_width), dtype=np.float32
+        )
         raw[:, :29] = self._motion.joint_qpos[indices]
-        raw[:, 29:32] = self._motion.anchor_pos_w[indices]
-        raw[:, 32:36] = self._motion.anchor_quat_w[indices]
+        if self.encoder_state_interface == "root_qpos":
+            raw[:, 29:32] = self._motion.anchor_pos_w[indices]
+            raw[:, 32:36] = self._motion.anchor_quat_w[indices]
+        else:
+            raw[:, 29:58] = self._motion.joint_qvel[indices]
+            raw[:, 58:62] = self._motion.anchor_quat_w[indices]
         response = np.empty(
-            REFERENCE_HEADER_WIDTH + self.horizon * RAW_REFERENCE_WIDTH,
+            REFERENCE_HEADER_WIDTH + self.horizon * self.raw_reference_width,
             dtype=np.float32,
         )
         response[:REFERENCE_HEADER_WIDTH] = [

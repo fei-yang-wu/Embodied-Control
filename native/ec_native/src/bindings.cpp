@@ -7,6 +7,7 @@
 #include <span>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -87,6 +88,53 @@ py::array_t<float> projected_gravity_binding(const FloatArray& quaternion) {
   return output;
 }
 
+py::array_t<float> pack_joint_reference_binding(
+    const FloatArray& raw_world_frames, std::size_t start_frame,
+    std::size_t frame_count, std::size_t frame_stride,
+    const FloatArray& robot_quaternion_w) {
+  const auto raw = raw_world_frames.request();
+  if (raw.ndim != 2 || raw.shape[1] != 62 || raw.shape[0] <= 0) {
+    throw std::runtime_error("raw_world_frames must have shape [H, 62]");
+  }
+  const auto quaternion =
+      vector_from_array(robot_quaternion_w, 4, "robot_quaternion_w");
+  py::array_t<float> output(
+      static_cast<py::ssize_t>(frame_count * 64));
+  const auto* raw_data = static_cast<const float*>(raw.ptr);
+  if (!ec_native::pack_joint_qpos_qvel_anchor_ori_window(
+          std::span<const float>(raw_data,
+                                 static_cast<std::size_t>(raw.shape[0]) * 62),
+          static_cast<std::size_t>(raw.shape[0]), start_frame, frame_count,
+          frame_stride, quaternion,
+          std::span<float>(output.mutable_data(), frame_count * 64))) {
+    throw std::runtime_error("joint reference window is invalid");
+  }
+  return output;
+}
+
+ec_native::NativePlannerConfig::ReferenceEncoderLayout reference_layout(
+    const std::string& value) {
+  if (value == "root_qpos") {
+    return ec_native::NativePlannerConfig::ReferenceEncoderLayout::kRootQpos;
+  }
+  if (value == "joint_qpos_qvel_anchor_ori") {
+    return ec_native::NativePlannerConfig::ReferenceEncoderLayout::
+        kJointQposQvelAnchorOri;
+  }
+  throw std::runtime_error("unsupported reference encoder layout: " + value);
+}
+
+ec_native::NativePlannerConfig::EncoderTrigger encoder_trigger(
+    const std::string& value) {
+  if (value == "on_acceptance") {
+    return ec_native::NativePlannerConfig::EncoderTrigger::kOnAcceptance;
+  }
+  if (value == "every_control_tick") {
+    return ec_native::NativePlannerConfig::EncoderTrigger::kEveryControlTick;
+  }
+  throw std::runtime_error("unsupported encoder trigger: " + value);
+}
+
 class ShmCommandSlot {
  public:
   ShmCommandSlot(const std::string& name, bool create)
@@ -132,14 +180,18 @@ class ShmCommandSlot {
 
 class NativeTrackerCoreBinding {
  public:
+  using TermTuple = std::tuple<std::string, std::size_t, std::size_t,
+                               std::size_t, std::string, std::string>;
+
   NativeTrackerCoreBinding(
       const std::string& policy_path, const std::string& input_name,
       const std::string& output_name,
-      const std::vector<std::pair<std::string, std::size_t>>& terms,
+      const std::vector<TermTuple>& terms,
       std::size_t command_width, const FloatArray& default_joint_position,
       const FloatArray& action_scale, const FloatArray& joint_lower,
       const FloatArray& joint_upper, const FloatArray& fsq_half_levels,
-      std::size_t fsq_z_dim, std::size_t intra_op_threads) {
+      std::size_t fsq_z_dim, float raw_action_clip,
+      std::size_t intra_op_threads) {
     const auto defaults = vector_from_array(
         default_joint_position, ec_native::kJointCount, "default_joint_position");
     const auto scales =
@@ -150,9 +202,33 @@ class NativeTrackerCoreBinding {
         joint_upper, ec_native::kJointCount, "joint_upper", true);
     const auto half = vector_from_array(fsq_half_levels, fsq_z_dim,
                                         "fsq_half_levels", true);
+    std::vector<ec_native::TermConfig> term_configs;
+    term_configs.reserve(terms.size());
+    for (const auto& [name, width, history_length, history_stride,
+                      history_order, reset_fill] : terms) {
+      ec_native::HistoryOrder order;
+      if (history_order == "oldest_first") {
+        order = ec_native::HistoryOrder::kOldestFirst;
+      } else if (history_order == "newest_first") {
+        order = ec_native::HistoryOrder::kNewestFirst;
+      } else {
+        throw std::runtime_error("unsupported observation history order");
+      }
+      ec_native::ResetFill fill;
+      if (reset_fill == "repeat_first") {
+        fill = ec_native::ResetFill::kRepeatFirst;
+      } else if (reset_fill == "zero") {
+        fill = ec_native::ResetFill::kZero;
+      } else {
+        throw std::runtime_error("unsupported observation reset fill");
+      }
+      term_configs.push_back(
+          {name, width, history_length, history_stride, order, fill});
+    }
     core_ = std::make_unique<ec_native::NativeTrackerCore>(
-        policy_path, input_name, output_name, terms, command_width, defaults,
-        scales, lower, upper, half, fsq_z_dim, intra_op_threads);
+        policy_path, input_name, output_name, term_configs, command_width, defaults,
+        scales, lower, upper, half, fsq_z_dim, raw_action_clip,
+        intra_op_threads);
   }
 
   void reset() { core_->reset(); }
@@ -227,6 +303,9 @@ class NativeFakeRuntimeBinding {
       std::size_t root_qpos_width, std::size_t window_frames,
       std::size_t z_dim, bool sin_cos_phase, std::uint32_t direct_tag,
       bool oracle_reference,
+      const std::string& reference_encoder_layout,
+      std::size_t encoder_frame_stride,
+      const std::string& encoder_trigger_mode,
       const std::string& encoder_path,
       const std::string& encoder_input_name,
       const std::string& encoder_output_name,
@@ -246,12 +325,15 @@ class NativeFakeRuntimeBinding {
     ec_native::NativePlannerConfig planner{
         .hold_steps = hold_steps,
         .lead_ticks = lead_ticks,
-        .root_qpos_width = root_qpos_width,
+        .encoder_frame_width = root_qpos_width,
         .window_frames = window_frames,
+        .encoder_frame_stride = encoder_frame_stride,
         .z_dim = z_dim,
         .sin_cos_phase = sin_cos_phase,
         .direct_tag = direct_tag,
         .oracle_reference = oracle_reference,
+        .reference_encoder_layout = reference_layout(reference_encoder_layout),
+        .encoder_trigger = encoder_trigger(encoder_trigger_mode),
     };
     runtime_ = std::make_unique<ec_native::NativeFakeRuntime>(
         tracker.core(), response_slot, request_slot, create_slots, scheduler,
@@ -283,6 +365,7 @@ class NativeFakeRuntimeBinding {
     result["deadline_misses"] = stats.deadline_misses;
     result["planner_requests"] = stats.planner_requests;
     result["planner_responses"] = stats.planner_responses;
+    result["encoder_inferences"] = stats.encoder_inferences;
     result["response_overruns"] = stats.response_overruns;
     result["scheduler_deadlines_missed"] =
         stats.scheduler_deadlines_missed;
@@ -408,6 +491,9 @@ class NativeMujocoRuntimeBinding : public NativeFakeRuntimeBinding {
       std::size_t lead_ticks, std::size_t root_qpos_width,
       std::size_t window_frames, std::size_t z_dim, bool sin_cos_phase,
       std::uint32_t direct_tag, bool oracle_reference,
+      const std::string& reference_encoder_layout,
+      std::size_t encoder_frame_stride,
+      const std::string& encoder_trigger_mode,
       const std::string& encoder_path,
       const std::string& encoder_input_name,
       const std::string& encoder_output_name,
@@ -422,6 +508,8 @@ class NativeMujocoRuntimeBinding : public NativeFakeRuntimeBinding {
             command_absent_ticks, command_stale_ms, hold_steps, lead_ticks,
             root_qpos_width, window_frames, z_dim, sin_cos_phase,
             direct_tag, oracle_reference,
+            reference_encoder_layout, encoder_frame_stride,
+            encoder_trigger_mode,
             encoder_path, encoder_input_name, encoder_output_name,
             encoder_input_width, encoder_output_width, cpu, fifo_priority,
             lock_memory, require_realtime, physics_cpu,
@@ -442,6 +530,9 @@ class NativeMujocoRuntimeBinding : public NativeFakeRuntimeBinding {
       std::size_t lead_ticks, std::size_t root_qpos_width,
       std::size_t window_frames, std::size_t z_dim, bool sin_cos_phase,
       std::uint32_t direct_tag, bool oracle_reference,
+      const std::string& reference_encoder_layout,
+      std::size_t encoder_frame_stride,
+      const std::string& encoder_trigger_mode,
       const std::string& encoder_path,
       const std::string& encoder_input_name,
       const std::string& encoder_output_name,
@@ -484,12 +575,15 @@ class NativeMujocoRuntimeBinding : public NativeFakeRuntimeBinding {
     ec_native::NativePlannerConfig planner{
         .hold_steps = hold_steps,
         .lead_ticks = lead_ticks,
-        .root_qpos_width = root_qpos_width,
+        .encoder_frame_width = root_qpos_width,
         .window_frames = window_frames,
+        .encoder_frame_stride = encoder_frame_stride,
         .z_dim = z_dim,
         .sin_cos_phase = sin_cos_phase,
         .direct_tag = direct_tag,
         .oracle_reference = oracle_reference,
+        .reference_encoder_layout = reference_layout(reference_encoder_layout),
+        .encoder_trigger = encoder_trigger(encoder_trigger_mode),
     };
     return std::make_unique<ec_native::NativeFakeRuntime>(
         tracker.core(), response_slot, request_slot, create_slots, scheduler,
@@ -640,14 +734,20 @@ class NativeUnitreeRuntimeBinding : public NativeFakeRuntimeBinding {
     ec_native::NativePlannerConfig planner{
         .hold_steps = config_value<std::size_t>(config, "hold_steps"),
         .lead_ticks = config_value<std::size_t>(config, "lead_ticks"),
-        .root_qpos_width =
+        .encoder_frame_width =
             config_value<std::size_t>(config, "root_qpos_width"),
         .window_frames =
             config_value<std::size_t>(config, "window_frames"),
+        .encoder_frame_stride =
+            config_value<std::size_t>(config, "encoder_frame_stride"),
         .z_dim = config_value<std::size_t>(config, "z_dim"),
         .sin_cos_phase = config_value<bool>(config, "sin_cos_phase"),
         .direct_tag = config_value<std::uint32_t>(config, "direct_tag"),
         .oracle_reference = false,
+        .reference_encoder_layout = reference_layout(
+            config_value<std::string>(config, "reference_encoder_layout")),
+        .encoder_trigger = encoder_trigger(
+            config_value<std::string>(config, "encoder_trigger")),
     };
     auto runtime = std::make_unique<ec_native::NativeFakeRuntime>(
         tracker.core(), response_slot, request_slot, create_slots, scheduler,
@@ -785,6 +885,10 @@ PYBIND11_MODULE(_ec_native, m) {
         py::arg("anchor_quaternion_w"));
   m.def("projected_gravity_from_xyzw", &projected_gravity_binding,
         py::arg("quaternion_xyzw"));
+  m.def("pack_joint_qpos_qvel_anchor_ori_window",
+        &pack_joint_reference_binding, py::arg("raw_world_frames"),
+        py::arg("start_frame"), py::arg("frame_count"),
+        py::arg("frame_stride"), py::arg("robot_quaternion_w"));
   m.attr("MAX_VALUES") = py::int_(ec_native::kMaxValues);
 #ifdef EC_WITH_UNITREE
   m.attr("WITH_UNITREE") = py::bool_(true);
@@ -804,16 +908,17 @@ PYBIND11_MODULE(_ec_native, m) {
   py::class_<NativeTrackerCoreBinding>(m, "NativeTrackerCore")
       .def(py::init<const std::string&, const std::string&,
                     const std::string&,
-                    const std::vector<std::pair<std::string, std::size_t>>&,
+                    const std::vector<NativeTrackerCoreBinding::TermTuple>&,
                     std::size_t, const FloatArray&, const FloatArray&,
                     const FloatArray&, const FloatArray&, const FloatArray&,
-                    std::size_t, std::size_t>(),
+                    std::size_t, float, std::size_t>(),
            py::arg("policy_path"), py::arg("input_name"),
            py::arg("output_name"), py::arg("terms"),
            py::arg("command_width"), py::arg("default_joint_position"),
            py::arg("action_scale"), py::arg("joint_lower"),
            py::arg("joint_upper"), py::arg("fsq_half_levels"),
-           py::arg("fsq_z_dim"), py::arg("intra_op_threads") = 4)
+           py::arg("fsq_z_dim"), py::arg("raw_action_clip") = 0.0F,
+           py::arg("intra_op_threads") = 4)
       .def("reset", &NativeTrackerCoreBinding::reset)
       .def("warmup", &NativeTrackerCoreBinding::warmup,
            py::arg("iterations") = 8)
@@ -842,9 +947,9 @@ PYBIND11_MODULE(_ec_native, m) {
                const std::string&, bool, std::size_t, float, std::size_t,
                double, std::size_t, std::size_t, std::size_t,
                std::size_t, std::size_t, bool, std::uint32_t, bool,
-               const std::string&,
-               const std::string&, const std::string&, std::size_t,
-               std::size_t, int, int, bool, bool>(),
+               const std::string&, std::size_t, const std::string&,
+               const std::string&, const std::string&, const std::string&,
+               std::size_t, std::size_t, int, int, bool, bool>(),
            py::arg("tracker"), py::arg("response_slot"),
            py::arg("request_slot") = "", py::arg("create_slots") = true,
            py::arg("control_hz") = 50, py::arg("lag_alpha") = 1.0F,
@@ -856,6 +961,9 @@ PYBIND11_MODULE(_ec_native, m) {
            py::arg("sin_cos_phase") = true,
            py::arg("direct_tag") = 1,
            py::arg("oracle_reference") = false,
+           py::arg("reference_encoder_layout") = "root_qpos",
+           py::arg("encoder_frame_stride") = 1,
+           py::arg("encoder_trigger") = "on_acceptance",
            py::arg("encoder_path") = "",
            py::arg("encoder_input_name") = "",
            py::arg("encoder_output_name") = "",
@@ -899,9 +1007,9 @@ PYBIND11_MODULE(_ec_native, m) {
                const std::string&, bool, std::size_t, std::size_t, double,
                std::size_t, std::size_t, std::size_t, std::size_t,
                std::size_t, bool, std::uint32_t, bool, const std::string&,
-               const std::string&,
-               const std::string&, std::size_t, std::size_t, int, int, bool,
-               bool, int, int, bool, bool>(),
+               std::size_t, const std::string&, const std::string&,
+               const std::string&, const std::string&, std::size_t,
+               std::size_t, int, int, bool, bool, int, int, bool, bool>(),
            py::arg("tracker"), py::arg("model_path"),
            py::arg("isaac_joint_names"),
            py::arg("default_joint_position"), py::arg("stiffness"),
@@ -918,6 +1026,9 @@ PYBIND11_MODULE(_ec_native, m) {
            py::arg("sin_cos_phase") = true,
            py::arg("direct_tag") = 1,
            py::arg("oracle_reference") = false,
+           py::arg("reference_encoder_layout") = "root_qpos",
+           py::arg("encoder_frame_stride") = 1,
+           py::arg("encoder_trigger") = "on_acceptance",
            py::arg("encoder_path") = "",
            py::arg("encoder_input_name") = "",
            py::arg("encoder_output_name") = "",

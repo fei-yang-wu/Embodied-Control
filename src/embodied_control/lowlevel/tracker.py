@@ -82,6 +82,7 @@ class LowLevelTracker:
 
     def reset(self, state: RobotState) -> None:
         self._last_action.fill(0.0)
+        self.observation.reset()
         self.source.reset(state)
 
     def _snap_fsq(self, command: CommandSample) -> CommandSample:
@@ -120,8 +121,10 @@ class LowLevelTracker:
         action = self.engine.infer(obs, self._action_out)
         if not np.isfinite(action).all():
             raise ValueError("tracker engine produced a non-finite action")
+        clip = self.bundle.manifest.action.raw_action_clip
+        if clip is not None:
+            np.clip(action, -clip, clip, out=action)
         q_target, kp, kd = self.bundle.manifest.action.decode(action)
         joint_command = JointCommand(q_target=q_target, kp=kp, kd=kd)
         np.copyto(self._last_action, action)
         return joint_command, command
-

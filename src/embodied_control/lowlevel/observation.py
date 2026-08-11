@@ -18,10 +18,23 @@ class ObservationAssembler:
         if self._default_joint_pos.shape != (29,):
             raise ValueError("default_joint_pos must have shape (29,)")
         self._slices = {}
+        self._history = {}
+        self._history_cursor = {}
+        self._history_initialized = {}
         cursor = 0
         for term in contract.terms:
-            self._slices[term.name] = slice(cursor, cursor + term.width)
-            cursor += term.width
+            self._slices[term.name] = slice(cursor, cursor + term.flat_width)
+            cursor += term.flat_width
+            span = 1 + (term.history_length - 1) * term.history_stride
+            self._history[term.name] = np.empty((span, term.width), dtype=np.float32)
+            self._history_cursor[term.name] = 0
+            self._history_initialized[term.name] = False
+
+    def reset(self) -> None:
+        for term in self.contract.terms:
+            self._history[term.name].fill(0.0)
+            self._history_cursor[term.name] = 0
+            self._history_initialized[term.name] = False
 
     @property
     def buffer(self) -> np.ndarray:
@@ -52,7 +65,31 @@ class ObservationAssembler:
                 )
             if not np.isfinite(value).all():
                 raise ValueError(f"observation term {term.name!r} contains non-finite values")
-            np.copyto(self._buffer[self._slices[term.name]], value.astype(np.float32, copy=False))
+            value = value.astype(np.float32, copy=False)
+            history = self._history[term.name]
+            if not self._history_initialized[term.name]:
+                if term.reset_fill == "repeat_first":
+                    history[:] = value
+                else:
+                    history.fill(0.0)
+                    history[0] = value
+                history_cursor = 0
+                self._history_initialized[term.name] = True
+            else:
+                history_cursor = (self._history_cursor[term.name] + 1) % len(history)
+                history[history_cursor] = value
+            self._history_cursor[term.name] = history_cursor
+            offsets = range(term.history_length - 1, -1, -1)
+            if term.history_order == "newest_first":
+                offsets = range(term.history_length)
+            destination = self._buffer[self._slices[term.name]].reshape(
+                term.history_length, term.width
+            )
+            for output_index, history_index in enumerate(offsets):
+                source_index = (
+                    history_cursor - history_index * term.history_stride
+                ) % len(history)
+                destination[output_index] = history[source_index]
         if not np.isfinite(self._buffer).all():
             raise ValueError("assembled observation contains non-finite values")
         return self._buffer

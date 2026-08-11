@@ -24,11 +24,38 @@ enum class TermKind {
   kLastAction,
 };
 
+enum class HistoryOrder {
+  kOldestFirst,
+  kNewestFirst,
+};
+
+enum class ResetFill {
+  kRepeatFirst,
+  kZero,
+};
+
+struct TermConfig {
+  std::string name;
+  std::size_t width;
+  std::size_t history_length;
+  std::size_t history_stride;
+  HistoryOrder history_order;
+  ResetFill reset_fill;
+};
+
 struct TermSpec {
   TermKind kind;
-  std::size_t width;
+  std::size_t sample_width;
+  std::size_t history_length;
+  std::size_t history_stride;
+  std::size_t history_span;
+  HistoryOrder history_order;
+  ResetFill reset_fill;
   std::size_t observation_offset;
   std::size_t command_offset;
+  std::size_t history_offset;
+  std::size_t history_cursor = 0;
+  bool history_initialized = false;
 };
 
 struct RobotState {
@@ -52,6 +79,12 @@ bool reexpress_root_qpos_window(
     std::span<const float> anchor_quaternion_w,
     std::span<float> root_qpos_frames) noexcept;
 
+bool pack_joint_qpos_qvel_anchor_ori_window(
+    std::span<const float> raw_world_frames, std::size_t available_frames,
+    std::size_t start_frame, std::size_t frame_count,
+    std::size_t frame_stride, std::span<const float> robot_quaternion_w,
+    std::span<float> encoder_window) noexcept;
+
 struct StepResult {
   std::array<float, kMaxObservation> observation{};
   std::size_t observation_width = 0;
@@ -64,12 +97,13 @@ class NativeTrackerCore {
   NativeTrackerCore(
       const std::string& policy_path, const std::string& input_name,
       const std::string& output_name,
-      const std::vector<std::pair<std::string, std::size_t>>& terms,
+      const std::vector<TermConfig>& terms,
       std::size_t command_width,
       std::span<const float> default_joint_position,
       std::span<const float> action_scale,
       std::span<const float> joint_lower, std::span<const float> joint_upper,
       std::span<const float> fsq_half_levels, std::size_t fsq_z_dim,
+      float raw_action_clip,
       std::size_t intra_op_threads = 1);
 
   void reset() noexcept;
@@ -89,6 +123,8 @@ class NativeTrackerCore {
  private:
   static TermKind parse_term(const std::string& name);
   void validate_state(const RobotState& state) const;
+  void update_history(TermSpec& term, const RobotState& state,
+                      std::span<const float> command);
   void assemble(const RobotState& state, std::span<const float> command);
 
   std::vector<TermSpec> terms_;
@@ -101,7 +137,9 @@ class NativeTrackerCore {
   bool clamp_joint_targets_ = false;
   std::vector<float> fsq_half_levels_;
   std::size_t fsq_z_dim_ = 0;
+  float raw_action_clip_ = 0.0F;
   std::array<float, kJointCount> last_action_{};
+  std::vector<float> history_storage_;
   StepResult result_{};
   OnnxEngine engine_;
 };
