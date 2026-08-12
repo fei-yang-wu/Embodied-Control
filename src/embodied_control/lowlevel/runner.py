@@ -54,7 +54,7 @@ def verify_bundle(root: str | Path, *, atol: float = 1e-5) -> dict:
     return report
 
 
-def _build_publisher(job: LowLevelJob, bundle: PolicyBundle, buffer, encoder_engine):
+def _build_publisher(job: LowLevelJob, bundle: PolicyBundle, buffer, encoder_engine, tracker):
     from embodied_control.lowlevel.publishers.onboard_encoder import OnboardEncoderPublisher
     from embodied_control.lowlevel.publishers.reference_playback import (
         ReferencePlaybackPublisher,
@@ -62,6 +62,30 @@ def _build_publisher(job: LowLevelJob, bundle: PolicyBundle, buffer, encoder_eng
 
     if job.command.topology == "push":
         return None
+    if job.command.source == "gr00t_service":
+        from embodied_control.lowlevel.publishers.gr00t_service import (
+            Gr00tServicePublisher,
+        )
+
+        spec = job.command.gr00t
+        return Gr00tServicePublisher(
+            buffer,
+            bundle.manifest.command,
+            list(spec.service_cmd),
+            mode=spec.mode,
+            tracker=tracker,
+            default_joint_pos=np.asarray(
+                bundle.manifest.action.default_joint_pos, dtype=np.float32
+            ),
+            encoder=encoder_engine,
+            hold_steps=spec.hold_steps,
+            slots=spec.slots,
+            rtc=spec.rtc,
+            rtc_freeze_steps=spec.rtc_freeze_steps,
+            rtc_ramp_rate=spec.rtc_ramp_rate,
+            service_cwd=spec.service_cwd,
+            goal_schedule=spec.goal_schedule,
+        )
     if job.command.reference is None:
         raise ValueError("command.topology=local requires command.reference")
     reference = Path(job.command.reference)
@@ -152,13 +176,30 @@ def run_lowlevel_job(job_path: str | Path, *, device: str = "cpu") -> tuple[Path
         buffer = InProcessCommandBuffer()
     source = BufferedCommandSource(buffer, control_hz=control_hz)
     tracker = LowLevelTracker(bundle, engine, source)
-    publisher = _build_publisher(job, bundle, buffer, encoder_engine)
+    publisher = _build_publisher(job, bundle, buffer, encoder_engine, tracker)
 
     loop = ControlLoop(job, tracker, backend, publisher, logger=logger.child("loop"))
-    result = loop.run()
+    try:
+        result = loop.run()
+    finally:
+        if hasattr(publisher, "close"):
+            publisher.close()
     write_run_artifacts(
         run_dir, job, json.loads((bundle.root / "manifest.json").read_text()), result
     )
+    for episode_id, arrays in loop.state_logs.items():
+        np.savez_compressed(run_dir / f"states_ep{episode_id}.npz", **arrays)
+    head_ms = getattr(publisher, "head_ms", None)
+    if head_ms:
+        metrics_path = run_dir / "metrics.json"
+        metrics = json.loads(metrics_path.read_text())
+        metrics["planner_head_ms"] = {
+            "count": len(head_ms),
+            "p50": float(np.percentile(head_ms, 50)),
+            "p95": float(np.percentile(head_ms, 95)),
+            "max": float(np.max(head_ms)),
+        }
+        metrics_path.write_text(json.dumps(metrics, indent=2, default=str))
     frames = getattr(backend, "frames", None)
     if job.rollout.record_video and frames:
         import imageio.v2 as imageio

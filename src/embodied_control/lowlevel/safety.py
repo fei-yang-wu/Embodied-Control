@@ -30,6 +30,15 @@ class SafetyMonitor:
         age_ms = max(0.0, (now - state.stamp) * 1000.0)
         if age_ms > self.spec.state_absent_ms:
             raise SafetyFault("state_absent", f"robot state is {age_ms:.0f} ms old")
+        if (
+            self.spec.min_base_height_m is not None
+            and state.anchor_pos_w is not None
+            and float(state.anchor_pos_w[2]) < self.spec.min_base_height_m
+        ):
+            raise SafetyFault(
+                "base_too_low",
+                f"anchor height {float(state.anchor_pos_w[2]):.3f} m",
+            )
 
     def state_late(self, state: RobotState, now: float) -> bool:
         return (now - state.stamp) * 1000.0 > self.spec.state_late_ms

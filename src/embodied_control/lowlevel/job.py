@@ -29,9 +29,25 @@ class EnvSpec(JobModel):
         return self
 
 
+class Gr00tSpec(JobModel):
+    service_cmd: list[str]
+    service_cwd: str | None = None
+    mode: Literal["latent", "chunk"] = "latent"
+    hold_steps: int = Field(default=10, ge=1)
+    slots: int = Field(default=3, ge=1)
+    rtc: bool = False
+    rtc_freeze_steps: int = Field(default=0, ge=0)
+    rtc_ramp_rate: float = Field(default=5.0, gt=0.0)
+    # Language chaining: [[start_tick, goal_name], ...] ascending; requests at
+    # or after start_tick carry that goal to the service.
+    goal_schedule: list[tuple[int, str]] | None = None
+
+
 class CommandSpec(JobModel):
     topology: Literal["local", "push"] = "local"
-    source: Literal["onboard_encoder", "reference_playback", "none"] = "onboard_encoder"
+    source: Literal[
+        "onboard_encoder", "reference_playback", "gr00t_service", "none"
+    ] = "onboard_encoder"
     reference: str | None = None
     motion: str | None = None
     hold_steps_override: int | None = Field(default=None, ge=1)
@@ -39,6 +55,7 @@ class CommandSpec(JobModel):
     endpoint: str | None = None
     topic: str = ""
     shm_name: str | None = None
+    gr00t: Gr00tSpec | None = None
 
     @model_validator(mode="after")
     def validate_topology(self) -> "CommandSpec":
@@ -51,6 +68,8 @@ class CommandSpec(JobModel):
                 raise ValueError("command.topology=push forbids a local source")
         if self.topology == "local" and self.source == "none":
             raise ValueError("command.topology=local requires a source")
+        if self.source == "gr00t_service" and self.gr00t is None:
+            raise ValueError("command.source=gr00t_service requires command.gr00t")
         return self
 
 
@@ -59,6 +78,9 @@ class RolloutSpec(JobModel):
     max_steps: int = Field(default=500, ge=1)
     seed: int = 0
     record_video: bool = False
+    # Log per-tick joint positions + anchor pose to `states_ep{i}.npz` for
+    # post-hoc tracking metrics (MPJPE via `eval_mpjpe`).
+    record_states: bool = False
 
 
 class SafetySpec(JobModel):
@@ -69,6 +91,9 @@ class SafetySpec(JobModel):
     damp_kd: float = 8.0
     joint_limit_margin_rad: float | None = None
     max_action_delta: float | None = None
+    # Fall detection for sim evaluation: DAMP when the anchor (pelvis) world
+    # height drops below this. Mirrors the training env's `base_too_low`.
+    min_base_height_m: float | None = None
 
 
 class OutputSpec(JobModel):

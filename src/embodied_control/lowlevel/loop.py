@@ -53,6 +53,7 @@ class ControlLoop:
         self.backend = backend
         self.publisher = publisher
         self.logger = logger or EcLogger.null()
+        self.state_logs: dict[int, dict[str, np.ndarray]] = {}
 
     def run_episode(self, episode_id: int, seed: int) -> EpisodeResult:
         control_hz = self.tracker.bundle.manifest.rates.control_hz
@@ -67,10 +68,23 @@ class ControlLoop:
 
         result = EpisodeResult(episode_id=episode_id, steps=0, status="completed")
         tick_ms: list[float] = []
+        joint_log: list[np.ndarray] = []
+        anchor_log: list[np.ndarray] = []
         for step in range(self.job.rollout.max_steps):
             clock.wait_for_tick(step, control_hz)
             started = time.perf_counter()
             state = self.backend.read_state()
+            if (
+                self.job.rollout.record_states
+                and state.anchor_pos_w is not None
+                and state.anchor_quat_w is not None
+            ):
+                joint_log.append(np.array(state.joint_pos, dtype=np.float32))
+                anchor_log.append(
+                    np.concatenate([state.anchor_pos_w, state.anchor_quat_w]).astype(
+                        np.float32
+                    )
+                )
             now = clock.now()
             try:
                 monitor.check_state(state, now)
@@ -104,6 +118,11 @@ class ControlLoop:
         if tick_ms:
             result.tick_ms_p50 = float(np.percentile(tick_ms, 50))
             result.tick_ms_p99 = float(np.percentile(tick_ms, 99))
+        if joint_log:
+            self.state_logs[episode_id] = {
+                "joint_pos": np.stack(joint_log),
+                "anchor_pose_xyzw": np.stack(anchor_log),
+            }
         self.logger.event(
             "episode.finished", phase="rollout", episode_id=episode_id,
             status=result.status, steps=result.steps, damp_cause=result.damp_cause or "",
