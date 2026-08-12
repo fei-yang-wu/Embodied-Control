@@ -146,6 +146,19 @@ lateness and deadline misses are reported separately. FIFO and memory-lock
 options also have separate control and physics forms; use them only on a
 host configured for real-time scheduling.
 
+### Latent playground
+
+To inspect the latent interface itself — encode reference motions into `z`,
+perturb `z`, and watch what the frozen tracker does with it in MuJoCo — use the
+notebook. It needs a playkit (bundle + reference tree + MJCF), which
+`scripts/make_latent_playkit.sh` builds; see
+[docs/latent_playground.md](docs/latent_playground.md).
+
+```bash
+export EC_LATENT_PLAYKIT=/absolute/path/to/z256_latent_playkit
+pixi run -e latent-lab latent-lab
+```
+
 The optional Unitree backend uses SDK2 from an explicit source tree:
 
 ```bash

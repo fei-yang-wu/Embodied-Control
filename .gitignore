@@ -221,3 +221,6 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 native/thirdparty/
+
+# Latent playkit assets (bundle + reference tree + MJCF), delivered out of band
+assets/

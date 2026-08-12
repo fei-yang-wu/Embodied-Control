@@ -128,9 +128,23 @@ ec-native = { path = "native/ec_native", editable = true }
 build-native = "pixi reinstall -e native ec-native && python -c \"import ec_native; print(ec_native.__version__)\""
 test-native = "pytest -q tests/lowlevel/test_native_shm.py tests/lowlevel/test_native_core.py tests/lowlevel/test_metrics_and_telemetry.py tests/lowlevel/test_dds_plant.py"
 
+# --- notebook feature: the latent playground (encode z, perturb it, watch it) ---
+# Jupyter and plotting on top of the lowlevel runtime + MuJoCo backend.
+# Everything runs on CPU: the tracker MLP is ~2M parameters and one 500-step
+# MuJoCo episode takes a couple of seconds.
+[feature.notebook.dependencies]
+jupyterlab = ">=4,<5"
+ipywidgets = ">=8,<9"
+matplotlib = ">=3.8"
+pandas = ">=2,<3"
+
+[feature.notebook.tasks]
+latent-lab = "jupyter lab notebooks/z256_latent_perturbation.ipynb"
+
 [environments]
 sim = ["sim"]
 transports = ["transports"]
 lowlevel = ["lowlevel"]
 lowlevel-sim = ["lowlevel", "sim"]
 native = ["lowlevel", "native"]
+latent-lab = ["lowlevel", "sim", "notebook"]
