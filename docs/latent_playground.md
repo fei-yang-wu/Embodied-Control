@@ -44,7 +44,15 @@ identical windows.
 
 Both notebooks read one **playkit** directory: the policy bundles under
 `bundles/<name>/`, the reference-array tree, and the G1 MJCF with meshes
-(~144 MB unpacked). The normal path needs nothing by hand — the notebooks
+(~153 MB unpacked). The reference tree is the 30-motion
+`bones_seed_language30_compositionality_v1` set; two of the thirty
+(`panic_run_away_180_R_001_A423`, `walk_big_dog_ff_225_stop_R_001_A492`) are
+tracker-limited — the oracle itself falls on them in the training simulator —
+and are flagged in the notebooks and the kit README. The full processed
+motion catalog is public
+([GeorgiaTech/g1_bones_seed_sonic_129k_50hz](https://huggingface.co/datasets/GeorgiaTech/g1_bones_seed_sonic_129k_50hz))
+for picking replacement motions by name. The normal path needs nothing by
+hand — the notebooks
 download the kit from the private Hugging Face dataset
 `GeorgiaTech/ec-latent-playkit`, **pinned to an exact revision**
 (`PLAYKIT_REVISION` in each notebook's Inputs cell), and
@@ -57,7 +65,7 @@ To build a kit from local training artifacts instead:
 external/Embodied-Control/scripts/make_latent_playkit.sh \
   --bundle    logs/policy_bundles/rollout24_gamma097_3500m \
   --bundle    logs/policy_bundles/fsq64_sonic_4500m \
-  --reference data/bones_seed_language10_v1/reference_arrays/root_qpos_v1 \
+  --reference data/bones_seed_language30_compositionality_v1/reference_arrays/root_qpos_v1 \
   --mjcf      source/isaaclab_imitation/isaaclab_imitation/assets/unitree/g1_description/g1_29dof_rev_1_0.xml \
   --output    /tmp/latent_playkit
 ```
