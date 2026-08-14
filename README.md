@@ -149,15 +149,22 @@ host configured for real-time scheduling.
 ### Latent playground
 
 To inspect the latent interface itself — encode reference motions into `z`,
-perturb `z`, and watch what the frozen tracker does with it in MuJoCo — use the
-notebook. It needs a playkit (bundle + reference tree + MJCF), which
-`scripts/make_latent_playkit.sh` builds; see
-[docs/latent_playground.md](docs/latent_playground.md).
+perturb `z`, and watch what the frozen tracker does with it in MuJoCo — use
+the notebooks: `notebooks/z256_latent_perturbation.ipynb` (continuous
+256-dim latent) and `notebooks/fsq64_latent_perturbation.ipynb` (quantized
+64-dim FSQ latent). One command sets everything up on Linux or an
+Apple-Silicon mac — pixi, the environment, Hugging Face access, and the
+playkit (bundles + reference tree + MJCF, auto-downloaded at a pinned
+revision of the private `GeorgiaTech/ec-latent-playkit` dataset):
 
 ```bash
-export EC_LATENT_PLAYKIT=/absolute/path/to/z256_latent_playkit
-pixi run -e latent-lab latent-lab
+./scripts/setup_latent_lab.sh
 ```
+
+Relaunch later with `pixi run -e latent-lab latent-lab`. To build a playkit
+from local training artifacts instead, use `scripts/make_latent_playkit.sh`
+and point `EC_LATENT_PLAYKIT` at the result; see
+[docs/latent_playground.md](docs/latent_playground.md).
 
 The optional Unitree backend uses SDK2 from an explicit source tree:
 

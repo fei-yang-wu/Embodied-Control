@@ -1,13 +1,16 @@
-# Latent playground (z256)
+# Latent playground
 
-A notebook-first surface for asking what a DiffSR latent means to the frozen
+A notebook-first surface for asking what a skill latent means to the frozen
 low-level tracker: encode reference motions into `z`, perturb `z`, run the real
 tracker in MuJoCo, and watch the result.
 
-- notebook: `notebooks/z256_latent_perturbation.ipynb`
+- notebooks: `notebooks/z256_latent_perturbation.ipynb` (continuous 256-dim
+  latent) and `notebooks/fsq64_latent_perturbation.ipynb` (quantized 64-dim
+  FSQ latent, 32 levels per dimension)
 - library: `embodied_control.lowlevel.latent`,
   `embodied_control.lowlevel.publishers.latent_perturbation`
-- environment: `pixi run -e latent-lab latent-lab`
+- one-shot setup (Linux or Apple-Silicon mac): `./scripts/setup_latent_lab.sh`
+- relaunch: `pixi run -e latent-lab latent-lab`
 
 ## What it is
 
@@ -39,40 +42,49 @@ identical windows.
 
 ## Getting the inputs
 
-The notebook reads one **playkit** directory: bundle, reference-array tree, and
-the G1 MJCF with meshes (~50 MB unpacked, ~37 MB as a tarball). Build one from
-the training repository:
+Both notebooks read one **playkit** directory: the policy bundles under
+`bundles/<name>/`, the reference-array tree, and the G1 MJCF with meshes
+(~144 MB unpacked). The normal path needs nothing by hand — the notebooks
+download the kit from the private Hugging Face dataset
+`GeorgiaTech/ec-latent-playkit`, **pinned to an exact revision**
+(`PLAYKIT_REVISION` in each notebook's Inputs cell), and
+`./scripts/setup_latent_lab.sh` pre-fetches it during setup. Reading the
+dataset needs a Hugging Face token that can see the GeorgiaTech org.
+
+To build a kit from local training artifacts instead:
 
 ```bash
 external/Embodied-Control/scripts/make_latent_playkit.sh \
   --bundle    logs/policy_bundles/rollout24_gamma097_3500m \
+  --bundle    logs/policy_bundles/fsq64_sonic_4500m \
   --reference data/bones_seed_language10_v1/reference_arrays/root_qpos_v1 \
   --mjcf      source/isaaclab_imitation/isaaclab_imitation/assets/unitree/g1_description/g1_29dof_rev_1_0.xml \
-  --output    /tmp/z256_latent_playkit
+  --output    /tmp/latent_playkit
 ```
 
-Then, from this repository:
+and point `EC_LATENT_PLAYKIT` at the result (a kit unpacked into
+`assets/latent_playkit` works without the variable). To ship new
+checkpoints, upload the rebuilt kit to the dataset and re-pin
+`PLAYKIT_REVISION` in both notebooks.
 
-```bash
-export EC_LATENT_PLAYKIT=/path/to/z256_latent_playkit
-pixi run -e latent-lab latent-lab
-```
-
-Unpacking the kit into `assets/z256_latent_playkit` works without the variable.
 Everything runs on CPU: one 300-tick episode takes about a second, plus video
 rendering.
 
-## Reference bundle
+## Reference bundles
 
-`rollout24_gamma097_3500m` — continuous z256, hold 10, `root_qpos` encoder
-state (10 frames x 38 values), robot anchor, mish + layer norm, 351-value
-tracker input, checkpoint `23fdd62a...` at 3.5B frames. Continuous means
-unquantized; the FSQ tracker family snaps z onto a lattice and the playground
-refuses those bundles rather than silently ignoring the quantizer.
+- `rollout24_gamma097_3500m` — continuous z256, hold 10, `root_qpos` encoder
+  state (10 frames x 38 values), robot anchor, mish + layer norm, 351-value
+  tracker input, checkpoint `23fdd62a...` at 3.5B frames.
+- `fsq64_sonic_4500m` — FSQ 64-dim, 32 levels per dimension (lattice step
+  1/16), hold 10, robot anchor, 159-value tracker input, checkpoint
+  `1e8555a5...` at 4.5B frames. The embedded encoder emits lattice values,
+  and the tracker snaps whatever it consumes back onto the lattice (the SONIC
+  convention); `pg.snap()`/`pg.codes()` expose that lattice, with parity to
+  the tracker's snap asserted in `tests/lowlevel/test_latent_playground.py`.
 
 ## What one pass looks like
 
-Numbers below come from a single execution of the shipped notebook on
+Numbers below come from a single execution of the shipped z256 notebook on
 `walk_arc_cw_start_R_slow_001_A443` (300 ticks) and the ten-motion kit. Every
 one is **one deterministic MuJoCo episode, no randomization, no repeats** —
 preliminary signals about the interface, not measurements of it, and MuJoCo
@@ -93,6 +105,14 @@ actuator dynamics are not the ones the policy trained in.
   survived. A convex blend of two valid latents is not itself reliably valid.
 - Rescaling z: gains 0.0 and 0.5 stay upright but track badly (85.8 and
   34.3 mm), gain 1.5 falls.
+
+One pass of the FSQ notebook on the same motion (same caveats): the encoder's
+output sits exactly on the lattice; the oracle code changes in 58 of 64
+dimensions per renewal on average; baseline MPJPE-L 18.0 mm; and pre-snap
+Gaussian noise up to sigma of 4 lattice steps did not cause a fall — where
+the continuous bundle fell at sigma 1.0 population std. The snap's built-in
+dead zone (half a lattice step) erases small perturbations before the policy
+sees them.
 
 Before any of this becomes a claim, repeat across seeds and start frames, and
 confirm the direction in the training simulator.
