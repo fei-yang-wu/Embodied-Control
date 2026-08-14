@@ -229,6 +229,39 @@ def test_reference_source_rejects_missing_anchor():
         publisher.tick(0, 0.0, None)
 
 
+def test_snap_fsq_matches_tracker_consume_path(fsq_manifest, fake_engine, tmp_path):
+    """`snap_fsq` must equal what `LowLevelTracker._snap_fsq` consumes."""
+    from embodied_control.lowlevel.bundle import PolicyBundle
+    from embodied_control.lowlevel.contracts import CommandPacket
+    from embodied_control.lowlevel.latent import fsq_codes, snap_fsq
+    from embodied_control.lowlevel.tracker import (
+        BufferedCommandSource,
+        LowLevelTracker,
+    )
+
+    half = np.asarray(fsq_manifest.command.fsq_half_levels, dtype=np.float32)
+    z = np.array([0.03, 0.51, -0.99, 1.7, -1.4, 0.0, 0.999, -0.001], np.float32)
+    values = np.concatenate([z, np.zeros(2, np.float32)])
+
+    bundle = PolicyBundle(root=tmp_path, manifest=fsq_manifest)
+    buffer = InProcessCommandBuffer()
+    tracker = LowLevelTracker(bundle, fake_engine, BufferedCommandSource(buffer))
+    state = _state()
+    tracker.reset(state)
+    buffer.publish(
+        CommandPacket(
+            interface="latent", values=values, sequence=0, stamp=0.0,
+            terms={"latent_command": values},
+        )
+    )
+    tracker.step(0, state)
+
+    snapped = snap_fsq(z, half)
+    np.testing.assert_allclose(tracker.observation.buffer[: z.size], snapped)
+    np.testing.assert_array_equal(snap_fsq(snapped, half), snapped)
+    np.testing.assert_array_equal(fsq_codes(z, half), (snapped * half).astype(np.int32))
+
+
 def test_precomputed_window_source():
     command = _command(macro_anchor_mode="expert_heading")
     states = np.arange(20 * 38, dtype=np.float32).reshape(20, 38)

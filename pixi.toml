@@ -137,9 +137,10 @@ jupyterlab = ">=4,<5"
 ipywidgets = ">=8,<9"
 matplotlib = ">=3.8"
 pandas = ">=2,<3"
+huggingface_hub = ">=0.20"
 
 [feature.notebook.tasks]
-latent-lab = "jupyter lab notebooks/z256_latent_perturbation.ipynb"
+latent-lab = "jupyter lab notebooks/"
 
 [environments]
 sim = ["sim"]

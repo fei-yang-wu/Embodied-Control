@@ -18,6 +18,11 @@ inherits them:
   live robot anchor is replaced by the reference's own anchor at the cursor.
   During a closed-loop rollout the same encoder sees the real robot anchor, so
   the oracle z of a drifting robot differs from the offline bank.
+- An FSQ bundle (`command.quantizer == "fsq"`) is supported: its embedded
+  encoder already emits lattice values, a perturbation is free to move z off
+  the lattice, and the tracker snaps back at consume time (the SONIC
+  convention). `z_trace` records what was *published*; use `snap()` to see
+  what the tracker actually consumed.
 """
 
 from __future__ import annotations
@@ -42,6 +47,24 @@ from embodied_control.lowlevel.tracker import BufferedCommandSource, LowLevelTra
 
 if sys.platform.startswith("linux"):
     os.environ.setdefault("MUJOCO_GL", "egl")
+
+
+def snap_fsq(z: np.ndarray, half_levels: np.ndarray) -> np.ndarray:
+    """Snap `[..., z_dim]` onto the FSQ lattice.
+
+    Must stay identical to `LowLevelTracker._snap_fsq`, which applies this at
+    consume time; `tests/lowlevel/test_latent_playground.py` asserts parity.
+    """
+    z = np.asarray(z, dtype=np.float32)
+    half = np.asarray(half_levels, dtype=np.float32)
+    return np.clip(np.rint(z * half), -half, half - 1.0) / half
+
+
+def fsq_codes(z: np.ndarray, half_levels: np.ndarray) -> np.ndarray:
+    """Integer lattice code per dimension, each in `[-half, half-1]`."""
+    half = np.asarray(half_levels, dtype=np.float32)
+    z = np.asarray(z, dtype=np.float32)
+    return np.clip(np.rint(z * half), -half, half - 1.0).astype(np.int32)
 
 
 @dataclass(frozen=True)
@@ -100,10 +123,10 @@ class LatentPlayground:
             raise ValueError(
                 f"the playground needs a latent bundle, got {manifest.interface!r}"
             )
-        if manifest.command.quantizer != "none":
-            raise ValueError(
-                "this bundle quantizes its latent (FSQ); the continuous-z "
-                "experiments in this module assume an unquantized z"
+        self.fsq_half: np.ndarray | None = None
+        if manifest.command.quantizer == "fsq":
+            self.fsq_half = np.asarray(
+                manifest.command.fsq_half_levels, dtype=np.float32
             )
         self.model_path = Path(model_path)
         self.policy = TorchEngine(self.bundle.policy_path, device=device)
@@ -136,6 +159,22 @@ class LatentPlayground:
     @property
     def hold_steps(self) -> int:
         return int(self.command.hold_steps)
+
+    @property
+    def quantized(self) -> bool:
+        return self.fsq_half is not None
+
+    def snap(self, z: np.ndarray) -> np.ndarray:
+        """What the tracker consumes for a published z (FSQ bundles only)."""
+        if self.fsq_half is None:
+            raise ValueError("this bundle has no quantizer; snap() is FSQ-only")
+        return snap_fsq(z, self.fsq_half)
+
+    def codes(self, z: np.ndarray) -> np.ndarray:
+        """Integer lattice codes for a z (FSQ bundles only)."""
+        if self.fsq_half is None:
+            raise ValueError("this bundle has no quantizer; codes() is FSQ-only")
+        return fsq_codes(z, self.fsq_half)
 
     @property
     def control_hz(self) -> int:
@@ -495,7 +534,9 @@ __all__ = [
     "LatentPlayground",
     "LatentRollout",
     "ZBank",
+    "fsq_codes",
     "save_grid_video",
     "save_video",
+    "snap_fsq",
     "video_html",
 ]
