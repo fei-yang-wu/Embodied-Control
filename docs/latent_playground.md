@@ -53,11 +53,14 @@ motion catalog is public
 ([GeorgiaTech/g1_bones_seed_sonic_129k_50hz](https://huggingface.co/datasets/GeorgiaTech/g1_bones_seed_sonic_129k_50hz))
 for picking replacement motions by name. The normal path needs nothing by
 hand — the notebooks
-download the kit from the private Hugging Face dataset
+download the kit from the public Hugging Face dataset
 `GeorgiaTech/ec-latent-playkit`, **pinned to an exact revision**
 (`PLAYKIT_REVISION` in each notebook's Inputs cell), and
-`./scripts/setup_latent_lab.sh` pre-fetches it during setup. Reading the
-dataset needs a Hugging Face token that can see the GeorgiaTech org.
+`./scripts/setup_latent_lab.sh` pre-fetches it during setup. No Hugging
+Face account or token is needed; `embodied_control.lowlevel.playkit.
+fetch_playkit` uses `huggingface_hub` when available and falls back to
+plain stdlib HTTPS with per-file sha256 verification against
+`playkit.json`.
 
 To build a kit from local training artifacts instead:
 

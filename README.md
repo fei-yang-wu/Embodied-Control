@@ -153,9 +153,9 @@ perturb `z`, and watch what the frozen tracker does with it in MuJoCo — use
 the notebooks: `notebooks/z256_latent_perturbation.ipynb` (continuous
 256-dim latent) and `notebooks/fsq64_latent_perturbation.ipynb` (quantized
 64-dim FSQ latent). One command sets everything up on Linux or an
-Apple-Silicon mac — pixi, the environment, Hugging Face access, and the
-playkit (bundles + reference tree + MJCF, auto-downloaded at a pinned
-revision of the private `GeorgiaTech/ec-latent-playkit` dataset):
+Apple-Silicon mac — pixi, the environment, and the playkit (bundles +
+reference tree + MJCF, auto-downloaded at a pinned revision of the public
+`GeorgiaTech/ec-latent-playkit` dataset; no Hugging Face account needed):
 
 ```bash
 ./scripts/setup_latent_lab.sh

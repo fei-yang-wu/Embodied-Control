@@ -5,10 +5,10 @@
 #   ./scripts/setup_latent_lab.sh              # set up, then launch Jupyter
 #   ./scripts/setup_latent_lab.sh --no-launch  # set up only
 #
-# It installs pixi if missing, builds the latent-lab environment, checks
-# Hugging Face access (the playkit lives in a private dataset), pre-downloads
-# the playkit at the exact revision the notebooks pin, and starts Jupyter.
-# Every step is idempotent — rerunning is always safe.
+# It installs pixi if missing, builds the latent-lab environment,
+# pre-downloads the playkit at the exact revision the notebooks pin (a
+# public dataset — no Hugging Face account or token needed), and starts
+# Jupyter. Every step is idempotent — rerunning is always safe.
 set -euo pipefail
 
 LAUNCH=1
@@ -45,29 +45,14 @@ echo "==> pixi $(pixi --version)"
 echo "==> installing the latent-lab environment (first run downloads ~1 GB)"
 pixi install --locked -e latent-lab
 
-# --- 4. Hugging Face access -------------------------------------------------
-# The playkit (policy bundles + reference motions + robot model) is a private
-# dataset; reading it needs a token that can see the GeorgiaTech org.
-if ! pixi run -e latent-lab python - <<'PY'
-from huggingface_hub import whoami
-
-try:
-    info = whoami()
-except Exception:
-    raise SystemExit(1)
-print(f"==> Hugging Face: logged in as {info['name']}")
-PY
-then
-  echo ""
-  echo "==> No Hugging Face login found. Paste a token that can read the"
-  echo "    GeorgiaTech org (https://huggingface.co/settings/tokens):"
-  pixi run -e latent-lab python -c "from huggingface_hub import login; login()"
-fi
-
-# --- 5. playkit, at the revision the notebooks pin --------------------------
+# --- 4. playkit, at the revision the notebooks pin --------------------------
+# The playkit dataset is public; fetch_playkit needs no account and falls
+# back to plain HTTPS if huggingface_hub is unavailable.
 pixi run -e latent-lab python - <<'PY'
 import json
 from pathlib import Path
+
+from embodied_control.lowlevel.playkit import fetch_playkit
 
 notebook = json.loads(Path("notebooks/fsq64_latent_perturbation.ipynb").read_text())
 revision = None
@@ -78,20 +63,7 @@ for cell in notebook["cells"]:
 if revision is None:
     raise SystemExit("no PLAYKIT_REVISION found in the notebook")
 
-kit = Path("assets/latent_playkit")
-if (kit / "playkit.json").exists():
-    print(f"==> playkit already at {kit}")
-else:
-    from huggingface_hub import snapshot_download
-
-    print(f"==> downloading the playkit at revision {revision[:12]} (~150 MB)")
-    snapshot_download(
-        "GeorgiaTech/ec-latent-playkit",
-        repo_type="dataset",
-        revision=revision,
-        local_dir=kit,
-    )
-    print(f"==> playkit ready at {kit}")
+fetch_playkit(Path("assets/latent_playkit"), revision, progress=lambda m: print(f"==> {m}"))
 PY
 
 # --- 6. launch --------------------------------------------------------------
