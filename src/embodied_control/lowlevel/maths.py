@@ -60,6 +60,37 @@ def rotate_inverse(quat: np.ndarray, vec: np.ndarray) -> np.ndarray:
     return np.einsum("...ji,...j->...i", mat, np.asarray(vec, dtype=np.float32))
 
 
+def heading_quat(quat: np.ndarray) -> np.ndarray:
+    """Twist about world Z, matching SONIC's ``get_heading_q``.
+
+    Zero the x/y components and renormalize -- the twist of a swing-twist
+    decomposition about Z. LAYOUT: quaternions here are ``(x, y, z, w)``, so
+    the components to zero are indices 0 and 1. SONIC is scalar-first
+    ``(w, x, y, z)``; transcribing its indices literally would yield a roll
+    quaternion that runs and is silently wrong.
+    """
+    quat = np.asarray(quat, dtype=np.float32)
+    out = np.zeros_like(quat)
+    out[..., 2] = quat[..., 2]
+    out[..., 3] = quat[..., 3]
+    norm = np.linalg.norm(out, axis=-1, keepdims=True)
+    return out / np.maximum(norm, 1e-9)
+
+
+def heading_anchor_frame(
+    anchor_pos: np.ndarray, anchor_quat: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Yaw-only anchor frame: heading twist plus an xy-only origin.
+
+    Cancels exactly global yaw and xy translation, so poses expressed in this
+    frame keep absolute height and roll/pitch relative to gravity. Mirrors
+    ``isaaclab_imitation ... mdp._compiled.heading_anchor_frame``.
+    """
+    pos = np.array(anchor_pos, dtype=np.float32, copy=True)
+    pos[..., 2] = 0.0
+    return pos, heading_quat(anchor_quat)
+
+
 def subtract_frame(
     anchor_pos: np.ndarray,
     anchor_quat: np.ndarray,
@@ -74,6 +105,8 @@ def subtract_frame(
 
 
 __all__ = [
+    "heading_anchor_frame",
+    "heading_quat",
     "quat_conjugate",
     "quat_mul",
     "quat_normalize",

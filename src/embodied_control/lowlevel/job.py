@@ -41,6 +41,10 @@ class Gr00tSpec(JobModel):
     # Language chaining: [[start_tick, goal_name], ...] ascending; requests at
     # or after start_tick carry that goal to the service.
     goal_schedule: list[tuple[int, str]] | None = None
+    # One goal per episode, consumed in order. A whole goal grid then runs in
+    # one process against one loaded head, instead of paying service start-up
+    # per goal. Must be at least as long as rollout.episodes.
+    goal_sequence: list[str] | None = None
 
 
 class CommandSpec(JobModel):
@@ -109,6 +113,16 @@ class LowLevelJob(JobModel):
     rollout: RolloutSpec = Field(default_factory=RolloutSpec)
     safety: SafetySpec = Field(default_factory=SafetySpec)
     outputs: OutputSpec = Field(default_factory=OutputSpec)
+
+    @model_validator(mode="after")
+    def validate_goal_sequence(self) -> "LowLevelJob":
+        sequence = self.command.gr00t.goal_sequence if self.command.gr00t else None
+        if sequence is not None and len(sequence) < self.rollout.episodes:
+            raise ValueError(
+                f"command.gr00t.goal_sequence has {len(sequence)} goals for "
+                f"{self.rollout.episodes} episodes"
+            )
+        return self
 
 
 def load_lowlevel_job(path: str | Path) -> LowLevelJob:

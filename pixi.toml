@@ -4,7 +4,9 @@ version = "0.1.0"
 description = "Pixi-managed host orchestrator for isolated VLA policy / simulator evaluation."
 authors = ["Embodied Control Contributors"]
 channels = ["conda-forge"]
-platforms = ["linux-64"]
+# osx-arm64 exists for the latent-lab notebook flow on Apple-Silicon macs
+# (CPU tracker + MuJoCo); the native C++ tier stays linux-only below.
+platforms = ["linux-64", "osx-arm64"]
 
 # Host tooling stays light: the default environment carries only the orchestrator,
 # schemas, CLI, transport client, and the stdlib policy service. Heavyweight
@@ -108,6 +110,9 @@ smoke-lowlevel = "pytest -q tests/lowlevel/test_torch_engine_e2e.py -k end_to_en
 # Pattern follows ~/Documents/SL/rcd with its gaps fixed (environment-provided
 # dependencies, one explicit rebuild command, and no stale isolated-build
 # Python path on import).
+[feature.native]
+platforms = ["linux-64"]
+
 [feature.native.dependencies]
 cmake = ">=3.27"
 ninja = "*"
@@ -128,9 +133,24 @@ ec-native = { path = "native/ec_native", editable = true }
 build-native = "pixi reinstall -e native ec-native && python -c \"import ec_native; print(ec_native.__version__)\""
 test-native = "pytest -q tests/lowlevel/test_native_shm.py tests/lowlevel/test_native_core.py tests/lowlevel/test_metrics_and_telemetry.py tests/lowlevel/test_dds_plant.py"
 
+# --- notebook feature: the latent playground (encode z, perturb it, watch it) ---
+# Jupyter and plotting on top of the lowlevel runtime + MuJoCo backend.
+# Everything runs on CPU: the tracker MLP is ~2M parameters and one 500-step
+# MuJoCo episode takes a couple of seconds.
+[feature.notebook.dependencies]
+jupyterlab = ">=4,<5"
+ipywidgets = ">=8,<9"
+matplotlib = ">=3.8"
+pandas = ">=2,<3"
+huggingface_hub = ">=0.20"
+
+[feature.notebook.tasks]
+latent-lab = "jupyter lab notebooks/"
+
 [environments]
 sim = ["sim"]
 transports = ["transports"]
 lowlevel = ["lowlevel"]
 lowlevel-sim = ["lowlevel", "sim"]
 native = ["lowlevel", "native"]
+latent-lab = ["lowlevel", "sim", "notebook"]

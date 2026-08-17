@@ -146,6 +146,26 @@ lateness and deadline misses are reported separately. FIFO and memory-lock
 options also have separate control and physics forms; use them only on a
 host configured for real-time scheduling.
 
+### Latent playground
+
+To inspect the latent interface itself — encode reference motions into `z`,
+perturb `z`, and watch what the frozen tracker does with it in MuJoCo — use
+the notebooks: `notebooks/z256_latent_perturbation.ipynb` (continuous
+256-dim latent) and `notebooks/fsq64_latent_perturbation.ipynb` (quantized
+64-dim FSQ latent). One command sets everything up on Linux or an
+Apple-Silicon mac — pixi, the environment, and the playkit (bundles +
+reference tree + MJCF, auto-downloaded at a pinned revision of the public
+`GeorgiaTech/ec-latent-playkit` dataset; no Hugging Face account needed):
+
+```bash
+./scripts/setup_latent_lab.sh
+```
+
+Relaunch later with `pixi run -e latent-lab latent-lab`. To build a playkit
+from local training artifacts instead, use `scripts/make_latent_playkit.sh`
+and point `EC_LATENT_PLAYKIT` at the result; see
+[docs/latent_playground.md](docs/latent_playground.md).
+
 The optional Unitree backend uses SDK2 from an explicit source tree:
 
 ```bash

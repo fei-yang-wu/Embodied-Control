@@ -85,6 +85,7 @@ def _build_publisher(job: LowLevelJob, bundle: PolicyBundle, buffer, encoder_eng
             rtc_ramp_rate=spec.rtc_ramp_rate,
             service_cwd=spec.service_cwd,
             goal_schedule=spec.goal_schedule,
+            goal_sequence=spec.goal_sequence,
         )
     if job.command.reference is None:
         raise ValueError("command.topology=local requires command.reference")
@@ -189,6 +190,11 @@ def run_lowlevel_job(job_path: str | Path, *, device: str = "cpu") -> tuple[Path
     )
     for episode_id, arrays in loop.state_logs.items():
         np.savez_compressed(run_dir / f"states_ep{episode_id}.npz", **arrays)
+    episode_goals = getattr(publisher, "episode_goals", None)
+    if episode_goals:
+        # Which goal each episode ran, so a multi-goal process can be scored
+        # per goal without re-deriving it from the episode order downstream.
+        (run_dir / "episode_goals.json").write_text(json.dumps(episode_goals, indent=2))
     head_ms = getattr(publisher, "head_ms", None)
     if head_ms:
         metrics_path = run_dir / "metrics.json"

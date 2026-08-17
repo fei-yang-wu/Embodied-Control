@@ -10,7 +10,12 @@ from embodied_control.lowlevel.bundle import CommandContract
 from embodied_control.lowlevel.command_buffer import CommandBuffer
 from embodied_control.lowlevel.contracts import CommandPacket, RobotState
 from embodied_control.lowlevel.engine.base import Engine
-from embodied_control.lowlevel.maths import rot6d_from_quat, subtract_frame
+from embodied_control.lowlevel.macro_window import (
+    ROBOT_ANCHOR_MODES,
+    fill_precomputed_window,
+    fill_robot_anchored_window,
+    window_indices,
+)
 from embodied_control.lowlevel.reference import ReferenceMotion
 
 
@@ -22,12 +27,14 @@ class OnboardEncoderPublisher:
     - `macro_states` (`[T, state_dim]`): precomputed frames, valid when the
       frames do not depend on the live robot (`expert_heading` bundles, or
       synthetic plumbing runs).
-    - `motion` (`ReferenceMotion`) with `macro_anchor_mode == "robot"`: the
-      window is built at encode time — per frame `[joint qpos 29 |
-      expert anchor pos 3 | expert anchor ori rot6d 6]`, with the expert
-      anchor world pose re-expressed in the LIVE robot anchor frame
-      (`expert_data_plane` rollout context). Needs `state.anchor_pos_w` /
-      `anchor_quat_w` from the backend.
+    - `motion` (`ReferenceMotion`) with `macro_anchor_mode == "robot"` or
+      `"robot_heading"`: the window is built at encode time — per frame
+      `[joint qpos 29 | expert anchor pos 3 | expert anchor ori rot6d 6]`,
+      with the expert anchor world pose re-expressed in the LIVE robot anchor
+      frame (`expert_data_plane` rollout context) for `"robot"`, or in that
+      anchor's heading-and-xy frame for `"robot_heading"` (SONIC v1.1, which
+      keeps the reference's height and gravity-relative tilt). Needs
+      `state.anchor_pos_w` / `anchor_quat_w` from the backend.
 
     At renewal the window takes frames `cursor + stride*k` for
     `k in 0..window_steps`, the first as `state` and the rest flattened
@@ -74,11 +81,12 @@ class OnboardEncoderPublisher:
             self.length = states.shape[0]
         else:
             assert motion is not None
-            if command.macro_anchor_mode != "robot":
+            if command.macro_anchor_mode not in ROBOT_ANCHOR_MODES:
                 raise ValueError(
-                    "motion-driven windows are implemented for macro_anchor_mode="
-                    f"'robot'; bundle says {command.macro_anchor_mode!r}. Use "
-                    "precomputed macro_states for other modes."
+                    "motion-driven windows are implemented for macro_anchor_mode"
+                    f" in {ROBOT_ANCHOR_MODES}; bundle says "
+                    f"{command.macro_anchor_mode!r}. Use precomputed "
+                    "macro_states for other modes."
                 )
             if command.state_dim != motion.joint_qpos.shape[1] + 9:
                 raise ValueError(
@@ -103,14 +111,13 @@ class OnboardEncoderPublisher:
         return self.cursor >= self.length - 1
 
     def _window_indices(self, cursor: int) -> list[int]:
-        last = self.length - 1
-        return [min(cursor + self.stride * k, last) for k in range(self.window_steps + 1)]
+        return window_indices(cursor, self.length, self.window_steps, self.stride)
 
     def _fill_precomputed(self, cursor: int) -> None:
         assert self.states is not None
-        width = self.states.shape[1]
-        for slot, index in enumerate(self._window_indices(cursor)):
-            self._encoder_in[slot * width : (slot + 1) * width] = self.states[index]
+        fill_precomputed_window(
+            self.states, self._window_indices(cursor), self._encoder_in
+        )
 
     def _fill_robot_anchored(self, cursor: int, state: RobotState) -> None:
         assert self.motion is not None
@@ -119,19 +126,15 @@ class OnboardEncoderPublisher:
                 "robot-anchored encoding needs state.anchor_pos_w/anchor_quat_w; "
                 "the backend does not provide an anchor pose"
             )
-        width = int(self.command.state_dim)
-        joints = self.motion.joint_qpos
-        for slot, index in enumerate(self._window_indices(cursor)):
-            rel_pos, rel_quat = subtract_frame(
-                state.anchor_pos_w,
-                state.anchor_quat_w,
-                self.motion.anchor_pos_w[index],
-                self.motion.anchor_quat_w[index],
-            )
-            base = slot * width
-            self._encoder_in[base : base + 29] = joints[index]
-            self._encoder_in[base + 29 : base + 32] = rel_pos
-            self._encoder_in[base + 32 : base + 38] = rot6d_from_quat(rel_quat)
+        fill_robot_anchored_window(
+            self.motion,
+            self._window_indices(cursor),
+            state.anchor_pos_w,
+            state.anchor_quat_w,
+            int(self.command.state_dim),
+            self._encoder_in,
+            anchor_mode=str(self.command.macro_anchor_mode or "robot"),
+        )
 
     def tick(self, tick: int, stamp: float, state: RobotState | None = None) -> None:
         if self._z is None or self._steps_remaining <= 0:

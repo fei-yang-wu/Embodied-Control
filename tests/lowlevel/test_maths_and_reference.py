@@ -171,6 +171,58 @@ def test_robot_anchored_window(tmp_path):
     np.testing.assert_allclose(window[3, :29], joint_qpos[3], atol=1e-6)
 
 
+def test_robot_heading_window_keeps_height_and_tilt(tmp_path):
+    """SONIC v1.1: cancel the robot's heading and xy only, never its tilt.
+
+    A robot that is rolled and standing low must not fold its own attitude
+    into the encoder input -- that is the whole difference between the
+    `robot` and `robot_heading` frames.
+    """
+    joints = 29
+    frames = 12
+    joint_qpos = np.zeros((frames, joints), np.float32)
+    anchor_pos = np.tile(np.array([1.0, 0.0, 0.9], np.float32), (frames, 1))
+    anchor_quat = np.tile(IDENTITY_XYZW, (frames, 1))
+    motion = ReferenceMotion("m", joint_qpos, anchor_pos, anchor_quat)
+    # Robot at the origin, yawed +90 degrees AND rolled +90 degrees, low.
+    roll90 = np.array([np.sqrt(0.5), 0.0, 0.0, np.sqrt(0.5)], np.float32)
+    tilted = quat_mul(YAW90_XYZW, roll90)
+    state = _robot_state([0.0, 0.0, 0.5], tilted)
+
+    def window_for(mode):
+        command = CommandContract(
+            z_dim=6, phase_mode="none", phase_dim=0, hold_steps=3,
+            state_dim=38, window_steps=9, horizon_steps=10,
+            encoder_window_mode="intermediate", macro_frame_stride=1,
+            macro_anchor_mode=mode,
+        )
+        encoder = SpyEncoder()
+        publisher = OnboardEncoderPublisher(
+            InProcessCommandBuffer(), encoder, command, motion=motion
+        )
+        publisher.tick(0, 0.0, state)
+        return encoder.inputs[0].reshape(10, 38)
+
+    heading = window_for("robot_heading")
+    full_pose = window_for("robot")
+
+    # Heading frame: origin is the robot's xy at z=0, so the expert's world
+    # height passes through, and the +90 yaw maps world +X onto -Y.
+    np.testing.assert_allclose(heading[0, 29:32], [0.0, -1.0, 0.9], atol=1e-6)
+    # The reference keeps its upright orientation relative to gravity: the
+    # rot6d of a pure -90 yaw, with no roll mixed in.
+    yaw_minus90 = quat_to_mat(
+        np.array([0, 0, -np.sqrt(0.5), np.sqrt(0.5)], np.float32)
+    )
+    expected_6d = [
+        yaw_minus90[0, 0], yaw_minus90[0, 1], yaw_minus90[1, 0],
+        yaw_minus90[1, 1], yaw_minus90[2, 0], yaw_minus90[2, 1],
+    ]
+    np.testing.assert_allclose(heading[0, 32:38], expected_6d, atol=1e-6)
+    # The full-pose frame cancels the roll too, so the two disagree.
+    assert not np.allclose(heading[0, 29:38], full_pose[0, 29:38], atol=1e-3)
+
+
 def test_robot_anchored_requires_state(tmp_path):
     motion = ReferenceMotion(
         "m",

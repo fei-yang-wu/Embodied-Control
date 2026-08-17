@@ -184,3 +184,47 @@ def test_min_base_height_damps():
     else:
         raise AssertionError("expected base_too_low fault")
     monitor.check_state(_state(), now=0.0)  # no anchor -> no check
+
+
+def test_goal_sequence_advances_one_goal_per_episode():
+    publisher = _publisher("latent", z_dim=6, horizon=3, width=6, slots=3,
+                           goal_sequence=["walk", "greet", "stoop"])
+    try:
+        goals = []
+        for _ in range(3):
+            publisher.reset()
+            goals.append(publisher.current_goal)
+        assert goals == ["walk", "greet", "stoop"]
+        assert publisher.episode_goals == ["walk", "greet", "stoop"]
+        # A fourth episode has no goal: fail loudly rather than reuse the last.
+        try:
+            publisher.reset()
+        except IndexError as error:
+            assert "no goal" in str(error)
+        else:
+            raise AssertionError("running past the goal sequence must fail")
+    finally:
+        publisher.close()
+
+
+def test_goal_sequence_is_sent_with_each_request():
+    publisher = _publisher("latent", z_dim=6, horizon=3, width=6, slots=3,
+                           goal_sequence=["walk", "greet"])
+    try:
+        publisher.reset()
+        assert publisher._goal_at(0) == "walk"
+        publisher.reset()
+        assert publisher._goal_at(0) == "greet"
+    finally:
+        publisher.close()
+
+
+def test_goal_schedule_overrides_the_episode_goal_for_chaining():
+    publisher = _publisher("latent", z_dim=6, horizon=3, width=6, slots=3,
+                           goal_sequence=["walk"], goal_schedule=[(10, "greet")])
+    try:
+        publisher.reset()
+        assert publisher._goal_at(0) == "walk"
+        assert publisher._goal_at(10) == "greet"
+    finally:
+        publisher.close()

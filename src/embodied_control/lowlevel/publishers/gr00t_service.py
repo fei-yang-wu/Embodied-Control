@@ -70,6 +70,7 @@ class Gr00tServicePublisher:
         ready_timeout_s: float = 600.0,
         max_publications: int | None = None,
         goal_schedule: list[tuple[int, str]] | None = None,
+        goal_sequence: list[str] | None = None,
     ):
         if mode not in {"latent", "chunk"}:
             raise ValueError(f"mode must be latent|chunk, got {mode!r}")
@@ -91,6 +92,13 @@ class Gr00tServicePublisher:
         # Ascending [(start_tick, goal_name)]; requests at or after start_tick
         # carry that goal. Empty/None = the service's startup goal throughout.
         self.goal_schedule = sorted(goal_schedule or [], key=lambda item: item[0])
+        # One goal per episode, consumed in order. Lets a single process (and a
+        # single loaded head) cover a whole goal grid instead of paying service
+        # start-up per goal.
+        self.goal_sequence = list(goal_sequence or [])
+        self._episode_index = -1
+        self._episode_goal: str | None = None
+        self.episode_goals: list[str] = []
         self._default_joint_pos = np.asarray(default_joint_pos, dtype=np.float32)
         self.head_ms: list[float] = []
 
@@ -124,7 +132,7 @@ class Gr00tServicePublisher:
                     f"chunk horizon {self.horizon} < encoder window {window + 1}"
                 )
         self._sequence = 0
-        self.reset()
+        self._reset_state()
 
     # -- service I/O ----------------------------------------------------
     def _read_json(self, timeout_s: float) -> dict:
@@ -141,7 +149,10 @@ class Gr00tServicePublisher:
         raise TimeoutError("gr00t service produced no JSON before the timeout")
 
     def _goal_at(self, tick: int) -> str | None:
-        goal = None
+        # A per-episode goal (goal_sequence) names the whole episode; a
+        # goal_schedule switches goals mid-episode for chaining. The schedule
+        # wins once its first tick is reached.
+        goal = self._episode_goal
         for start_tick, name in self.goal_schedule:
             if tick >= start_tick:
                 goal = name
@@ -203,7 +214,8 @@ class Gr00tServicePublisher:
             self._history[-1] = frame
 
     # -- publisher protocol ----------------------------------------------
-    def reset(self) -> None:
+    def _reset_state(self) -> None:
+        """Per-episode buffers only; does NOT advance the goal sequence."""
         self._history = np.zeros((STATE_FRAMES, STATE_WIDTH), dtype=np.float32)
         self._history_filled = False
         self._prev_prediction: np.ndarray | None = None
@@ -211,6 +223,25 @@ class Gr00tServicePublisher:
         self._slot_queue: list[np.ndarray] = []
         self._steps_into_hold = 0
         self._publications = 0
+
+    def reset(self) -> None:
+        # The control loop calls this once per episode, including episode 0,
+        # so the goal advance lives here and NOT in the constructor -- which
+        # also calls a reset and would otherwise consume the first goal.
+        self._reset_state()
+        self._episode_index += 1
+        if self.goal_sequence:
+            if self._episode_index >= len(self.goal_sequence):
+                raise IndexError(
+                    f"episode {self._episode_index} has no goal: goal_sequence "
+                    f"holds {len(self.goal_sequence)} entries"
+                )
+            self._episode_goal = self.goal_sequence[self._episode_index]
+            self.episode_goals.append(self._episode_goal)
+
+    @property
+    def current_goal(self) -> str | None:
+        return self._episode_goal
 
     @property
     def exhausted(self) -> bool:

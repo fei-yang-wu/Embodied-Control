@@ -198,6 +198,32 @@ class MujocoBackend:
         self._tick = 0
         self.frames = []
 
+    def set_pose(self, root_pose_xyzw: np.ndarray, joint_pos: np.ndarray) -> None:
+        """Place the robot on `[pos 3 | quat XYZW 4]` plus Isaac-ordered joints.
+
+        Velocities are zeroed and the position targets are seeded with the same
+        pose, so the first control tick does not fight a stale target. Used to
+        start an episode on a reference frame instead of the default stance.
+        """
+        mujoco = self._mujoco
+        root_pose_xyzw = np.asarray(root_pose_xyzw, dtype=np.float64)
+        joint_pos = np.asarray(joint_pos, dtype=np.float64)
+        if root_pose_xyzw.shape != (7,):
+            raise ValueError(f"root pose must have shape (7,), got {root_pose_xyzw.shape}")
+        if joint_pos.shape != (self._action.width,):
+            raise ValueError(
+                f"joint_pos must have shape ({self._action.width},), got {joint_pos.shape}"
+            )
+        self.data.qpos[0:3] = root_pose_xyzw[0:3]
+        x, y, z, w = root_pose_xyzw[3:7]
+        self.data.qpos[3:7] = [w, x, y, z]
+        for actuator_id in range(self.model.nu):
+            isaac_index = self._actuator_to_isaac[actuator_id]
+            self.data.qpos[self._qposadr[actuator_id]] = joint_pos[isaac_index]
+            self.data.ctrl[actuator_id] = joint_pos[isaac_index]
+        self.data.qvel[:] = 0.0
+        mujoco.mj_forward(self.model, self.data)
+
     @property
     def now(self) -> float:
         return float(self.data.time)
