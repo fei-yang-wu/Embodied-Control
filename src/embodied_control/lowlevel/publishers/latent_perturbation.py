@@ -29,6 +29,7 @@ from embodied_control.lowlevel.command_buffer import CommandBuffer
 from embodied_control.lowlevel.contracts import CommandPacket, RobotState
 from embodied_control.lowlevel.engine.base import Engine
 from embodied_control.lowlevel.macro_window import (
+    ROBOT_ANCHOR_MODES,
     fill_precomputed_window,
     fill_robot_anchored_window,
     window_indices,
@@ -52,8 +53,9 @@ class LatentSource(Protocol):
 class ReferenceEncoderSource:
     """Encode the reference macro window at the live cursor — the oracle z.
 
-    Pass either `motion` (robot-anchored windows, `macro_anchor_mode="robot"`)
-    or `macro_states` (`[T, state_dim]` precomputed frames).
+    Pass either `motion` (robot-anchored windows, `macro_anchor_mode="robot"`
+    or `"robot_heading"`) or `macro_states` (`[T, state_dim]` precomputed
+    frames).
     """
 
     def __init__(
@@ -88,14 +90,15 @@ class ReferenceEncoderSource:
             self.length = int(states.shape[0])
         else:
             assert motion is not None
-            if command.macro_anchor_mode != "robot":
+            if command.macro_anchor_mode not in ROBOT_ANCHOR_MODES:
                 raise ValueError(
                     "motion-driven windows are implemented for "
-                    f"macro_anchor_mode='robot'; bundle says "
+                    f"macro_anchor_mode in {ROBOT_ANCHOR_MODES}; bundle says "
                     f"{command.macro_anchor_mode!r}"
                 )
             self.states = None
             self.length = motion.length
+        self.anchor_mode = str(command.macro_anchor_mode or "robot")
         self._encoder_in = np.empty(
             self.state_dim * (self.window_steps + 1), dtype=np.float32
         )
@@ -124,6 +127,7 @@ class ReferenceEncoderSource:
             state.anchor_quat_w,
             self.state_dim,
             self._encoder_in,
+            anchor_mode=self.anchor_mode,
         )
 
     def z(self, renewal_index: int, state: RobotState | None) -> np.ndarray:

@@ -17,8 +17,14 @@ from __future__ import annotations
 
 import numpy as np
 
-from embodied_control.lowlevel.maths import rot6d_from_quat, subtract_frame
+from embodied_control.lowlevel.maths import (
+    heading_anchor_frame,
+    rot6d_from_quat,
+    subtract_frame,
+)
 from embodied_control.lowlevel.reference import ReferenceMotion
+
+ROBOT_ANCHOR_MODES = ("robot", "robot_heading")
 
 
 def window_indices(
@@ -46,13 +52,26 @@ def fill_robot_anchored_window(
     anchor_quat_w: np.ndarray,
     state_dim: int,
     out: np.ndarray,
+    anchor_mode: str = "robot",
 ) -> np.ndarray:
     """Write a robot-anchored window into `out`, slot-major.
 
     `anchor_pos_w` / `anchor_quat_w` (XYZW) are the frame the expert anchor is
     re-expressed in — the live robot anchor on a rollout, or the reference's
     own anchor when encoding offline under a perfect-tracking assumption.
+
+    `anchor_mode="robot"` cancels the live anchor's full pose.
+    `anchor_mode="robot_heading"` (SONIC v1.1) cancels only its heading twist
+    and xy origin, so the reference keeps its height and its tilt relative to
+    gravity in the encoder input. The two produce different windows from the
+    same robot state, so the bundle's mode must drive this argument.
     """
+    if anchor_mode not in ROBOT_ANCHOR_MODES:
+        raise ValueError(
+            f"anchor_mode must be one of {ROBOT_ANCHOR_MODES}, got {anchor_mode!r}"
+        )
+    if anchor_mode == "robot_heading":
+        anchor_pos_w, anchor_quat_w = heading_anchor_frame(anchor_pos_w, anchor_quat_w)
     joints = motion.joint_qpos
     joint_count = int(joints.shape[1])
     if state_dim != joint_count + 9:
@@ -74,6 +93,7 @@ def fill_robot_anchored_window(
 
 
 __all__ = [
+    "ROBOT_ANCHOR_MODES",
     "fill_precomputed_window",
     "fill_robot_anchored_window",
     "window_indices",

@@ -11,6 +11,7 @@ from embodied_control.lowlevel.command_buffer import CommandBuffer
 from embodied_control.lowlevel.contracts import CommandPacket, RobotState
 from embodied_control.lowlevel.engine.base import Engine
 from embodied_control.lowlevel.macro_window import (
+    ROBOT_ANCHOR_MODES,
     fill_precomputed_window,
     fill_robot_anchored_window,
     window_indices,
@@ -26,12 +27,14 @@ class OnboardEncoderPublisher:
     - `macro_states` (`[T, state_dim]`): precomputed frames, valid when the
       frames do not depend on the live robot (`expert_heading` bundles, or
       synthetic plumbing runs).
-    - `motion` (`ReferenceMotion`) with `macro_anchor_mode == "robot"`: the
-      window is built at encode time — per frame `[joint qpos 29 |
-      expert anchor pos 3 | expert anchor ori rot6d 6]`, with the expert
-      anchor world pose re-expressed in the LIVE robot anchor frame
-      (`expert_data_plane` rollout context). Needs `state.anchor_pos_w` /
-      `anchor_quat_w` from the backend.
+    - `motion` (`ReferenceMotion`) with `macro_anchor_mode == "robot"` or
+      `"robot_heading"`: the window is built at encode time — per frame
+      `[joint qpos 29 | expert anchor pos 3 | expert anchor ori rot6d 6]`,
+      with the expert anchor world pose re-expressed in the LIVE robot anchor
+      frame (`expert_data_plane` rollout context) for `"robot"`, or in that
+      anchor's heading-and-xy frame for `"robot_heading"` (SONIC v1.1, which
+      keeps the reference's height and gravity-relative tilt). Needs
+      `state.anchor_pos_w` / `anchor_quat_w` from the backend.
 
     At renewal the window takes frames `cursor + stride*k` for
     `k in 0..window_steps`, the first as `state` and the rest flattened
@@ -78,11 +81,12 @@ class OnboardEncoderPublisher:
             self.length = states.shape[0]
         else:
             assert motion is not None
-            if command.macro_anchor_mode != "robot":
+            if command.macro_anchor_mode not in ROBOT_ANCHOR_MODES:
                 raise ValueError(
-                    "motion-driven windows are implemented for macro_anchor_mode="
-                    f"'robot'; bundle says {command.macro_anchor_mode!r}. Use "
-                    "precomputed macro_states for other modes."
+                    "motion-driven windows are implemented for macro_anchor_mode"
+                    f" in {ROBOT_ANCHOR_MODES}; bundle says "
+                    f"{command.macro_anchor_mode!r}. Use precomputed "
+                    "macro_states for other modes."
                 )
             if command.state_dim != motion.joint_qpos.shape[1] + 9:
                 raise ValueError(
@@ -129,6 +133,7 @@ class OnboardEncoderPublisher:
             state.anchor_quat_w,
             int(self.command.state_dim),
             self._encoder_in,
+            anchor_mode=str(self.command.macro_anchor_mode or "robot"),
         )
 
     def tick(self, tick: int, stamp: float, state: RobotState | None = None) -> None:
