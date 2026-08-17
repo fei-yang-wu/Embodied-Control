@@ -4,7 +4,7 @@ Status: describes what actually exists in the repo today, as opposed to
 `docs/design/eval_orchestration_interface.md`, which is the original
 planning document (aspirational, written before any of this was built — read
 that for *why* the shape was chosen; read this for *what's actually there*).
-Last updated: 2026-07-14.
+Last updated: 2026-08-17.
 
 For exact run commands see `README.md`. This document is the mental model:
 what the pieces are, why they're separated the way they are, and where the
@@ -23,10 +23,11 @@ other's packages installed.
 There are two ways the simulator side can be structured:
 
 - **stepped** — the host orchestrator (`orchestration/runner.py`) directly
-  calls `reset()`/`step()` on an in-process simulator object
-  (`sim/mujoco_backend.py`). Used for MuJoCo: it's lightweight enough that
-  importing it into the host process is fine, and driving it step-by-step
-  from the host is simpler than delegating.
+  calls `reset()`/`step()` on an in-process simulator object. Used for the
+  small reacher (`sim/mujoco_backend.py`) and the Vega U + Wuji Hand V2 Beta
+  1-with-mount table grasp (`sim/wuji_vega/backend.py`): MuJoCo is lightweight
+  enough to import into the host process, while each policy still runs as a
+  separate service.
 - **delegated** — a *separate* runtime (local subprocess or its own Docker
   container) owns the *entire* rollout loop and calls the policy service
   itself; the host only launches that runtime, waits for it to exit, and

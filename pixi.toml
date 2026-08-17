@@ -61,6 +61,7 @@ smoke-random = "ec eval run examples/mujoco_random_local.yaml"
 smoke-docker = "ec eval run examples/mujoco_zero.yaml"
 smoke-video = "ec eval run examples/mujoco_random_video.yaml"
 smoke-video-docker = "ec eval run examples/mujoco_video_docker.yaml"
+smoke-wuji-vega = "ec eval run examples/wuji_vega_grasp_oracle_local.yaml"
 test-sim = "pytest -q"
 
 # --- transports feature: real-policy client adapters (OpenPI, GR00T) ---

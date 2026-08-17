@@ -20,11 +20,36 @@ EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
     "mujoco_random_local.yaml",
     "mujoco_zero.yaml",
     "mujoco_random_video.yaml",
+    "wuji_vega_grasp_oracle_local.yaml",
 ])
 def test_example_jobs_load_and_validate(name):
     job = load_job(EXAMPLES / name)
     assert isinstance(job, EvalJob)
-    assert job.sim.backend == "mujoco"
+    assert job.sim.mode == "stepped"
+
+
+def test_wuji_vega_config_requires_scene_and_explicit_oracle_runtime():
+    from pydantic import ValidationError
+
+    from embodied_control.config.schemas import PolicyBinding, SimSpec
+
+    with pytest.raises(ValidationError, match="requires sim.model_path"):
+        SimSpec(backend="wuji_vega_grasp")
+    with pytest.raises(ValidationError, match="requires sim.mode='stepped'"):
+        SimSpec(
+            backend="wuji_vega_grasp",
+            mode="delegated",
+            model_path="scene.xml",
+            action_dim=59,
+        )
+    with pytest.raises(ValidationError, match="requires policy.runtime.command"):
+        PolicyBinding(type="wuji_grasp_oracle")
+    with pytest.raises(ValidationError, match="frame_skip must be >= 1"):
+        SimSpec(
+            backend="wuji_vega_grasp",
+            model_path="scene.xml",
+            backend_config={"frame_skip": 0},
+        )
 
 
 def test_video_example_enables_recording_and_debug_logging():

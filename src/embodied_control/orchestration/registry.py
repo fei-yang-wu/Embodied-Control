@@ -56,6 +56,19 @@ def _register_builtins() -> None:
             model=job.sim.model, model_path=job.sim.model_path, **kwargs
         )
 
+    def _wuji_vega_grasp(job):
+        from embodied_control.sim.wuji_vega import WujiVegaGraspBackend
+
+        cfg = job.sim.backend_config or {}
+        return WujiVegaGraspBackend(
+            model_path=job.sim.model_path,
+            frame_skip=int(cfg.get("frame_skip", 10)),
+            cube_xy_noise=float(cfg.get("cube_xy_noise", 0.0)),
+            lift_threshold=float(cfg.get("lift_threshold", 0.04)),
+            success_hold_s=float(cfg.get("success_hold_s", 0.5)),
+            camera_name=str(cfg.get("camera_name", "front_camera")),
+        )
+
     def _passthrough(job, ctrlrange, logger=None):
         from embodied_control.embodiments.passthrough import PassthroughController
 
@@ -68,6 +81,7 @@ def _register_builtins() -> None:
         )
 
     register_sim_backend("mujoco", _mujoco)
+    register_sim_backend("wuji_vega_grasp", _wuji_vega_grasp)
     register_embodiment("passthrough", _passthrough)
 
 

@@ -206,6 +206,34 @@ pixi run -e sim smoke-video-docker   # docker policy + video (orthogonal: render
                                       # always happens on the host, MuJoCo is in-process)
 ```
 
+**Vega U + Wuji Hand V2 Beta 1-with-mount table-cube grasp:**
+
+```bash
+# Build the portable sibling scene once; see simulations/wuji_vega_u_grasp/README.md.
+cd /mnt/hsstorage/fwu91/Projects/DexManip
+./.venv-mujoco/bin/python simulations/wuji_vega_u_grasp/build_scene.py
+
+cd embodied_control
+pixi run -e sim smoke-wuji-vega
+```
+
+This is a stepped 50 Hz task backed by the portable task-only
+`scene_table_cube.xml`, which includes the separate canonical robot model
+`vega_u_wuji_v2_beta1_with_mount.xml`. The robot XML carries machine-readable
+`Wuji Hand V2 Beta 1 with mount` provenance. Scene lighting, skybox, table,
+floor, and cube remain outside the robot model. Its 59-dimensional normalized
+action maps to Vega support/arm and Wuji finger position actuators. The reset observation
+contains actuator-ordered joint position/velocity, cube position, and both
+palm positions. Success requires more than 40 mm of sustained cube lift for
+0.5 seconds after right-hand contact.
+
+The example oracle is intentionally a separate HTTP policy process. It plans
+from the cube pose in the wire observation using clearance waypoints,
+damped-least-squares IK, quintic interpolation, and a timed finger closure.
+It is a deterministic physics/contract ceiling, not a learned-policy result.
+Per-episode lift, contact, and palm-distance metrics use the same
+`episodes.jsonl` and aggregate artifact contract as every other EC backend.
+
 **Delegated mode — a separate runtime owns its own rollout loop** (no MuJoCo
 needed; runs in the light default env):
 
@@ -460,8 +488,10 @@ src/embodied_control/
   logging/          config.py (LogConfig), logger.py (EcLogger: human log + events.jsonl)
   transport/        protocol.py (incl. encode_camera/decode_image_bytes/mean_brightness),
                     server.py (stdlib, in container), client.py, factory.py (scheme seam)
-  policies/         base.py (zero/random/image_stats) + debug_server.py (policy container entry point)
+  policies/         base.py (zero/random/image_stats), debug_server.py, and wuji_vega/
+                    (kinematics, grasp oracle, policy server)
   sim/              base.py, models.py (reacher MJCF, topdown camera), mujoco_backend.py (stepped + render),
+                    wuji_vega/ (task constants and stepped backend),
                     fake_delegated_eval.py, libero_eval.py (delegated sim container entry points)
   embodiments/      passthrough.py (normalized cmd -> ctrl; stepped only)
   runtime/          local.py, docker.py (generic: command/mounts/network), ports.py
@@ -476,6 +506,7 @@ examples/           mujoco_zero_local.yaml, mujoco_random_local.yaml, mujoco_zer
                     libero_docker.yaml, libero_video_docker.yaml, libero_image_stats_docker.yaml
                     (real LIBERO task, two containers)
 scripts/            build_*_image.sh, push_image.sh (-> ghcr.io)
+tests/wuji_vega/    portable model, physics/oracle, and eval-contract tests
 ```
 
 ## Tests

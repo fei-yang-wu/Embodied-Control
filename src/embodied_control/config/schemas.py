@@ -75,7 +75,9 @@ class EndpointSpec(BaseModel):
 
 
 class SimSpec(BaseModel):
-    backend: Literal["mujoco", "fake_delegated", "libero"] = "mujoco"
+    backend: Literal[
+        "mujoco", "wuji_vega_grasp", "fake_delegated", "libero"
+    ] = "mujoco"
     # stepped: host drives reset/step in-process (MuJoCo is flexible enough for this).
     # delegated: a separate runtime (local subprocess or Docker container) owns and
     # runs its own rollout loop end-to-end, calling the policy service directly; the
@@ -95,15 +97,42 @@ class SimSpec(BaseModel):
     def _delegated_requires_action_dim(self) -> "SimSpec":
         if self.mode == "delegated" and self.action_dim is None:
             raise ValueError("sim.action_dim is required when sim.mode='delegated'")
+        if self.backend == "wuji_vega_grasp":
+            if self.mode != "stepped":
+                raise ValueError("sim.backend='wuji_vega_grasp' requires sim.mode='stepped'")
+            if self.model_path is None:
+                raise ValueError("sim.backend='wuji_vega_grasp' requires sim.model_path")
+            cfg = self.backend_config
+            if int(cfg.get("frame_skip", 10)) < 1:
+                raise ValueError("sim.backend_config.frame_skip must be >= 1")
+            if float(cfg.get("cube_xy_noise", 0.0)) < 0:
+                raise ValueError("sim.backend_config.cube_xy_noise must be >= 0")
+            if float(cfg.get("lift_threshold", 0.04)) <= 0:
+                raise ValueError("sim.backend_config.lift_threshold must be > 0")
+            if float(cfg.get("success_hold_s", 0.5)) <= 0:
+                raise ValueError("sim.backend_config.success_hold_s must be > 0")
         return self
 
 
 class PolicyBinding(BaseModel):
-    type: Literal["zero", "random", "image_stats"] = "zero"  # which blank policy the service runs
+    type: Literal["zero", "random", "image_stats", "wuji_grasp_oracle"] = "zero"
     runtime: RuntimeSpec = Field(default_factory=RuntimeSpec)  # launched by the host
     endpoint: EndpointSpec | None = None  # OR: connect to an external service (no launch)
     requested_action_horizon: int = 1
     action_chunk_mode: Literal["sync"] = "sync"
+
+    @model_validator(mode="after")
+    def _oracle_requires_explicit_runtime(self) -> "PolicyBinding":
+        if (
+            self.type == "wuji_grasp_oracle"
+            and self.endpoint is None
+            and self.runtime.command is None
+        ):
+            raise ValueError(
+                "policy.type='wuji_grasp_oracle' requires policy.runtime.command "
+                "or policy.endpoint"
+            )
+        return self
 
 
 class EmbodimentBinding(BaseModel):

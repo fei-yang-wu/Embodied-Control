@@ -147,7 +147,7 @@ class MujocoStepBackend:
             observation=self._observation(),
             reward=float(reward),
             done=done,
-            info={"distance": dist},
+            info={"distance": dist, "failed": done},
         )
 
     def episode_summary(self) -> dict:
@@ -156,12 +156,18 @@ class MujocoStepBackend:
         # for a non-holding baseline (a random policy explores but won't park on
         # the target), and cleanly separates random from the zero baseline.
         success = bool(self._min_dist < self.success_threshold)
+        metrics = {
+            "success": float(success),
+            "final_distance": float(self._last_dist),
+            "min_distance": float(self._min_dist),
+        }
         return {
             "success": success,
             "final_distance": float(self._last_dist),
             "min_distance": float(self._min_dist),
             "steps": int(self._steps),
             "success_threshold": self.success_threshold,
+            "metrics": metrics,
         }
 
     def render_frame(self, width: int = 320, height: int = 240):

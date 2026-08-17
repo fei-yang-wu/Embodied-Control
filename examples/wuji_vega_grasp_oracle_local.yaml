@@ -1,0 +1,58 @@
+api_version: ec.eval/v1alpha1
+name: wuji_vega_grasp_oracle_local
+seed: 0
+tags:
+  simulator: mujoco
+  robot: vega_u_wuji_v2_beta1_with_mount
+  task: table_cube_pick
+  policy_family: scripted_ik_oracle
+
+sim:
+  backend: wuji_vega_grasp
+  mode: stepped
+  model_path: ../simulations/wuji_vega_u_grasp/build/scene_table_cube.xml
+  backend_config:
+    frame_skip: 10
+    cube_xy_noise: 0.0
+    lift_threshold: 0.04
+    success_hold_s: 0.5
+    camera_name: front_camera
+
+policy:
+  type: wuji_grasp_oracle
+  runtime:
+    type: local
+    command:
+      - python
+      - -m
+      - embodied_control.policies.wuji_vega.server
+      - --model
+      - ../simulations/wuji_vega_u_grasp/build/scene_table_cube.xml
+      - --control-dt
+      - "0.02"
+      - --action-schema-id
+      - ec.action.wuji_vega_joint_position_normalized/v1
+      - --host
+      - "{host}"
+      - --port
+      - "{port}"
+  requested_action_horizon: 10
+  action_chunk_mode: sync
+
+embodiment:
+  adapter: passthrough
+  observation_schema_id: ec.obs.wuji_vega_grasp_proprio/v1
+  action_schema_id: ec.action.wuji_vega_joint_position_normalized/v1
+  clip_actions: true
+  fallback_action: zero
+
+rollout:
+  num_episodes: 1
+  max_steps_per_episode: 650
+  record_raw: true
+  record_video: false
+  video_fps: 50
+
+outputs:
+  root_dir: ./runs
+  run_name_template: "{date}_{name}_{seed}"

@@ -225,6 +225,8 @@ def _run_episode(job, plan, backend, controller, client, logger, episode_id, see
                 ctrl = controller.fallback()
                 result = backend.step(ctrl)
                 obs, done = result.observation, result.done
+                if done:
+                    failed = _step_failed(result)
                 total_return += result.reward
                 fallback_steps += 1
                 steps += 1
@@ -241,8 +243,8 @@ def _run_episode(job, plan, backend, controller, client, logger, episode_id, see
         obs, done = result.observation, result.done
         total_return += result.reward
         steps += 1
-        if done:  # non-finite state => blow-up
-            failed = True
+        if done:
+            failed = _step_failed(result)
         if record_video:
             record_video = _try_capture_frame(backend, frames, logger)
 
@@ -263,8 +265,15 @@ def _run_episode(job, plan, backend, controller, client, logger, episode_id, see
         except Exception as exc:  # noqa: BLE001 - encoding failure must not fail the episode
             logger.warning("render.video.write_failed", episode_id=episode_id, error=str(exc))
 
-    logger.event("sim.episode.completed", phase="rollout", episode_id=episode_id,
-                 success=summary["success"], steps=steps, final_distance=summary["final_distance"])
+    episode_metrics = _episode_metrics(summary)
+    logger.event(
+        "sim.episode.completed",
+        phase="rollout",
+        episode_id=episode_id,
+        task_id=backend.task_id(),
+        success=summary["success"],
+        steps=steps,
+    )
 
     return EpisodeRecord(
         run_id=plan.run_id,
@@ -276,11 +285,7 @@ def _run_episode(job, plan, backend, controller, client, logger, episode_id, see
         success=bool(summary["success"]) and not failed,
         episode_length_steps=steps,
         total_return=round(total_return, 6),
-        metrics={
-            "success": float(summary["success"]),
-            "final_distance": summary["final_distance"],
-            "min_distance": summary["min_distance"],
-        },
+        metrics=episode_metrics,
         policy=EpisodePolicyStats(
             num_requests=scheduler.num_requests,
             mean_action_horizon=scheduler.mean_action_horizon,
@@ -289,6 +294,23 @@ def _run_episode(job, plan, backend, controller, client, logger, episode_id, see
         ),
         artifacts=artifacts,
     )
+
+
+def _episode_metrics(summary: dict) -> dict[str, float]:
+    metrics = summary.get("metrics")
+    if not isinstance(metrics, dict):
+        metrics = {
+            key: value
+            for key, value in summary.items()
+            if key not in {"steps", "metrics"} and isinstance(value, (bool, int, float))
+        }
+    return {key: float(value) for key, value in metrics.items()}
+
+
+def _step_failed(result) -> bool:
+    if "failed" in result.info:
+        return bool(result.info["failed"])
+    return not bool(result.info.get("success", False))
 
 
 def _try_capture_frame(backend, frames: list, logger) -> bool:
