@@ -42,6 +42,19 @@ from embodied_control.lowlevel.maths import (  # noqa: E402
 )
 
 
+def _playkit_g1_mjcf() -> Path:
+    mjcf = (
+        Path(__file__).resolve().parents[2]
+        / "assets/latent_playkit/model/g1_29dof_rev_1_0.xml"
+    )
+    if not mjcf.is_file():
+        pytest.skip(
+            "G1 MJCF is absent; run ./scripts/setup_latent_lab.sh "
+            f"(expected {mjcf})"
+        )
+    return mjcf
+
+
 class _FirstActionTerms(torch.nn.Module):
     def forward(self, observation):
         return 0.5 * observation[:, :29]
@@ -693,15 +706,9 @@ def test_native_mujoco_loop_runs_independent_physics_schedule(
     manifest = latent_manifest.model_copy(update={"action": action})
     bundle = _native_bundle(tmp_path, manifest)
     response_name = _shm_name("mujoco")
-    repo_root = Path(__file__).resolve().parents[4]
-    model_path = (
-        repo_root
-        / "source/isaaclab_imitation/isaaclab_imitation/assets/unitree"
-        / "g1_description/g1_29dof_rev_1_0.xml"
-    )
     loop = NativeMujocoLoop(
         bundle,
-        str(model_path),
+        str(_playkit_g1_mjcf()),
         response_slot=response_name,
         lead_ticks=2,
         command_stale_ms=1000.0,
@@ -743,7 +750,7 @@ def test_native_mujoco_loop_runs_independent_physics_schedule(
     with pytest.raises(RuntimeError, match="timestep times decimation"):
         NativeMujocoLoop(
             bundle,
-            str(model_path),
+            str(_playkit_g1_mjcf()),
             response_slot=_shm_name("bad_rate"),
             control_hz=100,
             lead_ticks=2,
