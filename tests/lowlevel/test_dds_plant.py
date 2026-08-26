@@ -23,7 +23,7 @@ pytest.importorskip("onnx")
 if not ec_native.WITH_UNITREE:  # pragma: no cover - depends on optional build
     pytest.skip("ec_native was built without Unitree SDK2", allow_module_level=True)
 
-from test_native_core import _native_bundle, _playkit_g1_mjcf, _shm_name  # noqa: E402
+from test_native_core import _native_bundle, _g1_mjcf_path, _shm_name  # noqa: E402
 
 from embodied_control.lowlevel.bundle import ActionContract  # noqa: E402
 from embodied_control.lowlevel.native_core import NativeUnitreeLoop  # noqa: E402
@@ -151,7 +151,7 @@ def test_plant_serves_lowstate_alone(tmp_path, latent_manifest):
     bundle = _g1_bundle(tmp_path, latent_manifest)
     report_path = tmp_path / "plant_report.json"
     process = _spawn_plant(
-        bundle.root, _playkit_g1_mjcf(), 1.5, report_path, extra=PLANT_ONLY_DOMAIN
+        bundle.root, _g1_mjcf_path(), 1.5, report_path, extra=PLANT_ONLY_DOMAIN
     )
     process.communicate(timeout=30.0)
     report = json.loads(report_path.read_text())
@@ -173,7 +173,7 @@ def test_dds_loopback_end_to_end(tmp_path, latent_manifest):
     # deterministic (noise-free) wire. Noise has its own test below.
     process = _spawn_plant(
         bundle.root,
-        _playkit_g1_mjcf(),
+        _g1_mjcf_path(),
         120.0,
         report_path,
         extra=["--noise-joint-pos", "0", "--noise-joint-vel", "0",
@@ -276,7 +276,7 @@ def test_plant_publishes_sensor_noise_on_the_wire(tmp_path, latent_manifest):
 
     clean = _spawn_plant(
         bundle.root,
-        _playkit_g1_mjcf(),
+        _g1_mjcf_path(),
         1.0,
         clean_report,
         extra=[*PLANT_ONLY_DOMAIN, "--noise-joint-pos", "0",
@@ -287,7 +287,7 @@ def test_plant_publishes_sensor_noise_on_the_wire(tmp_path, latent_manifest):
     clean_stats = json.loads(clean_report.read_text())
 
     noisy = _spawn_plant(
-        bundle.root, _playkit_g1_mjcf(), 1.0, noisy_report, extra=PLANT_ONLY_DOMAIN
+        bundle.root, _g1_mjcf_path(), 1.0, noisy_report, extra=PLANT_ONLY_DOMAIN
     )
     noisy.communicate(timeout=30.0)
     noisy_stats = json.loads(noisy_report.read_text())

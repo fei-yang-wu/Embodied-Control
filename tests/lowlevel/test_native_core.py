@@ -42,7 +42,7 @@ from embodied_control.lowlevel.maths import (  # noqa: E402
 )
 
 
-def _playkit_g1_mjcf() -> Path:
+def _g1_mjcf_path() -> Path:
     mjcf = (
         Path(__file__).resolve().parents[2]
         / "assets/latent_playkit/model/g1_29dof_rev_1_0.xml"
@@ -708,7 +708,7 @@ def test_native_mujoco_loop_runs_independent_physics_schedule(
     response_name = _shm_name("mujoco")
     loop = NativeMujocoLoop(
         bundle,
-        str(_playkit_g1_mjcf()),
+        str(_g1_mjcf_path()),
         response_slot=response_name,
         lead_ticks=2,
         command_stale_ms=1000.0,
@@ -750,7 +750,7 @@ def test_native_mujoco_loop_runs_independent_physics_schedule(
     with pytest.raises(RuntimeError, match="timestep times decimation"):
         NativeMujocoLoop(
             bundle,
-            str(_playkit_g1_mjcf()),
+            str(_g1_mjcf_path()),
             response_slot=_shm_name("bad_rate"),
             control_hz=100,
             lead_ticks=2,
