@@ -30,6 +30,7 @@ from embodied_control.lowlevel.native_core import (  # noqa: E402
 )
 from embodied_control.lowlevel.publishers.native_pull import (  # noqa: E402
     NativeChunkWorker,
+    NativeLatentPlanWorker,
 )
 from embodied_control.lowlevel.publishers.native_oracle import (  # noqa: E402
     NativeOracleWorker,
@@ -819,3 +820,317 @@ def test_unitree_writer_stays_closed_before_initialization(tmp_path, latent_mani
     loop.force_damp()
     time.sleep(0.05)
     assert loop.writer_stats()["publishes"] == 0
+
+
+# --------------------------------------------------------------------------
+# Latent plan: one planner reply covers `plan_slots` holds. The controller
+# walks the plan without calling the planner again, which is the cadence the
+# Isaac board's leading row uses (30 slots, hold 1).
+# --------------------------------------------------------------------------
+
+
+class _PlanServer:
+    """Answer native planner requests with a fixed-size latent plan.
+
+    Slot k of every plan is filled with the constant `k + 1`, so a rollout's
+    joint targets show one plateau per consumed slot.
+    """
+
+    REQUEST_TAG = 10
+    PLAN_TAG = 4
+
+    def __init__(
+        self,
+        request_slot,
+        response_slot,
+        *,
+        slots,
+        z_dim,
+        reply_delay_s=0.0,
+        max_replies=None,
+    ):
+        self._request = ec_native.ShmCommandSlot(request_slot, False)
+        self._response = ec_native.ShmCommandSlot(response_slot, False)
+        self.slots = int(slots)
+        self.z_dim = int(z_dim)
+        self.reply_delay_s = float(reply_delay_s)
+        self.max_replies = max_replies
+        self.replies = 0
+        self._last_sequence = 0
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self):
+        self._thread.start()
+        return self
+
+    def stop(self):
+        self._stop.set()
+        self._thread.join(timeout=5)
+
+    def _plan(self):
+        plan = np.zeros((self.slots, self.z_dim), dtype=np.float32)
+        for slot in range(self.slots):
+            plan[slot, :] = float(slot + 1)
+        return plan.reshape(-1)
+
+    def _run(self):
+        while not self._stop.is_set():
+            raw = self._request.snapshot(self._last_sequence)
+            if raw is None:
+                self._stop.wait(0.001)
+                continue
+            sequence, tag, _, _, _ = raw
+            if int(sequence) <= self._last_sequence or int(tag) != self.REQUEST_TAG:
+                self._stop.wait(0.001)
+                continue
+            self._last_sequence = int(sequence)
+            if self.max_replies is not None and self.replies >= self.max_replies:
+                continue
+            if self.reply_delay_s > 0.0:
+                self._stop.wait(self.reply_delay_s)
+            self._response.publish(
+                int(sequence), self.PLAN_TAG, self._plan(), time.monotonic()
+            )
+            self.replies += 1
+
+
+def test_native_latent_plan_serves_every_slot_from_one_reply(
+    tmp_path, latent_manifest
+):
+    bundle = _native_bundle(tmp_path, latent_manifest)
+    response_name = _shm_name("plan_response")
+    request_name = _shm_name("plan_request")
+    slots, hold, plans = 4, 5, 3
+    ticks = slots * hold * plans
+    loop = NativeFakeLoop(
+        bundle,
+        response_slot=response_name,
+        request_slot=request_name,
+        hold_steps=hold,
+        lead_ticks=2,
+        plan_slots=slots,
+        latent_plan=True,
+        command_stale_ms=5000.0,
+    )
+    server = _PlanServer(
+        request_name, response_name, slots=slots, z_dim=latent_manifest.command.z_dim
+    ).start()
+    try:
+        loop.start(ticks, paced=True)
+        loop.wait()
+    finally:
+        server.stop()
+
+    stats = loop.stats()
+    assert stats["fault"] == 0
+    assert stats["deadline_misses"] == 0
+    assert stats["plan_late_starts"] == 0
+    # Most holds are served from a plan already in hand, so the planner is
+    # called about once per plan instead of once per hold.
+    assert stats["plan_slot_advances"] >= (slots - 1) * (plans - 1)
+    assert stats["planner_requests"] <= plans + 1
+    assert stats["planner_requests"] < ticks // hold
+
+    # Slot k drives the tracker for `hold` ticks, so the first joint target
+    # holds one value per slot and steps up as the plan is walked.
+    # The log is flat (ticks x joints); take joint 0 of every tick.
+    joint_log = np.asarray(loop.joint_position_log()).reshape(-1, 29)[:, 0]
+    plateaus = [joint_log[0]]
+    for value in joint_log[1:]:
+        if not np.isclose(value, plateaus[-1]):
+            plateaus.append(value)
+    assert len(plateaus) >= slots
+
+
+def test_native_latent_plan_allows_a_lead_longer_than_one_hold(
+    tmp_path, latent_manifest
+):
+    bundle = _native_bundle(tmp_path, latent_manifest)
+    # The lead counts down to plan exhaustion, so it may span several holds.
+    loop = NativeFakeLoop(
+        bundle,
+        response_slot=_shm_name("plan_long_lead"),
+        request_slot=_shm_name("plan_long_lead_req"),
+        hold_steps=5,
+        lead_ticks=12,
+        plan_slots=4,
+        latent_plan=True,
+    )
+    assert loop.tracker.command_width == bundle.manifest.command.z_dim + 2
+    # Without a plan the historical rule still holds: the lead must fit inside
+    # the single hold that one reply covers.
+    with pytest.raises(RuntimeError):
+        NativeFakeLoop(
+            bundle,
+            response_slot=_shm_name("plan_bad_lead"),
+            request_slot=_shm_name("plan_bad_lead_req"),
+            hold_steps=5,
+            lead_ticks=12,
+            plan_slots=1,
+            latent_plan=True,
+        )
+
+
+def test_native_latent_plan_holds_the_last_slot_on_a_deadline_miss(
+    tmp_path, latent_manifest
+):
+    bundle = _native_bundle(tmp_path, latent_manifest)
+    response_name = _shm_name("plan_miss_response")
+    request_name = _shm_name("plan_miss_request")
+    slots, hold = 2, 5
+    loop = NativeFakeLoop(
+        bundle,
+        response_slot=response_name,
+        request_slot=request_name,
+        hold_steps=hold,
+        lead_ticks=2,
+        plan_slots=slots,
+        latent_plan=True,
+        command_stale_ms=5000.0,
+    )
+    # One plan only: after it is walked the planner is silent, and the
+    # controller must hold the last command and count the miss, not fault.
+    server = _PlanServer(
+        request_name,
+        response_name,
+        slots=slots,
+        z_dim=latent_manifest.command.z_dim,
+        max_replies=1,
+    ).start()
+    try:
+        loop.start(slots * hold * 3, paced=True)
+        loop.wait()
+    finally:
+        server.stop()
+    stats = loop.stats()
+    assert stats["fault"] == 0
+    assert stats["deadline_misses"] > 0
+    assert stats["control_ticks"] > slots * hold
+
+
+def test_native_latent_plan_time_aligns_a_late_reply(tmp_path, latent_manifest):
+    bundle = _native_bundle(tmp_path, latent_manifest)
+    response_name = _shm_name("plan_late_response")
+    request_name = _shm_name("plan_late_request")
+    slots, hold = 2, 5
+    loop = NativeFakeLoop(
+        bundle,
+        response_slot=response_name,
+        request_slot=request_name,
+        hold_steps=hold,
+        lead_ticks=2,
+        plan_slots=slots,
+        latent_plan=True,
+        command_stale_ms=5000.0,
+    )
+    # A reply that lands after the whole plan's window has passed is used at
+    # its last slot and recorded, never replayed from slot 0.
+    server = _PlanServer(
+        request_name,
+        response_name,
+        slots=slots,
+        z_dim=latent_manifest.command.z_dim,
+        reply_delay_s=(slots * hold + 2) / 50.0,
+    ).start()
+    try:
+        loop.start(slots * hold * 2, paced=True)
+        loop.wait()
+    finally:
+        server.stop()
+    stats = loop.stats()
+    assert stats["fault"] == 0
+    assert stats["plan_late_starts"] >= 1
+    assert stats["last_chunk_offset_steps"] >= slots * hold
+
+
+def test_native_latent_plan_worker_drives_the_controller(tmp_path, latent_manifest):
+    """The worker + controller pair: one head call per plan, no encoder."""
+    bundle = _native_bundle(tmp_path, latent_manifest)
+    response_name = _shm_name("plan_worker_response")
+    request_name = _shm_name("plan_worker_request")
+    slots, hold = 3, 5
+    z_dim = int(latent_manifest.command.z_dim)
+    calls = []
+
+    def _head(history, context):
+        assert history.shape == (930,)
+        calls.append(context)
+        plan = np.zeros((slots, z_dim), dtype=np.float32)
+        for slot in range(slots):
+            plan[slot, :] = float(slot + 1)
+        return plan
+
+    loop = NativeFakeLoop(
+        bundle,
+        response_slot=response_name,
+        request_slot=request_name,
+        hold_steps=hold,
+        lead_ticks=4,
+        plan_slots=slots,
+        latent_plan=True,
+        command_stale_ms=5000.0,
+    )
+    worker = NativeLatentPlanWorker(
+        request_name,
+        response_name,
+        _head,
+        z_dim=z_dim,
+        plan_slots=slots,
+        hold_steps=hold,
+        lead_ticks=4,
+    )
+    worker.start()
+    try:
+        loop.start(slots * hold * 2, paced=True)
+        loop.wait()
+    finally:
+        worker.close()
+
+    stats = loop.stats()
+    assert worker.last_error is None
+    assert stats["fault"] == 0
+    assert stats["deadline_misses"] == 0
+    assert stats["plan_slot_advances"] >= slots - 1
+    # One call per plan, not one per hold.
+    assert 0 < worker.requests <= 3
+    assert len(calls) == worker.requests
+
+
+def test_native_latent_plan_keeps_requesting_at_hold_one(tmp_path, latent_manifest):
+    """Hold 1 with a 30-slot plan: the leading Isaac row's cadence.
+
+    The countdown to plan exhaustion steps 1 -> 0 at hold 1, so a scheduler
+    that waits for the lead EXACTLY never asks for another plan and starves
+    the controller after the first one.
+    """
+    bundle = _native_bundle(tmp_path, latent_manifest)
+    response_name = _shm_name("plan_hold1_response")
+    request_name = _shm_name("plan_hold1_request")
+    slots, hold, lead = 30, 1, 5
+    ticks = slots * 4
+    loop = NativeFakeLoop(
+        bundle,
+        response_slot=response_name,
+        request_slot=request_name,
+        hold_steps=hold,
+        lead_ticks=lead,
+        plan_slots=slots,
+        latent_plan=True,
+        command_stale_ms=5000.0,
+    )
+    server = _PlanServer(
+        request_name, response_name, slots=slots, z_dim=latent_manifest.command.z_dim
+    ).start()
+    try:
+        loop.start(ticks, paced=True)
+        loop.wait()
+    finally:
+        server.stop()
+    stats = loop.stats()
+    assert stats["fault"] == 0
+    assert stats["control_ticks"] > ticks - 5
+    assert stats["planner_requests"] >= 3  # one per plan, not one per hold
+    assert stats["planner_requests"] <= ticks // slots + 2
+    assert stats["plan_slot_advances"] >= (slots - 1) * 2
+    assert stats["deadline_misses"] == 0

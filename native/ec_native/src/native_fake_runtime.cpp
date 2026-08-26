@@ -88,12 +88,35 @@ NativeFakeRuntime::NativeFakeRuntime(
   if (!backend_) {
     throw std::runtime_error("native runtime requires a robot backend");
   }
+  if (planner_.plan_slots == 0) {
+    throw std::runtime_error("invalid native planner configuration");
+  }
+  // The request fires `lead_ticks` before the whole plan is consumed, so the
+  // lead may span several holds once a reply carries more than one slot. At
+  // plan_slots = 1 this is the historical `lead_ticks < hold_steps` rule.
   if (planner_.hold_steps == 0 ||
-      planner_.lead_ticks >= planner_.hold_steps ||
+      planner_.lead_ticks >= planner_.hold_steps * planner_.plan_slots ||
       planner_.encoder_frame_width == 0 || planner_.window_frames == 0 ||
       planner_.encoder_frame_stride == 0 ||
       planner_.z_dim == 0 || planner_.direct_tag > kLatentTag) {
     throw std::runtime_error("invalid native planner configuration");
+  }
+  if (planner_.latent_plan) {
+    if (planner_.oracle_reference) {
+      throw std::runtime_error(
+          "the latent plan tag and the oracle reference path are exclusive");
+    }
+    if (planner_.plan_slots * planner_.z_dim > kMaxValues) {
+      throw std::runtime_error("latent plan exceeds the shared-memory packet");
+    }
+    const std::size_t phase_width = planner_.sin_cos_phase ? 2 : 0;
+    if (tracker_.command_width() != planner_.z_dim + phase_width) {
+      throw std::runtime_error(
+          "tracker command width does not match the latent plan plus phase");
+    }
+  } else if (planner_.plan_slots != 1) {
+    throw std::runtime_error(
+        "multi-slot plans need the latent plan response tag");
   }
 
   if (!encoder_path.empty()) {
@@ -173,6 +196,9 @@ void NativeFakeRuntime::start(std::size_t max_ticks, bool paced) {
   last_encoder_tick_ = 0;
   encoder_ran_ = false;
   pending_chunk_has_request_timing_ = false;
+  active_plan_slots_ = 0;
+  plan_cursor_ = 0;
+  plan_accept_tick_ = 0;
   consumed_response_sequence_ = last_response_sequence_;
   outstanding_request_sequence_ = 0;
   outstanding_request_tick_ = 0;
@@ -196,6 +222,8 @@ void NativeFakeRuntime::start(std::size_t max_ticks, bool paced) {
   planner_responses_.store(0);
   encoder_inferences_.store(0);
   response_overruns_.store(0);
+  plan_slot_advances_.store(0);
+  plan_late_starts_.store(0);
   scheduler_deadlines_missed_.store(0);
   tick_ns_max_.store(0);
   wake_late_ns_max_.store(0);
@@ -407,6 +435,19 @@ void NativeFakeRuntime::read_response() noexcept {
     return;
   }
 
+  if (tag == kLatentPlanTag && planner_.latent_plan) {
+    if (pending_chunk_sequence_ > consumed_response_sequence_) {
+      response_overruns_.fetch_add(1, std::memory_order_relaxed);
+    }
+    std::copy_n(response_buffer_.begin(), length, pending_chunk_.begin());
+    pending_chunk_length_ = length;
+    pending_chunk_sequence_ = sequence;
+    pending_chunk_recv_stamp_ = recv_stamp;
+    pending_chunk_request_tick_ = outstanding_request_tick_;
+    pending_chunk_has_request_timing_ = request_slot_ != nullptr;
+    outstanding_request_sequence_ = 0;
+    return;
+  }
   if (((tag == kChunkTag && !planner_.oracle_reference) ||
        (tag == kRawReferenceTag && planner_.oracle_reference)) &&
       encoder_) {
@@ -457,7 +498,83 @@ bool NativeFakeRuntime::accept_direct_command(std::uint32_t length) noexcept {
   command_available_ = true;
   steps_remaining_ = planner_.hold_steps;
   absent_ticks_ = 0;
+  // A pushed command supersedes any plan in hand; never walk a stale plan
+  // after it expires.
+  active_plan_slots_ = 0;
+  plan_cursor_ = 0;
   mode_.store(RuntimeMode::kControl);
+  return true;
+}
+
+std::size_t NativeFakeRuntime::plan_ticks_remaining() const noexcept {
+  if (active_plan_slots_ == 0) {
+    return steps_remaining_;
+  }
+  return steps_remaining_ +
+         (active_plan_slots_ - 1 - plan_cursor_) * planner_.hold_steps;
+}
+
+void NativeFakeRuntime::load_plan_slot(std::size_t slot) noexcept {
+  const float* source = active_plan_.data() + slot * planner_.z_dim;
+  std::copy_n(source, planner_.z_dim, command_.begin());
+  plan_cursor_ = slot;
+  command_available_ = true;
+  absent_ticks_ = 0;
+  mode_.store(RuntimeMode::kControl);
+}
+
+// Serve the next command from the plan already in hand. No planner call, no
+// transport: this is what makes one head inference cover plan_slots holds.
+bool NativeFakeRuntime::advance_plan_slot() noexcept {
+  if (active_plan_slots_ == 0 || plan_cursor_ + 1 >= active_plan_slots_) {
+    return false;
+  }
+  load_plan_slot(plan_cursor_ + 1);
+  steps_remaining_ = planner_.hold_steps;
+  plan_slot_advances_.fetch_add(1, std::memory_order_relaxed);
+  return true;
+}
+
+bool NativeFakeRuntime::accept_latent_plan(std::uint32_t length) noexcept {
+  if (!planner_.latent_plan || planner_.z_dim == 0 ||
+      length % planner_.z_dim != 0) {
+    return false;
+  }
+  const std::size_t slots = length / planner_.z_dim;
+  if (slots == 0 || slots > planner_.plan_slots) {
+    return false;
+  }
+  if (!std::all_of(pending_chunk_.begin(), pending_chunk_.begin() + length,
+                   [](float value) { return std::isfinite(value); })) {
+    return false;
+  }
+  // Time-align the plan the way the pull client does: the slots whose time
+  // passed while the planner was thinking are never replayed.
+  const std::size_t elapsed =
+      pending_chunk_has_request_timing_
+          ? static_cast<std::size_t>(loop_tick_ - pending_chunk_request_tick_)
+          : planner_.lead_ticks;
+  std::size_t start_slot = elapsed / planner_.hold_steps;
+  std::size_t into_slot = elapsed % planner_.hold_steps;
+  if (start_slot >= slots) {
+    // The whole plan is already in the past. Fall back to its last slot and
+    // record it: a run with plan_late_starts > 0 was not served fresh data.
+    start_slot = slots - 1;
+    into_slot = 0;
+    plan_late_starts_.fetch_add(1, std::memory_order_relaxed);
+  }
+  std::copy_n(pending_chunk_.begin(), length, active_plan_.begin());
+  active_plan_slots_ = slots;
+  plan_accept_tick_ = loop_tick_;
+  load_plan_slot(start_slot);
+  steps_remaining_ = planner_.hold_steps - into_slot;
+  consumed_response_sequence_ = pending_chunk_sequence_;
+  command_recv_stamp_ = pending_chunk_recv_stamp_;
+  pending_chunk_length_ = 0;
+  pending_chunk_sequence_ = 0;
+  pending_chunk_request_tick_ = 0;
+  pending_chunk_has_request_timing_ = false;
+  last_chunk_offset_steps_.store(elapsed, std::memory_order_relaxed);
   return true;
 }
 
@@ -681,26 +798,44 @@ void NativeFakeRuntime::one_tick() noexcept {
     return;
   }
 
+  // Hold scheduling runs whenever the controller owns command expiry: the
+  // encoder path (one window per hold) and the latent plan path (one reply
+  // per plan_slots holds). A pushed direct command has no expiry.
+  const bool controller_paced_command = encoder_ != nullptr ||
+                                        planner_.latent_plan;
   if (!command_available_) {
     if (pending_chunk_sequence_ > consumed_response_sequence_) {
-      const bool accepted = planner_.oracle_reference
-                                ? accept_reference_chunk(pending_chunk_length_)
-                                : accept_chunk(pending_chunk_length_);
+      const bool accepted =
+          planner_.latent_plan
+              ? accept_latent_plan(pending_chunk_length_)
+              : (planner_.oracle_reference
+                     ? accept_reference_chunk(pending_chunk_length_)
+                     : accept_chunk(pending_chunk_length_));
       if (!accepted) {
         transition_to_damp(RuntimeFault::kCommandContract);
       }
     } else {
       publish_planner_request();
     }
-  } else if (encoder_) {
-    if (steps_remaining_ == planner_.lead_ticks) {
+  } else if (controller_paced_command) {
+    // `<=`, not `==`: at hold 1 the countdown steps 1 -> 0 and would skip an
+    // equality test, and once a plan is exhausted the remaining count stays
+    // pinned at the hold, so an equality test would never ask for another
+    // plan again. publish_planner_request() keeps at most one in flight.
+    if (plan_ticks_remaining() <= planner_.lead_ticks &&
+        pending_chunk_sequence_ <= consumed_response_sequence_) {
       publish_planner_request();
     }
     if (steps_remaining_ == 0) {
-      if (pending_chunk_sequence_ > consumed_response_sequence_) {
-        const bool accepted = planner_.oracle_reference
-                                  ? accept_reference_chunk(pending_chunk_length_)
-                                  : accept_chunk(pending_chunk_length_);
+      if (advance_plan_slot()) {
+        // Served from the plan in hand; the planner is not called.
+      } else if (pending_chunk_sequence_ > consumed_response_sequence_) {
+        const bool accepted =
+            planner_.latent_plan
+                ? accept_latent_plan(pending_chunk_length_)
+                : (planner_.oracle_reference
+                       ? accept_reference_chunk(pending_chunk_length_)
+                       : accept_chunk(pending_chunk_length_));
         if (!accepted) {
           transition_to_damp(RuntimeFault::kCommandContract);
         }
@@ -741,8 +876,19 @@ void NativeFakeRuntime::one_tick() noexcept {
     }
   }
 
-  const double command_age_ms =
-      (monotonic_now() - command_recv_stamp_) * 1000.0;
+  double command_age_ms = (monotonic_now() - command_recv_stamp_) * 1000.0;
+  if (active_plan_slots_ > 0) {
+    // A plan is not stale while it is still inside its own horizon: it was
+    // predicted for these ticks. Age counts only the time past the horizon
+    // the plan covers, so a planner that stops replying still trips the
+    // watchdog `command_stale_ms` after the plan runs out.
+    const double tick_ms = 1000.0 / static_cast<double>(scheduler_.control_hz);
+    const std::uint64_t elapsed_ticks =
+        loop_tick_ >= plan_accept_tick_ ? loop_tick_ - plan_accept_tick_ : 0;
+    const double covered_ticks = static_cast<double>(std::min<std::uint64_t>(
+        elapsed_ticks, active_plan_slots_ * planner_.hold_steps));
+    command_age_ms -= covered_ticks * tick_ms;
+  }
   if (command_age_ms > scheduler_.command_stale_ms) {
     transition_to_damp(RuntimeFault::kCommandStale);
     backend_->damp();
@@ -750,7 +896,7 @@ void NativeFakeRuntime::one_tick() noexcept {
     return;
   }
 
-  if (encoder_ && planner_.sin_cos_phase) {
+  if (controller_paced_command && planner_.sin_cos_phase) {
     const float phase = static_cast<float>(planner_.hold_steps -
                                            steps_remaining_) /
                         static_cast<float>(planner_.hold_steps);
@@ -765,7 +911,7 @@ void NativeFakeRuntime::one_tick() noexcept {
         std::span<const float>(command_.data(), tracker_.command_width()));
     backend_->write_target(result.joint_target);
     control_ticks_.fetch_add(1, std::memory_order_relaxed);
-    if (encoder_ && steps_remaining_ > 0) {
+    if (controller_paced_command && steps_remaining_ > 0) {
       --steps_remaining_;
     }
   } catch (...) {
@@ -793,6 +939,8 @@ NativeRuntimeStats NativeFakeRuntime::stats() const noexcept {
       .planner_responses = planner_responses_.load(),
       .encoder_inferences = encoder_inferences_.load(),
       .response_overruns = response_overruns_.load(),
+      .plan_slot_advances = plan_slot_advances_.load(),
+      .plan_late_starts = plan_late_starts_.load(),
       .scheduler_deadlines_missed = scheduler_deadlines_missed_.load(),
       .tick_ns_max = tick_ns_max_.load(),
       .wake_late_ns_max = wake_late_ns_max_.load(),

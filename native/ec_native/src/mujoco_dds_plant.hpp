@@ -44,6 +44,25 @@ struct PlantStats {
 // ("lo" against this plant, the robot NIC against hardware). The plant is
 // SDK-native: every per-joint array is in SDK motor order and it knows
 // nothing about the Isaac ordering used elsewhere in the runtime.
+// Sensor noise the plant puts ON THE WIRE, because a real G1 does not serve
+// clean state. Magnitudes are the uniform half-ranges SONIC trains against
+// (config/g1/common/observations.py). `imu_tilt_rad` perturbs the published
+// IMU orientation, which is how a tilt error reaches the controller's
+// projected gravity on hardware; SONIC instead adds to the derived vector
+// without renormalising, so the two are equivalent in magnitude, not in form.
+// All zero = the deterministic protocol, bit-identical to a noise-free plant.
+struct PlantSensorNoise {
+  float joint_pos = 0.0F;
+  float joint_vel = 0.0F;
+  float base_ang_vel = 0.0F;
+  float imu_tilt_rad = 0.0F;
+  std::uint64_t seed = 0;
+  bool active() const noexcept {
+    return joint_pos > 0.0F || joint_vel > 0.0F || base_ang_vel > 0.0F ||
+           imu_tilt_rad > 0.0F;
+  }
+};
+
 class MujocoDdsPlant {
  public:
   MujocoDdsPlant(const std::string& model_path,
@@ -56,7 +75,10 @@ class MujocoDdsPlant {
                  std::span<const float> hold_damping, double timestep,
                  std::uint8_t mode_machine, int physics_cpu = -1,
                  int physics_fifo_priority = 0, bool lock_memory = false,
-                 bool require_realtime = false);
+                 bool require_realtime = false,
+                 const PlantSensorNoise& sensor_noise = {},
+                 std::size_t state_log_capacity = 0, int dds_domain = 0,
+                 bool freeze_until_command = false);
   ~MujocoDdsPlant();
 
   MujocoDdsPlant(const MujocoDdsPlant&) = delete;
@@ -64,6 +86,11 @@ class MujocoDdsPlant {
 
   void reset();
   // Optional start pose: [root pos 3 | root quat XYZW 4 | joints 29 SDK order].
+  // Rows x 36, SDK motor order. Copied off the physics thread.
+  std::vector<float> state_log() const;
+  std::size_t state_log_rows() const noexcept {
+    return state_log_rows_.load(std::memory_order_acquire);
+  }
   void set_initial_pose(std::span<const float> pose);
   void start();
   void stop() noexcept;
@@ -109,6 +136,21 @@ class MujocoDdsPlant {
   std::atomic<bool> stop_requested_{false};
   std::atomic<bool> thread_ready_{false};
   std::atomic<bool> realtime_configured_{false};
+  PlantSensorNoise sensor_noise_{};
+  // A gantry that only lets go when a controller takes over. The rehearsal
+  // starts the robot ON a reference frame, and many frames are mid-stride
+  // poses that fall over in well under the second a controller needs to boot.
+  // Frozen, the plant still serves state on the wire; it just does not
+  // integrate physics until the first command arrives.
+  bool freeze_until_command_ = false;
+  // TRUE simulator state, sampled at the publish rate: the only ground truth
+  // in the rig, because the hardware wire protocol carries no root pose.
+  // Rows are [pos 3 | quat XYZW 4 | joint q 29] in SDK motor order.
+  std::vector<float> state_log_;
+  std::size_t state_log_capacity_ = 0;
+  std::atomic<std::size_t> state_log_rows_{0};
+  std::uint64_t noise_state_ = 0;  // physics thread only
+  float noise_uniform(float half_range) noexcept;
   std::atomic<bool> physics_fault_{false};
   std::atomic<bool> holding_{true};
   std::atomic<std::uint64_t> steps_{0};

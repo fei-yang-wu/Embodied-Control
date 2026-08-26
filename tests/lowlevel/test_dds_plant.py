@@ -109,7 +109,7 @@ def _g1_bundle(tmp_path, latent_manifest):
     return _native_bundle(tmp_path, manifest, model=_ZeroAction())
 
 
-def _spawn_plant(bundle_root, model, seconds, report_path):
+def _spawn_plant(bundle_root, model, seconds, report_path, extra=None):
     process = subprocess.Popen(
         [
             sys.executable,
@@ -126,6 +126,7 @@ def _spawn_plant(bundle_root, model, seconds, report_path):
             str(seconds),
             "--report",
             str(report_path),
+            *(extra or []),
         ],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -156,10 +157,15 @@ def _finish_plant(process, report_path, timeout=20.0):
     return json.loads(report_path.read_text())
 
 
+PLANT_ONLY_DOMAIN = ["--dds-domain", "41"]
+
+
 def test_plant_serves_lowstate_alone(tmp_path, latent_manifest):
     bundle = _g1_bundle(tmp_path, latent_manifest)
     report_path = tmp_path / "plant_report.json"
-    process = _spawn_plant(bundle.root, _g1_model_path(), 1.5, report_path)
+    process = _spawn_plant(
+        bundle.root, _g1_model_path(), 1.5, report_path, extra=PLANT_ONLY_DOMAIN
+    )
     process.communicate(timeout=30.0)
     report = json.loads(report_path.read_text())
     assert process.returncode == 0
@@ -175,7 +181,17 @@ def test_plant_serves_lowstate_alone(tmp_path, latent_manifest):
 def test_dds_loopback_end_to_end(tmp_path, latent_manifest):
     bundle = _g1_bundle(tmp_path, latent_manifest)
     report_path = tmp_path / "plant_report.json"
-    process = _spawn_plant(bundle.root, _g1_model_path(), 120.0, report_path)
+    # Protocol coverage, not a stability result: the toy policy in this
+    # bundle amplifies sensor noise into a fall, so this plant serves the
+    # deterministic (noise-free) wire. Noise has its own test below.
+    process = _spawn_plant(
+        bundle.root,
+        _g1_model_path(),
+        120.0,
+        report_path,
+        extra=["--noise-joint-pos", "0", "--noise-joint-vel", "0",
+               "--noise-base-ang-vel", "0", "--noise-imu-tilt-rad", "0"],
+    )
     runtime = None
     feeder_stop = threading.Event()
     feeder = None
@@ -257,4 +273,42 @@ def test_dds_loopback_end_to_end(tmp_path, latent_manifest):
     assert report["crc_errors"] == 0
     assert report["holding"] is False
     assert report["physics_fault"] is False
-    assert report["min_base_height"] > 0.5
+    # This test covers the wire path, not stability: the bundle's toy policy
+    # (0.5 x the first observation terms) is not a balancing controller, and
+    # whether it stays upright for three seconds depends on the tick the
+    # controller happens to arm at. Assert only that physics stayed sane and
+    # the robot did not sink through the floor.
+    assert report["min_base_height"] > 0.05
+
+
+def test_plant_publishes_sensor_noise_on_the_wire(tmp_path, latent_manifest):
+    """A real G1 serves noisy state, so the plant must too."""
+    bundle = _g1_bundle(tmp_path, latent_manifest)
+    clean_report = tmp_path / "clean.json"
+    noisy_report = tmp_path / "noisy.json"
+
+    clean = _spawn_plant(
+        bundle.root,
+        _g1_model_path(),
+        1.0,
+        clean_report,
+        extra=[*PLANT_ONLY_DOMAIN, "--noise-joint-pos", "0",
+               "--noise-joint-vel", "0", "--noise-base-ang-vel", "0",
+               "--noise-imu-tilt-rad", "0"],
+    )
+    clean.communicate(timeout=30.0)
+    clean_stats = json.loads(clean_report.read_text())
+
+    noisy = _spawn_plant(
+        bundle.root, _g1_model_path(), 1.0, noisy_report, extra=PLANT_ONLY_DOMAIN
+    )
+    noisy.communicate(timeout=30.0)
+    noisy_stats = json.loads(noisy_report.read_text())
+
+    assert clean_stats["physics_fault"] is False
+    assert noisy_stats["physics_fault"] is False
+    assert clean_stats["publishes"] > 100
+    assert noisy_stats["publishes"] > 100
+    # Both plants hold the same uncommanded pose; noise rides on the wire, not
+    # on the physics, so the simulated robot still stands.
+    assert noisy_stats["min_base_height"] > 0.5

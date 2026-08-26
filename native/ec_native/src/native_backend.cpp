@@ -175,12 +175,14 @@ NativeMujocoBackend::NativeMujocoBackend(
     std::span<const float> stiffness, std::span<const float> damping,
     std::span<const float> armature, std::span<const float> effort_limit,
     double timestep, std::size_t decimation, int physics_cpu,
-    int physics_fifo_priority, bool lock_memory, bool require_realtime)
+    int physics_fifo_priority, bool lock_memory, bool require_realtime,
+    const BackendSensorNoise& sensor_noise)
     : impl_(std::make_unique<Impl>()),
       state_slot_(std::make_unique<StateSlot>()),
       command_slot_(std::make_unique<CommandSlot>()),
       timestep_(timestep),
       decimation_(decimation),
+      sensor_noise_(sensor_noise),
       physics_cpu_(physics_cpu),
       physics_fifo_priority_(physics_fifo_priority),
       lock_memory_(lock_memory),
@@ -300,6 +302,9 @@ void NativeMujocoBackend::set_initial_pose(std::span<const float> pose) {
 void NativeMujocoBackend::reset() {
   stop();
   wait_for_stop();
+  // Seeded per run, so a repeated episode sees the identical noise stream.
+  noise_state_ =
+      sensor_noise_.seed * 0x9e3779b97f4a7c15ull + 0x123456789abcdefull;
   mj_resetData(impl_->model, impl_->data);
   mjData* data = impl_->data;
   if (impl_->model->nq < 7 || impl_->model->nv < 6) {
@@ -524,6 +529,20 @@ bool NativeMujocoBackend::snapshot_command(CommandSnapshot& destination) const
   return false;
 }
 
+float NativeMujocoBackend::noise_uniform(float half_range) noexcept {
+  if (half_range <= 0.0F) {
+    return 0.0F;
+  }
+  noise_state_ += 0x9e3779b97f4a7c15ull;
+  std::uint64_t z = noise_state_;
+  z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ull;
+  z = (z ^ (z >> 27)) * 0x94d049bb133111ebull;
+  z ^= z >> 31;
+  const float unit =
+      static_cast<float>(static_cast<double>(z >> 11) / 9007199254740992.0);
+  return (unit * 2.0F - 1.0F) * half_range;
+}
+
 void NativeMujocoBackend::publish_state() noexcept {
   const mjData* data = impl_->data;
   RobotState state;
@@ -550,6 +569,21 @@ void NativeMujocoBackend::publish_state() noexcept {
   };
   valid = valid && projected_gravity_from_xyzw(
                        root_quaternion_xyzw, state.projected_gravity);
+  if (sensor_noise_.active()) {
+    // The controller's view only: anchor pose and the metric logs downstream
+    // keep the clean values, exactly like the Python rehearsal loop. Gravity
+    // is perturbed WITHOUT renormalising, matching Isaac's convention.
+    for (std::size_t isaac = 0; isaac < kJointCount; ++isaac) {
+      state.joint_position[isaac] += noise_uniform(sensor_noise_.joint_pos);
+      state.joint_velocity[isaac] += noise_uniform(sensor_noise_.joint_vel);
+    }
+    for (std::size_t index = 0; index < 3; ++index) {
+      state.base_angular_velocity[index] +=
+          noise_uniform(sensor_noise_.base_ang_vel);
+      state.projected_gravity[index] +=
+          noise_uniform(sensor_noise_.projected_gravity);
+    }
+  }
   state.anchor_position_w = {
       static_cast<float>(data->xpos[3 * pelvis_body_id_]),
       static_cast<float>(data->xpos[3 * pelvis_body_id_ + 1]),

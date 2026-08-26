@@ -376,7 +376,11 @@ def _cmd_lowlevel_mujoco_native(args) -> int:
 
         motion = mpjpe_motion
         tracking = oracle_tracking_metrics(
-            bundle.manifest.action, args.model, motion, telemetry_record
+            bundle.manifest.action,
+            args.model,
+            motion,
+            telemetry_record,
+            args.start_frame,
         )
         per_frame = tracking.pop("per_frame")
         if telemetry_dir is not None:
@@ -398,6 +402,7 @@ def _cmd_lowlevel_mujoco_native(args) -> int:
 def _cmd_lowlevel_planner_worker(args) -> int:
     from embodied_control.lowlevel.publishers.native_pull import (
         NativeChunkWorker,
+        NativeLatentPlanWorker,
         StdioChunkService,
     )
 
@@ -408,16 +413,31 @@ def _cmd_lowlevel_planner_worker(args) -> int:
         print("FAIL: planner-worker needs a service command after --")
         return 2
     service = StdioChunkService(command)
-    worker = NativeChunkWorker(
-        args.request_slot,
-        args.response_slot,
-        service,
-        hold_steps=args.hold_steps,
-        lead_ticks=args.lead_ticks,
-        state_width=args.state_width,
-        rtc_enabled=args.rtc,
-        create_slots=args.create_slots,
-    )
+    if args.reply == "latent_plan":
+        # A latent head predicts the commands themselves: forward its plan and
+        # let the controller walk it, one head call per plan.
+        worker = NativeLatentPlanWorker(
+            args.request_slot,
+            args.response_slot,
+            service,
+            z_dim=args.z_dim,
+            plan_slots=args.plan_slots,
+            hold_steps=args.hold_steps,
+            lead_ticks=args.lead_ticks,
+            rtc_enabled=args.rtc,
+            create_slots=args.create_slots,
+        )
+    else:
+        worker = NativeChunkWorker(
+            args.request_slot,
+            args.response_slot,
+            service,
+            hold_steps=args.hold_steps,
+            lead_ticks=args.lead_ticks,
+            state_width=args.state_width,
+            rtc_enabled=args.rtc,
+            create_slots=args.create_slots,
+        )
     interrupted = False
     try:
         worker.run()
@@ -428,6 +448,15 @@ def _cmd_lowlevel_planner_worker(args) -> int:
         service.close()
     report = {
         "requests": worker.requests,
+        "reply": args.reply,
+        "request_ms_mean": (
+            round(sum(worker.request_ms) / len(worker.request_ms), 3)
+            if worker.request_ms
+            else None
+        ),
+        "request_ms_max": (
+            round(max(worker.request_ms), 3) if worker.request_ms else None
+        ),
         "rtc_enabled": args.rtc,
         "interrupted": interrupted,
         "error": None if worker.last_error is None else str(worker.last_error),
@@ -557,14 +586,21 @@ def _cmd_lowlevel_unitree(args) -> int:
             time.sleep(0.02)
     except KeyboardInterrupt:
         interrupted = True
+        # Damp before stopping: force_damp() is a lock-free mode store that the
+        # independent 500 Hz writer picks up on its next tick, while stop() and
+        # wait() only unwind the control thread. Damping after the join leaves a
+        # window in which the robot still tracks, and a hung control thread
+        # would keep it tracking forever.
+        runtime.force_damp()
         runtime.stop()
     except RuntimeError as exc:
         failed = True
+        runtime.force_damp()
         runtime.stop()
         print(f"FAIL: {exc}")
     finally:
-        runtime.wait()
         runtime.force_damp()
+        runtime.wait()
     report = {"control": runtime.stats(), "writer": runtime.writer_stats()}
     print(json.dumps(report, indent=2))
     return (
@@ -588,6 +624,19 @@ def _cmd_lowlevel_plant(args) -> int:
         physics_fifo_priority=args.physics_fifo_priority,
         lock_memory=args.lock_memory,
         require_realtime=args.require_realtime,
+        sensor_noise={
+            "joint_pos": args.noise_joint_pos,
+            "joint_vel": args.noise_joint_vel,
+            "base_ang_vel": args.noise_base_ang_vel,
+            "imu_tilt_rad": args.noise_imu_tilt_rad,
+        },
+        noise_seed=args.noise_seed,
+        dds_domain=args.dds_domain,
+        freeze_until_command=args.freeze_until_command,
+        # One row per publish; the plant serves at 1 / timestep.
+        state_log_capacity=(
+            int(args.seconds / args.timestep) + 1024 if args.states else 0
+        ),
     )
     if args.initial_pose:
         plant.set_initial_pose(np.load(args.initial_pose))
@@ -604,6 +653,19 @@ def _cmd_lowlevel_plant(args) -> int:
         plant.stop()
         plant.wait_for_stop()
     report = plant.stats()
+    if args.states:
+        rows = plant.state_log()
+        states_path = Path(args.states).resolve()
+        states_path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez(
+            states_path,
+            root_pos=rows[:, 0:3],
+            root_quat_xyzw=rows[:, 3:7],
+            joint_pos=rows[:, 7:],
+            publish_hz=np.asarray(1.0 / args.timestep, dtype=np.float64),
+        )
+        report["states_path"] = str(states_path)
+        report["state_rows"] = int(rows.shape[0])
     if args.report:
         output = Path(args.report).resolve()
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -711,6 +773,15 @@ def build_parser() -> argparse.ArgumentParser:
                       help="compute MPJPE-L/G; needs oracle source + --reference-root/--motion")
     lnmj.add_argument("--reference-root", default="")
     lnmj.add_argument("--motion", default="")
+    lnmj.add_argument(
+        "--start-frame",
+        type=int,
+        default=0,
+        help=(
+            "reference frame the oracle worker was started at; must match the "
+            "worker's --start-frame or the MPJPE row scores the wrong frames"
+        ),
+    )
     lnmj.add_argument("--telemetry-dir", default="")
     lnmj.add_argument("--telemetry-hz", type=float, default=1.0)
     lnmj.set_defaults(func=_cmd_lowlevel_mujoco_native)
@@ -724,6 +795,19 @@ def build_parser() -> argparse.ArgumentParser:
     lnplanner.add_argument("--hold-steps", type=int, default=10)
     lnplanner.add_argument("--lead-ticks", type=int, default=4)
     lnplanner.add_argument("--state-width", type=int, default=38)
+    lnplanner.add_argument(
+        "--reply",
+        choices=("chunk", "latent_plan"),
+        default="chunk",
+        help=(
+            "chunk: a root_qpos window the tracker-side encoder turns into one "
+            "latent (one head call per hold). latent_plan: the head's own "
+            "[slots, z_dim] plan, walked by the controller (one head call per "
+            "plan_slots holds)."
+        ),
+    )
+    lnplanner.add_argument("--z-dim", type=int, default=256)
+    lnplanner.add_argument("--plan-slots", type=int, default=1)
     lnplanner.add_argument("--rtc", action="store_true")
     lnplanner.add_argument("--report", default="")
     lnplanner.add_argument("service_command", nargs=argparse.REMAINDER)
@@ -787,6 +871,38 @@ def build_parser() -> argparse.ArgumentParser:
         "--initial-pose",
         default="",
         help=".npy with the 36-value Isaac-order start pose",
+    )
+    # SONIC's policy-group observation noise, as uniform half-ranges. The
+    # rehearsal protocol runs WITH noise by default (user directive
+    # 2026-08-17): a clean rehearsal hid a real fall-free drop.
+    lplant.add_argument("--noise-joint-pos", type=float, default=0.01)
+    lplant.add_argument("--noise-joint-vel", type=float, default=0.5)
+    lplant.add_argument("--noise-base-ang-vel", type=float, default=0.2)
+    lplant.add_argument("--noise-imu-tilt-rad", type=float, default=0.05)
+    lplant.add_argument("--noise-seed", type=int, default=0)
+    lplant.add_argument(
+        "--dds-domain",
+        type=int,
+        default=0,
+        help="0 is the robot's domain; isolate simulated plant pairs above it",
+    )
+    lplant.add_argument(
+        "--states",
+        default="",
+        help=(
+            ".npz for the plant's TRUE state trajectory (pos, quat XYZW, "
+            "joints in Isaac order). The DDS wire carries no root pose, so "
+            "this is the only ground truth for MPJPE on this tier."
+        ),
+    )
+    lplant.add_argument(
+        "--freeze-until-command",
+        action="store_true",
+        help=(
+            "hold the initial pose (serve state, integrate nothing) until the "
+            "first controller command arrives; a mid-stride reference frame "
+            "falls over long before a controller finishes booting"
+        ),
     )
     lplant.add_argument("--physics-cpu", type=int, default=-1)
     lplant.add_argument("--physics-fifo-priority", type=int, default=0)

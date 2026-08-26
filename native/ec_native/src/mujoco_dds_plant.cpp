@@ -26,6 +26,9 @@ namespace {
 
 using LowCmd = unitree_hg::msg::dds_::LowCmd_;
 using LowState = unitree_hg::msg::dds_::LowState_;
+
+// [pos 3 | quat XYZW 4 | joint q 29]
+constexpr std::size_t kPlantStateRow = 7 + kJointCount;
 using unitree::robot::ChannelFactory;
 using unitree::robot::ChannelPublisher;
 using unitree::robot::ChannelPublisherPtr;
@@ -114,7 +117,9 @@ MujocoDdsPlant::MujocoDdsPlant(
     std::span<const float> armature, std::span<const float> effort_limit,
     std::span<const float> hold_stiffness, std::span<const float> hold_damping,
     double timestep, std::uint8_t mode_machine, int physics_cpu,
-    int physics_fifo_priority, bool lock_memory, bool require_realtime)
+    int physics_fifo_priority, bool lock_memory, bool require_realtime,
+    const PlantSensorNoise& sensor_noise, std::size_t state_log_capacity,
+    int dds_domain, bool freeze_until_command)
     : impl_(std::make_unique<Impl>()),
       command_slot_(std::make_unique<CommandSlot>()),
       timestep_(timestep),
@@ -122,7 +127,13 @@ MujocoDdsPlant::MujocoDdsPlant(
       physics_cpu_(physics_cpu),
       physics_fifo_priority_(physics_fifo_priority),
       lock_memory_(lock_memory),
+      sensor_noise_(sensor_noise),
+      state_log_capacity_(state_log_capacity),
+      freeze_until_command_(freeze_until_command),
       require_realtime_(require_realtime) {
+  // Preallocated once, outside the physics thread: the log never allocates
+  // while the plant is running.
+  state_log_.assign(state_log_capacity_ * kPlantStateRow, 0.0F);
   if (network_interface.empty() || sdk_joint_names.size() != kJointCount ||
       default_joint_position.size() != kJointCount ||
       armature.size() != kJointCount || effort_limit.size() != kJointCount ||
@@ -211,7 +222,9 @@ MujocoDdsPlant::MujocoDdsPlant(
   }
   reset();
 
-  ChannelFactory::Instance()->Init(0, network_interface);
+  // Domain 0 is the robot. A simulated plant may take another domain so two
+  // rig processes on `lo` never see each other's traffic.
+  ChannelFactory::Instance()->Init(dds_domain, network_interface);
   impl_->publisher =
       std::make_shared<ChannelPublisher<LowState>>("rt/lowstate");
   impl_->publisher->InitChannel();
@@ -298,6 +311,10 @@ void MujocoDdsPlant::reset() {
   stop_requested_.store(false, std::memory_order_relaxed);
   thread_ready_.store(false, std::memory_order_relaxed);
   realtime_configured_.store(false, std::memory_order_relaxed);
+  // splitmix64 keeps the noise stream reproducible and allocation-free on
+  // the physics thread; the seed makes a repeat of an episode identical.
+  noise_state_ = sensor_noise_.seed * 0x9e3779b97f4a7c15ull + 0x123456789abcdefull;
+  state_log_rows_.store(0, std::memory_order_release);
   physics_fault_.store(false, std::memory_order_relaxed);
   holding_.store(true, std::memory_order_relaxed);
   steps_.store(0, std::memory_order_relaxed);
@@ -438,6 +455,27 @@ bool MujocoDdsPlant::configure_physics_thread() noexcept {
   return configured;
 }
 
+float MujocoDdsPlant::noise_uniform(float half_range) noexcept {
+  if (half_range <= 0.0F) {
+    return 0.0F;
+  }
+  noise_state_ += 0x9e3779b97f4a7c15ull;
+  std::uint64_t z = noise_state_;
+  z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ull;
+  z = (z ^ (z >> 27)) * 0x94d049bb133111ebull;
+  z ^= z >> 31;
+  // [-half_range, half_range)
+  const float unit =
+      static_cast<float>(static_cast<double>(z >> 11) / 9007199254740992.0);
+  return (unit * 2.0F - 1.0F) * half_range;
+}
+
+std::vector<float> MujocoDdsPlant::state_log() const {
+  const std::size_t rows = state_log_rows_.load(std::memory_order_acquire);
+  return {state_log_.begin(),
+          state_log_.begin() + static_cast<std::ptrdiff_t>(rows * kPlantStateRow)};
+}
+
 void MujocoDdsPlant::publish_low_state() noexcept {
   const mjData* data = impl_->data;
   LowState& message = impl_->state_message;
@@ -446,6 +484,23 @@ void MujocoDdsPlant::publish_low_state() noexcept {
       static_cast<double>(steps_.load(std::memory_order_relaxed)) * timestep_ *
       1000.0);
   bool valid = std::isfinite(data->time) && std::isfinite(data->qpos[2]);
+  const std::size_t logged_rows = state_log_rows_.load(std::memory_order_relaxed);
+  if (logged_rows < state_log_capacity_) {
+    float* row = state_log_.data() + logged_rows * kPlantStateRow;
+    row[0] = static_cast<float>(data->qpos[0]);
+    row[1] = static_cast<float>(data->qpos[1]);
+    row[2] = static_cast<float>(data->qpos[2]);
+    // MuJoCo stores the free joint as WXYZ; the rig's convention is XYZW.
+    row[3] = static_cast<float>(data->qpos[4]);
+    row[4] = static_cast<float>(data->qpos[5]);
+    row[5] = static_cast<float>(data->qpos[6]);
+    row[6] = static_cast<float>(data->qpos[3]);
+    for (std::size_t actuator = 0; actuator < kJointCount; ++actuator) {
+      row[7 + actuator_to_sdk_[actuator]] =
+          static_cast<float>(data->qpos[qpos_address_[actuator]]);
+    }
+    state_log_rows_.store(logged_rows + 1, std::memory_order_release);
+  }
   for (std::size_t actuator = 0; actuator < kJointCount; ++actuator) {
     const std::size_t sdk = actuator_to_sdk_[actuator];
     auto& motor = message.motor_state()[sdk];
@@ -453,26 +508,51 @@ void MujocoDdsPlant::publish_low_state() noexcept {
         static_cast<float>(data->qpos[qpos_address_[actuator]]);
     const float velocity =
         static_cast<float>(data->qvel[dof_address_[actuator]]);
-    motor.q() = position;
-    motor.dq() = velocity;
+    motor.q() = position + noise_uniform(sensor_noise_.joint_pos);
+    motor.dq() = velocity + noise_uniform(sensor_noise_.joint_vel);
     motor.tau_est() =
         static_cast<float>(data->actuator_force[actuator] +
                            data->qfrc_applied[dof_address_[actuator]]);
     valid = valid && std::isfinite(position) && std::isfinite(velocity);
   }
   auto& imu = message.imu_state();
-  const std::array<float, 4> quaternion_wxyz = {
+  std::array<float, 4> quaternion_wxyz = {
       static_cast<float>(data->qpos[3]),
       static_cast<float>(data->qpos[4]),
       static_cast<float>(data->qpos[5]),
       static_cast<float>(data->qpos[6]),
   };
+  if (sensor_noise_.imu_tilt_rad > 0.0F) {
+    // A small-angle body-frame rotation error: q <- q * dq, with dq built
+    // from a half-angle vector. This is the orientation error an IMU reports;
+    // the controller's projected gravity moves with it.
+    const std::array<float, 3> half = {
+        0.5F * noise_uniform(sensor_noise_.imu_tilt_rad),
+        0.5F * noise_uniform(sensor_noise_.imu_tilt_rad),
+        0.5F * noise_uniform(sensor_noise_.imu_tilt_rad),
+    };
+    const std::array<float, 4> q = quaternion_wxyz;
+    const std::array<float, 4> tilted = {
+        q[0] - q[1] * half[0] - q[2] * half[1] - q[3] * half[2],
+        q[1] + q[0] * half[0] + q[2] * half[2] - q[3] * half[1],
+        q[2] + q[0] * half[1] - q[1] * half[2] + q[3] * half[0],
+        q[3] + q[0] * half[2] + q[1] * half[1] - q[2] * half[0],
+    };
+    const float norm = std::sqrt(tilted[0] * tilted[0] + tilted[1] * tilted[1] +
+                                 tilted[2] * tilted[2] + tilted[3] * tilted[3]);
+    if (norm > 1.0e-6F) {
+      for (std::size_t index = 0; index < 4; ++index) {
+        quaternion_wxyz[index] = tilted[index] / norm;
+      }
+    }
+  }
   for (std::size_t index = 0; index < 4; ++index) {
     imu.quaternion()[index] = quaternion_wxyz[index];
     valid = valid && std::isfinite(quaternion_wxyz[index]);
   }
   for (std::size_t index = 0; index < 3; ++index) {
-    const float value = static_cast<float>(data->qvel[3 + index]);
+    const float value = static_cast<float>(data->qvel[3 + index]) +
+                        noise_uniform(sensor_noise_.base_ang_vel);
     imu.gyroscope()[index] = value;
     valid = valid && std::isfinite(value);
   }
@@ -573,6 +653,13 @@ void MujocoDdsPlant::physics_loop() noexcept {
       applied_kd_max_.store(kd_max, std::memory_order_relaxed);
       applied_q_absmax_.store(q_absmax, std::memory_order_relaxed);
       applied_extra_absmax_.store(extra_absmax, std::memory_order_relaxed);
+    }
+    if (freeze_until_command_ && holding_.load(std::memory_order_relaxed)) {
+      // Held by the gantry: serve state, advance the clock, integrate nothing.
+      impl_->data->time += timestep_;
+      mj_forward(impl_->model, impl_->data);
+      publish_low_state();
+      continue;
     }
     mj_step(impl_->model, impl_->data);
     steps_.fetch_add(1, std::memory_order_relaxed);

@@ -114,7 +114,7 @@ NativeUnitreeBackend::NativeUnitreeBackend(
     std::span<const float> joint_lower, std::span<const float> joint_upper,
     bool writes_enabled, int writer_cpu, int writer_fifo_priority,
     bool lock_memory, bool require_realtime, double state_absent_ms,
-    double command_stale_ms)
+    double command_stale_ms, int dds_domain)
     : impl_(std::make_unique<Impl>()),
       state_slot_(std::make_unique<StateSlot>()),
       command_slot_(std::make_unique<CommandSlot>()),
@@ -168,7 +168,8 @@ NativeUnitreeBackend::NativeUnitreeBackend(
   }
   state_cache_.projected_gravity = {0.0F, 0.0F, -1.0F};
 
-  ChannelFactory::Instance()->Init(0, network_interface);
+  // Domain 0 is the robot; a simulated plant pair may use another domain.
+  ChannelFactory::Instance()->Init(dds_domain, network_interface);
   impl_->publisher =
       std::make_shared<ChannelPublisher<LowCmd>>("rt/lowcmd");
   impl_->publisher->InitChannel();
@@ -277,17 +278,33 @@ void NativeUnitreeBackend::low_state_handler(const void* message) noexcept {
                                               std::memory_order_relaxed);
     state_slot_->joint_velocity[isaac].store(motor.dq(),
                                               std::memory_order_relaxed);
-    const bool invalid = !std::isfinite(motor.q()) ||
-                         !std::isfinite(motor.dq()) ||
-                         motor.q() <
-                             joint_lower_[isaac] - kJointLimitFaultMargin ||
-                         motor.q() >
-                             joint_upper_[isaac] + kJointLimitFaultMargin ||
-                         std::abs(motor.dq()) > 35.0F ||
-                         motor.motorstate() != 0 ||
-                         std::max(motor.temperature()[0],
-                                  motor.temperature()[1]) >= 90;
-    faulted = faulted || invalid;
+    // Reason bits so a latched fault says WHICH guard tripped; a DAMP with no
+    // cause is unactionable on hardware and unreadable in a rehearsal log.
+    std::uint32_t reason = 0;
+    if (!std::isfinite(motor.q()) || !std::isfinite(motor.dq())) {
+      reason |= 1U;
+    }
+    if (motor.q() < joint_lower_[isaac] - kJointLimitFaultMargin ||
+        motor.q() > joint_upper_[isaac] + kJointLimitFaultMargin) {
+      reason |= 2U;
+    }
+    if (std::abs(motor.dq()) > 35.0F) {
+      reason |= 4U;
+    }
+    if (motor.motorstate() != 0) {
+      reason |= 8U;
+    }
+    if (std::max(motor.temperature()[0], motor.temperature()[1]) >= 90) {
+      reason |= 16U;
+    }
+    if (reason != 0U) {
+      std::uint32_t expected = 0U;
+      state_fault_reason_.compare_exchange_strong(expected, reason);
+      std::uint32_t expected_joint = 0U;
+      state_fault_joint_.compare_exchange_strong(
+          expected_joint, static_cast<std::uint32_t>(isaac));
+    }
+    faulted = faulted || reason != 0U;
   }
   const auto& input_quaternion = input.imu_state().quaternion();
   const auto& input_gyroscope = input.imu_state().gyroscope();
@@ -303,8 +320,11 @@ void NativeUnitreeBackend::low_state_handler(const void* message) noexcept {
     state_slot_->gyroscope[index].store(value, std::memory_order_relaxed);
     faulted = faulted || !std::isfinite(value);
   }
-  faulted = faulted || quaternion_norm_squared < 0.5F ||
-            quaternion_norm_squared > 1.5F;
+  if (quaternion_norm_squared < 0.5F || quaternion_norm_squared > 1.5F) {
+    std::uint32_t expected = 0U;
+    state_fault_reason_.compare_exchange_strong(expected, 32U);
+    faulted = true;
+  }
   state_slot_->receive_ns.store(monotonic_ns_unitree(),
                                 std::memory_order_relaxed);
   state_slot_->mode_machine.store(input.mode_machine(),
@@ -391,7 +411,9 @@ bool NativeUnitreeBackend::healthy(double state_absent_ms) const noexcept {
   return age_ms <= state_absent_ms && !snapshot.faulted;
 }
 
-void NativeUnitreeBackend::begin_initialization(double duration_seconds) {
+void NativeUnitreeBackend::begin_initialization(double duration_seconds,
+                                                bool hold_current,
+                                                bool skip_motion_switcher) {
   if (!writes_enabled_) {
     throw std::runtime_error(
         "Unitree initialization needs explicitly enabled DDS writes");
@@ -409,6 +431,7 @@ void NativeUnitreeBackend::begin_initialization(double duration_seconds) {
     throw std::runtime_error(
         "Unitree initialization needs fresh fault-free state and positive duration");
   }
+  if (!skip_motion_switcher) {
   impl_->motion_switcher =
       std::make_unique<unitree::robot::b2::MotionSwitcherClient>();
   impl_->motion_switcher->SetTimeout(5.0F);
@@ -436,12 +459,15 @@ void NativeUnitreeBackend::begin_initialization(double duration_seconds) {
           "Unitree motion service stayed active after release: " + name);
     }
   }
+  }
   StateSnapshot snapshot;
   if (!snapshot_state(snapshot) || snapshot.faulted) {
     throw std::runtime_error(
         "Unitree state faulted during motion-service release");
   }
   init_start_position_ = snapshot.joint_position;
+  init_target_position_ =
+      hold_current ? snapshot.joint_position : default_joint_position_;
   init_duration_seconds_ = duration_seconds;
   init_start_ns_ = monotonic_ns_unitree();
   mode_.store(UnitreeMode::kInitialize);
@@ -552,14 +578,14 @@ void NativeUnitreeBackend::writer_loop() noexcept {
       for (std::size_t index = 0; index < kJointCount; ++index) {
         command.joint_target[index] = static_cast<float>(
             init_start_position_[index] * (1.0 - ratio) +
-            default_joint_position_[index] * ratio);
+            init_target_position_[index] * ratio);
       }
       if (ratio >= 1.0) {
         mode_.store(UnitreeMode::kWait);
         mode = UnitreeMode::kWait;
       }
     } else if (mode == UnitreeMode::kWait) {
-      command.joint_target = default_joint_position_;
+      command.joint_target = init_target_position_;
     }
     if (mode == UnitreeMode::kDisabled ||
         !write_gate_open_.load(std::memory_order_acquire)) {
@@ -612,6 +638,8 @@ UnitreeWriterStats NativeUnitreeBackend::writer_stats() const noexcept {
       .publish_failures = publish_failures_.load(),
       .crc_errors = crc_errors_.load(),
       .hardware_faults = hardware_faults_.load(),
+      .state_fault_reason = state_fault_reason_.load(),
+      .state_fault_joint = state_fault_joint_.load(),
       .watchdog_faults = watchdog_faults_.load(),
       .wake_late_ns_max = wake_late_ns_max_.load(),
       .deadline_misses = deadline_misses_.load(),

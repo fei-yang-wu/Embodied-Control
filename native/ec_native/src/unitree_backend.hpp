@@ -27,6 +27,10 @@ struct UnitreeWriterStats {
   std::uint64_t publish_failures = 0;
   std::uint64_t crc_errors = 0;
   std::uint64_t hardware_faults = 0;
+  // First tripped state guard, latched: 1 non-finite, 2 joint limit,
+  // 4 joint speed, 8 motor state, 16 temperature, 32 IMU quaternion norm.
+  std::uint32_t state_fault_reason = 0;
+  std::uint32_t state_fault_joint = 0;
   std::uint64_t watchdog_faults = 0;
   std::uint64_t wake_late_ns_max = 0;
   std::uint64_t deadline_misses = 0;
@@ -48,7 +52,7 @@ class NativeUnitreeBackend final : public NativeRobotBackend {
       std::span<const float> joint_lower, std::span<const float> joint_upper,
       bool writes_enabled, int writer_cpu, int writer_fifo_priority,
       bool lock_memory, bool require_realtime, double state_absent_ms,
-      double command_stale_ms);
+      double command_stale_ms, int dds_domain = 0);
   ~NativeUnitreeBackend() override;
 
   NativeUnitreeBackend(const NativeUnitreeBackend&) = delete;
@@ -62,7 +66,19 @@ class NativeUnitreeBackend final : public NativeRobotBackend {
   bool healthy(double state_absent_ms) const noexcept override;
 
   bool state_ready() const noexcept;
-  void begin_initialization(double duration_seconds);
+  // hold_current ramps to the pose the robot is already in instead of the
+  // bundle's default stance. The default stance is the hardware sequence; a
+  // rehearsal episode that must start ON a reference frame holds instead, so
+  // the init ramp does not drag the robot off that frame.
+  // skip_motion_switcher drops the Unitree motion-service release handshake.
+  // Against the simulated DDS plant there is no motion service, and the
+  // client's CheckMode blocks for its whole timeout - long enough for a
+  // planner-driven controller to starve and damp before it can arm. Never
+  // skip it against real hardware: it is what stops the factory controller
+  // and ours from writing at the same time.
+  void begin_initialization(double duration_seconds,
+                            bool hold_current = false,
+                            bool skip_motion_switcher = false);
   void arm_control();
   void force_damp() noexcept;
   UnitreeMode mode() const noexcept { return mode_.load(); }
@@ -91,6 +107,7 @@ class NativeUnitreeBackend final : public NativeRobotBackend {
   std::unique_ptr<CommandSlot> command_slot_;
   RobotState state_cache_{};
   std::array<float, kJointCount> init_start_position_{};
+  std::array<float, kJointCount> init_target_position_{};
   std::atomic<UnitreeMode> mode_{UnitreeMode::kDisabled};
   std::atomic<bool> write_gate_open_{false};
   std::atomic<bool> stop_requested_{false};
@@ -112,6 +129,10 @@ class NativeUnitreeBackend final : public NativeRobotBackend {
   std::atomic<std::uint64_t> publish_failures_{0};
   std::atomic<std::uint64_t> crc_errors_{0};
   std::atomic<std::uint64_t> hardware_faults_{0};
+  // First tripped guard, latched: 1 non-finite, 2 joint limit, 4 joint speed,
+  // 8 motor state, 16 temperature, 32 IMU quaternion norm.
+  std::atomic<std::uint32_t> state_fault_reason_{0};
+  std::atomic<std::uint32_t> state_fault_joint_{0};
   std::atomic<std::uint64_t> watchdog_faults_{0};
   std::atomic<std::uint64_t> wake_late_ns_max_{0};
   std::atomic<std::uint64_t> deadline_misses_{0};

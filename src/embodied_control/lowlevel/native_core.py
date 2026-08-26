@@ -152,12 +152,16 @@ class NativeFakeLoop:
         command_stale_ms: float = 500.0,
         hold_steps: int | None = None,
         lead_ticks: int = 4,
+        plan_slots: int = 1,
+        latent_plan: bool = False,
         cpu: int = -1,
         fifo_priority: int = 0,
         lock_memory: bool = False,
         require_realtime: bool = False,
         policy_threads: int = 4,
         command_source: str = "vla",
+        sensor_noise: dict[str, float] | None = None,
+        noise_seed: int = 0,
     ) -> None:
         try:
             import ec_native
@@ -176,7 +180,9 @@ class NativeFakeLoop:
         encoder_output_name = ""
         encoder_input_width = 0
         encoder_output_width = 0
-        if encoder is not None:
+        # A latent plan carries the head's own latents, so the tracker-side
+        # encoder stays out of the loop entirely.
+        if encoder is not None and not latent_plan:
             encoder_path = str(bundle.encoder_onnx_path)
             encoder_input_name = encoder.input_name
             encoder_output_name = encoder.output_name
@@ -193,6 +199,8 @@ class NativeFakeLoop:
             float(command_stale_ms),
             int(hold_steps or command.hold_steps),
             int(lead_ticks),
+            int(plan_slots),
+            bool(latent_plan),
             int(command.state_dim or 38),
             int((command.window_steps or 9) + 1),
             int(command.z_dim or self.tracker.command_width),
@@ -283,6 +291,8 @@ class NativeMujocoLoop(NativeFakeLoop):
         command_stale_ms: float = 500.0,
         hold_steps: int | None = None,
         lead_ticks: int = 4,
+        plan_slots: int = 1,
+        latent_plan: bool = False,
         cpu: int = -1,
         fifo_priority: int = 0,
         lock_memory: bool = False,
@@ -293,6 +303,8 @@ class NativeMujocoLoop(NativeFakeLoop):
         physics_require_realtime: bool = False,
         policy_threads: int = 4,
         command_source: str = "vla",
+        sensor_noise: dict[str, float] | None = None,
+        noise_seed: int = 0,
     ) -> None:
         try:
             import ec_native
@@ -316,7 +328,9 @@ class NativeMujocoLoop(NativeFakeLoop):
         encoder_output_name = ""
         encoder_input_width = 0
         encoder_output_width = 0
-        if encoder is not None:
+        # A latent plan carries the head's own latents, so the tracker-side
+        # encoder stays out of the loop entirely.
+        if encoder is not None and not latent_plan:
             encoder_path = str(bundle.encoder_onnx_path)
             encoder_input_name = encoder.input_name
             encoder_output_name = encoder.output_name
@@ -342,6 +356,8 @@ class NativeMujocoLoop(NativeFakeLoop):
             float(command_stale_ms),
             int(hold_steps or command.hold_steps),
             int(lead_ticks),
+            int(plan_slots),
+            bool(latent_plan),
             int(command.state_dim or 38),
             int((command.window_steps or 9) + 1),
             int(command.z_dim or self.tracker.command_width),
@@ -364,6 +380,13 @@ class NativeMujocoLoop(NativeFakeLoop):
             int(physics_fifo_priority),
             bool(physics_lock_memory),
             bool(physics_require_realtime),
+            # SONIC's observation noise on the controller's view only; the
+            # metric logs keep the clean state.
+            float((sensor_noise or {}).get("joint_pos", 0.0)),
+            float((sensor_noise or {}).get("joint_vel", 0.0)),
+            float((sensor_noise or {}).get("base_ang_vel", 0.0)),
+            float((sensor_noise or {}).get("projected_gravity", 0.0)),
+            int(noise_seed),
         )
 
 
@@ -391,6 +414,8 @@ class NativeUnitreeLoop(NativeFakeLoop):
         state_absent_ms: float = 500.0,
         hold_steps: int | None = None,
         lead_ticks: int = 4,
+        plan_slots: int = 1,
+        latent_plan: bool = False,
         control_cpu: int = 2,
         writer_cpu: int = 3,
         control_fifo_priority: int = 80,
@@ -398,6 +423,7 @@ class NativeUnitreeLoop(NativeFakeLoop):
         lock_memory: bool = True,
         require_realtime: bool = True,
         policy_threads: int = 1,
+        dds_domain: int = 0,
     ) -> None:
         try:
             import ec_native
@@ -424,7 +450,9 @@ class NativeUnitreeLoop(NativeFakeLoop):
         encoder_output_name = ""
         encoder_input_width = 0
         encoder_output_width = 0
-        if encoder is not None:
+        # A latent plan carries the head's own latents, so the tracker-side
+        # encoder stays out of the loop entirely.
+        if encoder is not None and not latent_plan:
             encoder_path = str(bundle.encoder_onnx_path)
             encoder_input_name = encoder.input_name
             encoder_output_name = encoder.output_name
@@ -437,6 +465,8 @@ class NativeUnitreeLoop(NativeFakeLoop):
             "state_absent_ms": float(state_absent_ms),
             "hold_steps": int(hold_steps or command.hold_steps),
             "lead_ticks": int(lead_ticks),
+            "plan_slots": int(plan_slots),
+            "latent_plan": bool(latent_plan),
             "root_qpos_width": int(command.state_dim or 38),
             "window_frames": int((command.window_steps or 9) + 1),
             "z_dim": int(command.z_dim or self.tracker.command_width),
@@ -458,6 +488,9 @@ class NativeUnitreeLoop(NativeFakeLoop):
             "writer_fifo_priority": int(writer_fifo_priority),
             "lock_memory": bool(lock_memory),
             "require_realtime": bool(require_realtime),
+            # 0 is the robot's domain; a simulated plant pair may isolate
+            # itself so two rig processes on `lo` never cross-talk.
+            "dds_domain": int(dds_domain),
         }
         self.bundle = bundle
         self._runtime = ec_native.NativeUnitreeRuntime(
@@ -487,8 +520,24 @@ class NativeUnitreeLoop(NativeFakeLoop):
     def wait_for_state(self, timeout_seconds: float) -> bool:
         return bool(self._runtime.wait_for_state(float(timeout_seconds)))
 
-    def begin_initialization(self, duration_seconds: float = 3.0) -> None:
-        self._runtime.begin_initialization(float(duration_seconds))
+    def begin_initialization(
+        self,
+        duration_seconds: float = 3.0,
+        *,
+        hold_current: bool = False,
+        skip_motion_switcher: bool = False,
+    ) -> None:
+        """Ramp to the bundle's default stance, or hold the current pose.
+
+        The default stance is the hardware sequence. A rehearsal episode that
+        starts ON a reference frame passes ``hold_current=True`` so the ramp
+        does not drag the robot off that frame before the planner takes over.
+        """
+        self._runtime.begin_initialization(
+            float(duration_seconds),
+            bool(hold_current),
+            bool(skip_motion_switcher),
+        )
 
     def wait_for_mode(self, expected: int, timeout_seconds: float) -> bool:
         return bool(self._runtime.wait_for_mode(int(expected), float(timeout_seconds)))
@@ -525,6 +574,11 @@ class NativeDdsPlant:
         physics_fifo_priority: int = 0,
         lock_memory: bool = False,
         require_realtime: bool = False,
+        sensor_noise: dict[str, float] | None = None,
+        noise_seed: int = 0,
+        state_log_capacity: int = 0,
+        dds_domain: int = 0,
+        freeze_until_command: bool = False,
     ) -> None:
         try:
             import ec_native
@@ -565,6 +619,17 @@ class NativeDdsPlant:
             int(physics_fifo_priority),
             bool(lock_memory),
             bool(require_realtime),
+            # A real G1 does not serve clean state; the plant puts the sensor
+            # noise on the wire so the controller sees it exactly as it will
+            # on hardware.
+            float((sensor_noise or {}).get("joint_pos", 0.0)),
+            float((sensor_noise or {}).get("joint_vel", 0.0)),
+            float((sensor_noise or {}).get("base_ang_vel", 0.0)),
+            float((sensor_noise or {}).get("imu_tilt_rad", 0.0)),
+            int(noise_seed),
+            int(state_log_capacity),
+            int(dds_domain),
+            bool(freeze_until_command),
         )
 
     def _to_sdk(self, values) -> np.ndarray:
@@ -583,6 +648,21 @@ class NativeDdsPlant:
             raise ValueError("initial pose must have 36 values")
         converted = np.concatenate([values[:7], self._to_sdk(values[7:])])
         self._plant.set_initial_pose(converted)
+
+    def state_log(self) -> np.ndarray:
+        """True simulator state, rows x [pos 3 | quat XYZW 4 | joints 29].
+
+        The hardware wire protocol carries no root pose, so scoring MPJPE on
+        this tier has to read the plant's own state, not the controller's.
+        Joints come back in Isaac order to match the reference arrays.
+        """
+        rows = np.asarray(self._plant.state_log(), dtype=np.float32)
+        if rows.size == 0:
+            return rows.reshape(0, 36)
+        isaac = np.empty_like(rows)
+        isaac[:, :7] = rows[:, :7]
+        isaac[:, 7:] = rows[:, 7:][:, self._isaac_to_sdk]
+        return isaac
 
     def reset(self) -> None:
         self._plant.reset()
