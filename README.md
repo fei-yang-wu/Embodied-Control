@@ -175,6 +175,14 @@ EC_UNITREE_SDK_ROOT=/absolute/path/to/unitree_sdk2 \
   pixi run -e native build-native
 ```
 
+Before running hardware control, verify the live G1 link with the dedicated read-only probe:
+
+```bash
+pixi run -e native ec lowlevel check-unitree --network enp128s31f6
+```
+
+The probe only subscribes to `rt/lowstate`; it never constructs a `rt/lowcmd` publisher. It checks sample rate, maximum receive gap, CRCs, finite joint/IMU values, and motor error states. Use `--json` or `--report /path/report.json` for machine-readable output.
+
 `ec lowlevel unitree` keeps DDS writes off by default. Enabling them needs
 both `--enable-writes` and `--confirm ENABLE_G1_LOWLEVEL`. This build must
 still pass target-host jitter tests and supervised DAMP drills before a

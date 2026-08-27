@@ -34,4 +34,5 @@ __all__ = [
 if WITH_UNITREE:
     MujocoDdsPlant = _ec_native.MujocoDdsPlant
     NativeUnitreeRuntime = _ec_native.NativeUnitreeRuntime
-    __all__.extend(["MujocoDdsPlant", "NativeUnitreeRuntime"])
+    UnitreeStateProbe = _ec_native.UnitreeStateProbe
+    __all__.extend(["MujocoDdsPlant", "NativeUnitreeRuntime", "UnitreeStateProbe"])

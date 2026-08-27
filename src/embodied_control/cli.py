@@ -526,6 +526,37 @@ def _cmd_lowlevel_oracle_worker(args) -> int:
     return 0 if worker.last_error is None else 1
 
 
+def _cmd_lowlevel_check_unitree(args) -> int:
+    from embodied_control.lowlevel.unitree_probe import run_probe, write_report
+
+    try:
+        report = run_probe(
+            args.network,
+            samples=args.samples,
+            timeout=args.timeout,
+            min_rate_hz=args.min_rate,
+            max_gap_ms=args.max_gap_ms,
+            dds_domain=args.dds_domain,
+        )
+    except (RuntimeError, ValueError) as exc:
+        print(f"FAIL: {exc}")
+        return 2
+    if args.report:
+        write_report(report, args.report)
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        print(f"{report['status'].upper()}: Unitree G1 rt/lowstate")
+        print(f"network: {report['network']}")
+        print(f"samples: {report['samples']}")
+        print(f"rate: {report['rate_hz']:.1f} Hz")
+        print(f"max gap: {report['max_gap_ms']:.2f} ms")
+        print(f"CRC errors: {report['crc_errors']}")
+        print(f"motor error joints: {report['motor_error_joints']}")
+        print("writes: disabled")
+    return 0 if report["status"] == "pass" else 1
+
+
 def _cmd_lowlevel_unitree(args) -> int:
     from embodied_control.lowlevel.bundle import PolicyBundle
     from embodied_control.lowlevel.native_core import NativeUnitreeLoop
@@ -833,6 +864,18 @@ def build_parser() -> argparse.ArgumentParser:
     lcert.add_argument("report")
     lcert.add_argument("--output", default="")
     lcert.set_defaults(func=_cmd_lowlevel_certify_report)
+    lcheck = lows.add_parser(
+        "check-unitree", help="read-only health check for a live G1 DDS link"
+    )
+    lcheck.add_argument("--network", required=True)
+    lcheck.add_argument("--samples", type=int, default=500)
+    lcheck.add_argument("--timeout", type=float, default=5.0)
+    lcheck.add_argument("--min-rate", type=float, default=100.0)
+    lcheck.add_argument("--max-gap-ms", type=float, default=100.0)
+    lcheck.add_argument("--dds-domain", type=int, default=0)
+    lcheck.add_argument("--report", default="")
+    lcheck.add_argument("--json", action="store_true")
+    lcheck.set_defaults(func=_cmd_lowlevel_check_unitree)
     lunitree = lows.add_parser(
         "unitree", help="run the native G1 DDS tracker (writes off by default)"
     )

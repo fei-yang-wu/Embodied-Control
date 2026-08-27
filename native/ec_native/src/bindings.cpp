@@ -21,6 +21,7 @@
 #ifdef EC_WITH_UNITREE
 #include "mujoco_dds_plant.hpp"
 #include "unitree_backend.hpp"
+#include "unitree_state_probe.hpp"
 #endif
 
 #define STRINGIFY(x) #x
@@ -1113,6 +1114,41 @@ PYBIND11_MODULE(_ec_native, m) {
            py::keep_alive<1, 2>());
 
 #ifdef EC_WITH_UNITREE
+  py::class_<ec_native::UnitreeStateProbe>(m, "UnitreeStateProbe")
+      .def(py::init<const std::string&, int>(), py::arg("network_interface"),
+           py::arg("dds_domain") = 0)
+      .def("wait_for_samples",
+           [](const ec_native::UnitreeStateProbe& probe, std::uint64_t count,
+              double timeout) {
+             py::gil_scoped_release release;
+             return probe.wait_for_samples(count, timeout);
+           },
+           py::arg("count"), py::arg("timeout_seconds"))
+      .def("snapshot", [](const ec_native::UnitreeStateProbe& probe) {
+        const auto s = probe.snapshot();
+        py::dict out;
+        out["samples"] = s.samples;
+        out["crc_errors"] = s.crc_errors;
+        out["nonfinite_samples"] = s.nonfinite_samples;
+        out["motor_error_samples"] = s.motor_error_samples;
+        out["duplicate_ticks"] = s.duplicate_ticks;
+        out["first_receive_ns"] = s.first_receive_ns;
+        out["last_receive_ns"] = s.last_receive_ns;
+        out["max_gap_ns"] = s.max_gap_ns;
+        out["first_tick"] = s.first_tick;
+        out["last_tick"] = s.last_tick;
+        out["motor_error_mask"] = s.motor_error_mask;
+        out["mode_machine"] = s.mode_machine;
+        out["snapshot_consistent"] = s.snapshot_consistent;
+        out["joint_position"] = s.joint_position;
+        out["joint_velocity"] = s.joint_velocity;
+        out["joint_torque"] = s.joint_torque;
+        out["quaternion"] = s.quaternion;
+        out["gyroscope"] = s.gyroscope;
+        out["accelerometer"] = s.accelerometer;
+        return out;
+      });
+
   py::class_<NativeUnitreeRuntimeBinding, NativeFakeRuntimeBinding>(
       m, "NativeUnitreeRuntime")
       .def(py::init<
