@@ -119,6 +119,8 @@ oracle worker and select the source explicitly. This mode streams a 5 Hz
 expert `root_qpos` window into the same native encoder as the VLA path. It is
 not the paper protocol's direct 50 Hz oracle ceiling.
 
+This clip is 467 frames; keep `--ticks` at or below that or the tracker damps (default 500).
+
 ```bash
 # Terminal 1: preload and hash-check one reference motion.
 pixi run -e native ec lowlevel oracle-worker /absolute/path/to/bundle \
