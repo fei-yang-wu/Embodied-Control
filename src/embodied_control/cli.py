@@ -526,6 +526,42 @@ def _cmd_lowlevel_oracle_worker(args) -> int:
     return 0 if worker.last_error is None else 1
 
 
+def _cmd_lowlevel_compare_unitree_pose(args) -> int:
+    from embodied_control.lowlevel.unitree_pose import compare_live_pose
+
+    try:
+        report = compare_live_pose(
+            args.bundle,
+            args.model,
+            args.network,
+            args.output,
+            samples=args.samples,
+            timeout=args.timeout,
+            root_height=args.root_height,
+            dds_domain=args.dds_domain,
+        )
+    except (FileNotFoundError, RuntimeError, ValueError) as exc:
+        print(f"FAIL: {exc}")
+        return 2
+    print(f"{report['status'].upper()}: G1 joint mapping to MuJoCo")
+    print(f"image: {report['pose']['image']}")
+    print(f"report: {report['report']}")
+    print(
+        "roundtrip max error: "
+        f"{report['pose']['roundtrip_max_error']:.3g}"
+    )
+    print(
+        "MuJoCo readback max error: "
+        f"{report['pose']['mujoco_readback_max_error']:.3g}"
+    )
+    print(
+        "mapping name mismatches: "
+        f"{len(report['pose']['mapping_name_mismatches'])}"
+    )
+    print("writes: disabled")
+    return 0 if report["status"] == "pass" else 1
+
+
 def _cmd_lowlevel_check_unitree(args) -> int:
     from embodied_control.lowlevel.unitree_probe import run_probe, write_report
 
@@ -864,6 +900,19 @@ def build_parser() -> argparse.ArgumentParser:
     lcert.add_argument("report")
     lcert.add_argument("--output", default="")
     lcert.set_defaults(func=_cmd_lowlevel_certify_report)
+    lcompare = lows.add_parser(
+        "compare-unitree-pose",
+        help="render a live read-only G1 joint snapshot in MuJoCo",
+    )
+    lcompare.add_argument("bundle")
+    lcompare.add_argument("--model", required=True)
+    lcompare.add_argument("--network", required=True)
+    lcompare.add_argument("--output", required=True)
+    lcompare.add_argument("--samples", type=int, default=500)
+    lcompare.add_argument("--timeout", type=float, default=5.0)
+    lcompare.add_argument("--root-height", type=float, default=0.76)
+    lcompare.add_argument("--dds-domain", type=int, default=0)
+    lcompare.set_defaults(func=_cmd_lowlevel_compare_unitree_pose)
     lcheck = lows.add_parser(
         "check-unitree", help="read-only health check for a live G1 DDS link"
     )

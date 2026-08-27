@@ -183,6 +183,16 @@ pixi run -e native ec lowlevel check-unitree --network enp128s31f6
 
 The probe only subscribes to `rt/lowstate`; it never constructs a `rt/lowcmd` publisher. It checks sample rate, maximum receive gap, CRCs, finite joint/IMU values, and motor error states. Use `--json` or `--report /path/report.json` for machine-readable output.
 
+Render the same live joint snapshot in the bundle's MuJoCo model to verify the SDK-to-Isaac mapping:
+
+```bash
+pixi run -e native ec lowlevel compare-unitree-pose /path/to/bundle \
+  --model /path/to/g1.xml --network enp128s31f6 \
+  --output /path/to/g1_pose_check
+```
+
+This remains read-only on the robot. It writes `mujoco_pose.png` and `report.json`; the report checks joint-name correspondence, SDK/Isaac round-trip mapping, and MuJoCo qpos readback. The root height is fixed for visualization because `rt/lowstate` has no world position.
+
 `ec lowlevel unitree` keeps DDS writes off by default. Enabling them needs
 both `--enable-writes` and `--confirm ENABLE_G1_LOWLEVEL`. This build must
 still pass target-host jitter tests and supervised DAMP drills before a
