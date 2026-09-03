@@ -103,9 +103,13 @@ NEXT_ACTION = {
     "PRIMED": "/go",
     "BLEND_IN": "wait",
     "RUNNING": "/hold",
-    "HOLD": "/hoisted, then /stand",
-    "DAMP": "/hoisted, then /stand",
-    "FAULT": "/hoisted, then /stand",
+    "HOLD": "/hoisted, then /damp",
+    "DAMP": "/hoisted, then /damp",
+    "FAULT": "/hoisted, then /damp",
+    "RELEASED": "/next for the next episode",
+    "VENDOR_RESTORED": "/next for the next episode",
+    "VENDOR_STAND": "/lowered",
+    "STANDING": "/next for the next episode",
 }
 
 DISPLAY_LABELS = {
@@ -295,18 +299,57 @@ def flatten(row: Row) -> str:
     return "".join(span.text for span in row)
 
 
-def _visual_log_lines(notes: Iterable[str], width: int) -> list[str]:
-    visual: list[str] = []
+class _Note(str):
+    """A log line that remembers its level; still a string everywhere else."""
+
+    level = "info"
+
+
+# A console log where every line looks the same is a log an operator scans
+# instead of reads. Each note carries a level, and the level picks the style.
+LOG_STYLES = {
+    "fail": "bad",
+    "damp": "warn",
+    "gate": "ok",
+    "info": "dim",
+}
+
+
+def classify_note(message: str) -> str:
+    """The level a lifecycle note belongs to, from the text it already has.
+
+    The lifecycle writes its own transition lines, so this reads them rather
+    than asking every call site to label what it prints.
+    """
+    text = str(message)
+    lowered = text.lower()
+    if text.lstrip().startswith("!!") or "fault" in lowered or "failed" in lowered:
+        return "fail"
+    if "refus" in lowered or "timed out" in lowered or "ignored" in lowered:
+        return "fail"
+    if "damp" in lowered:
+        return "damp"
+    if "-> " in text and ": ok" in text:
+        return "gate"
+    return "info"
+
+
+def _visual_log_lines(
+    notes: Iterable[str], width: int
+) -> list[tuple[str, str]]:
+    """Terminal-safe wrapped lines, each with the level of the note it came from."""
+    visual: list[tuple[str, str]] = []
     content_width = max(1, width - 1)
     # Bound work per 10 Hz redraw even when one dependency emits a traceback
     # as one giant message. Newest visual rows are the only rows displayable.
     for note in list(notes)[-64:]:
+        level = getattr(note, "level", None) or classify_note(note)
         clean = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", str(note)[-4096:])
         physical = clean.replace("\r\n", "\n").replace("\r", "\n").split("\n")
         for line in physical:
             line = line.expandtabs(4)
             line = re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", " ", line)
-            visual.extend(
+            wrapped = (
                 textwrap.wrap(
                     line,
                     width=content_width,
@@ -315,11 +358,15 @@ def _visual_log_lines(notes: Iterable[str], width: int) -> list[str]:
                 )
                 or [""]
             )
+            visual.extend((text, level) for text in wrapped)
     return visual[-256:]
 
 
 def _log_rows(
-    notes: Iterable[str], width: int, height: int, visual: list[str] | None = None
+    notes: Iterable[str],
+    width: int,
+    height: int,
+    visual: list[tuple[str, str]] | None = None,
 ) -> list[Row]:
     """Newest terminal-safe visual log lines within an exact row budget."""
     if height <= 0:
@@ -329,7 +376,8 @@ def _log_rows(
         return [_rule("LOG", width)]
     visible = visual[-(height - 1) :]
     return [_rule("LOG", width)] + [
-        pad([Span(f" {line}", "dim")], width) for line in visible
+        pad([Span(f" {line}", LOG_STYLES.get(level, "dim"))], width)
+        for line, level in visible
     ]
 
 
@@ -1143,8 +1191,11 @@ class LifecycleTui:
 
     # -- model ---------------------------------------------------------
 
-    def note(self, message: str) -> None:
-        self.notes.append(f"{self._clock() - self._t0:7.1f}s  {message}")
+    def note(self, message: str, level: str | None = None) -> None:
+        """One log line. `level` overrides what the text itself implies."""
+        note = _Note(f"{self._clock() - self._t0:7.1f}s  {message}")
+        note.level = level or classify_note(message)
+        self.notes.append(note)
 
     def command_names(self) -> list[str]:
         keys = set(self.bindings)
@@ -1162,7 +1213,7 @@ class LifecycleTui:
             self._line = None
             self._help_open = False
             self.lifecycle.emergency_damp()
-            self.note("^D: damp stored in the writer")
+            self.note("^D: damp stored in the writer", "damp")
             self._queue.put(self.bindings[KEY_DAMP])
             return True
         if self._line is not None:
@@ -1283,7 +1334,7 @@ class LifecycleTui:
             except ConsoleQuit:
                 pass
             except Exception as exc:  # the console outlives any one refusal
-                self.note(f"!! {type(exc).__name__}: {exc}")
+                self.note(f"!! {type(exc).__name__}: {exc}", "fail")
             finally:
                 self._busy = ""
 

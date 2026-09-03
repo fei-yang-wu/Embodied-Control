@@ -16,6 +16,10 @@ platforms = ["linux-64", "osx-arm64"]
 [tasks]
 doctor = "ec doctor"
 test = "pytest -q"
+# The operator manual is generated from the console's own bindings; a key
+# that moves without it is a manual that lies while a robot hangs on a hoist.
+build-manual = "python scripts/build_operator_manual.py"
+check-manual = "python scripts/build_operator_manual.py --check"
 # Run the blank policy service standalone (manual / debugging):
 policy-serve = "ec policy serve --type zero --action-dim 2 --host 127.0.0.1 --port 8756"
 policy-ping = "ec policy ping --endpoint 127.0.0.1:8756"

@@ -93,6 +93,13 @@ class LifecycleJob(JobModel):
     damp_hands_back: bool = True
     # A retake re-reads the link before driving the robot a second time.
     retake_precheck: bool = True
+    # Hardware runs what the plant already ran: PRECHECK refuses a non-loopback
+    # interface until a passing rehearsal of the same bundle and motion exists.
+    require_rehearsal: bool = True
+    # Where to look for it. Empty means the parent of `artifacts_dir`, which is
+    # where a sim job of the same campaign writes its own run.
+    rehearsal_root: str = ""
+    rehearsal_max_age_days: float = Field(default=14.0, gt=0.0)
     # Empty reads the active service from CheckMode at PRECHECK.
     vendor_name: str = ""
     require_vendor: bool = True
@@ -142,7 +149,7 @@ def load_lifecycle_job(path: str | Path) -> LifecycleJob:
         raise ValueError(f"{source} is not a mapping")
     job = LifecycleJob.model_validate(raw)
     base = source.resolve().parent
-    for name in ("bundle", "reference_root", "artifacts_dir", "mjcf"):
+    for name in ("bundle", "reference_root", "artifacts_dir", "mjcf", "rehearsal_root"):
         value = getattr(job, name)
         if value and not Path(value).is_absolute():
             setattr(job, name, str((base / value).resolve()))

@@ -37,6 +37,12 @@ blend_ticks: 250
 # An episode rests limp under the vendor and the next one climbs PRECHECK
 # again. `s` in the console still recovers to a vendor stand.
 end_state: vendor_damp
+# Hardware runs what the plant already ran: PRECHECK refuses until a passing
+# rehearsal of this bundle and motion exists under `rehearsal_root`, which
+# defaults to the parent of `artifacts_dir`.
+require_rehearsal: true
+rehearsal_root: ../artifacts
+rehearsal_max_age_days: 14.0
 # Real vendor sport service, not the plant's — read at PRECHECK from
 # CheckMode rather than assumed.
 vendor_name: ""

@@ -598,3 +598,76 @@ def test_recover_is_refused_before_the_robot_was_ever_taken():
     lifecycle, tracker, vendor, hoist, clock = _lifecycle(end_state="vendor_damp")
     assert not lifecycle.recover().ok
     assert lifecycle.state is S.IDLE
+
+
+def _hardware(tmp_path, **config):
+    """A lifecycle whose identity says it is on the robot, not the plant."""
+    from embodied_control.robot.rehearsal import run_identity
+
+    identity = run_identity(
+        bundle_sha="f" * 64,
+        bundle_name="sonic_v1_1",
+        motion="hurry_idle_001_A277",
+        command_source="oracle",
+        network="enp128s31f6",
+    )
+    clock = FakeClock()
+    tracker = StubTracker(clock)
+    vendor = FakeRobotRuntime(writes_enabled=True, mode=RobotMode.READY)
+    cfg = LifecycleConfig(
+        start_pose=list(POSE), ticks=100, blend_ticks=50,
+        rehearsal_root=str(tmp_path), **config,
+    )
+    lifecycle = Lifecycle(
+        tracker, vendor, cfg, hoist=FakeHoist(), auto_ack=True,
+        identity=identity, log=LifecycleLog(None),
+        now=clock.now, sleep=clock.sleep,
+    )
+    return lifecycle, identity
+
+
+def _record_rehearsal(directory, identity, **overrides):
+    import time as _time
+
+    payload = {
+        "state": "VENDOR_RESTORED",
+        "failed_transitions": 0,
+        "rehearsal": {**identity, "network": "lo"},
+        "finished_at": _time.time(),
+    }
+    payload.update(overrides)
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "lifecycle.json").write_text(json.dumps(payload))
+
+
+def test_hardware_precheck_needs_a_plant_rehearsal_first(tmp_path):
+    lifecycle, _ = _hardware(tmp_path)
+
+    result = lifecycle.advance()
+
+    assert not result.ok and "rehearsal" in result.detail
+    assert lifecycle.state is S.IDLE
+
+
+def test_hardware_precheck_passes_once_the_plant_ran_the_same_bundle(tmp_path):
+    lifecycle, identity = _hardware(tmp_path)
+    _record_rehearsal(tmp_path / "sim", identity)
+
+    result = lifecycle.advance()
+
+    assert result.ok, result.detail
+    assert lifecycle.state is S.PRECHECK
+    assert "rehearsed on the plant" in result.detail
+
+
+def test_the_rehearsal_gate_can_be_turned_off_deliberately(tmp_path):
+    lifecycle, _ = _hardware(tmp_path, require_rehearsal=False)
+
+    assert lifecycle.advance().ok
+
+
+def test_a_plant_run_does_not_gate_on_its_own_rehearsal():
+    # The default fixture's identity is empty, and a loopback run is the
+    # rehearsal: neither has anything to check.
+    lifecycle, tracker, vendor, hoist, clock = _lifecycle()
+    assert lifecycle.advance().ok

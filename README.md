@@ -300,6 +300,18 @@ writes `pose_match.json`. Against the robot the job changes `network`,
 `dds_domain: 0`, `sim_hoist: false`, and the write gate is
 `--confirm ENABLE_G1_LOWLEVEL` without `--allow-non-realtime`.
 
+**Rehearse before hardware.** With a non-loopback interface, `PRECHECK`
+refuses to pass until a run of the same bundle and motion has reached the end
+of the ladder against the plant, cleanly, within `rehearsal_max_age_days`. It
+reads the `lifecycle.json` those runs already write under `rehearsal_root`.
+Set `require_rehearsal: false` to run without one, deliberately and in the
+job rather than from the console.
+
+[docs/operator_manual.md](docs/operator_manual.md) is the page to have open in
+front of the robot: the ladder, every key, and what to do when a gate fails.
+It is generated from the console's own bindings (`pixi run build-manual`), and
+a test fails when the file drifts from them.
+
 The full-screen console also has a slash-command palette. Press `/` or `?` to
 open it; every operator key has a named equivalent such as `/next`, `/auto`,
 `/go`, `/hold`, `/stand`, and `/damp`. Slash commands take no arguments.

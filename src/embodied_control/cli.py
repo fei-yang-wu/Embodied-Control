@@ -1089,6 +1089,30 @@ def _tracker_for(job, args, bundle, selection):
     return runtime, start_pose, reference_gravity, ticks
 
 
+def _rehearsal_root(job) -> str:
+    """Where to look for a plant rehearsal of this job."""
+    if job.rehearsal_root:
+        return job.rehearsal_root
+    # A sim job and its hardware twin write beside each other, so the parent
+    # of this run's artifacts is where the rehearsal lands.
+    return str(Path(job.artifacts_dir).parent) if job.artifacts_dir else ""
+
+
+def _run_identity(job, bundle, network: str) -> dict:
+    from embodied_control.robot.rehearsal import run_identity
+
+    source = bundle.manifest.source or {}
+    return run_identity(
+        bundle_sha=str(source.get("checkpoint_sha256", "")),
+        bundle_name=Path(job.bundle).name,
+        motion=job.motion,
+        command_source=job.command_source,
+        network=network,
+        start_frame=job.start_frame,
+        ticks=job.ticks,
+    )
+
+
 def _lifecycle_config(job, args, bundle, start_pose, reference_gravity, ticks=None):
     from embodied_control.robot.lifecycle import LifecycleConfig
 
@@ -1102,6 +1126,9 @@ def _lifecycle_config(job, args, bundle, start_pose, reference_gravity, ticks=No
         end_state=job.end_state,
         damp_hands_back=job.damp_hands_back,
         retake_precheck=job.retake_precheck,
+        require_rehearsal=job.require_rehearsal,
+        rehearsal_root=_rehearsal_root(job),
+        rehearsal_max_age_days=job.rehearsal_max_age_days,
         vendor_name=job.vendor_name,
         require_vendor=job.require_vendor,
         allow_non_realtime=args.allow_non_realtime,
@@ -1194,6 +1221,7 @@ def _build_lifecycle(args):
         config,
         hoist=hoist,
         auto_ack=bool(job.sim_hoist or args.auto_ack),
+        identity=_run_identity(job, bundle, args.network or job.network),
         log=LifecycleLog(artifacts),
         note=lambda msg: print(f"  -- {msg}", flush=True),
     )
@@ -1325,6 +1353,11 @@ def _build_session(args):
         bundle = bundle_for(selection)
         runtime, start_pose, reference_gravity, ticks = _tracker_for(job, args, bundle, selection)
         pending["config"] = _lifecycle_config(job, args, bundle, start_pose, reference_gravity, ticks)
+        # The console can switch bundle and motion between episodes, so the
+        # identity is rebuilt with the tracker rather than read once.
+        pending["identity"] = _run_identity(
+            job, bundle, args.network or job.network
+        ) | {"motion": selection.motion or job.motion}
         return runtime
 
     def lifecycle_factory(tracker, selection, session):
@@ -1334,6 +1367,7 @@ def _build_session(args):
             pending["config"],
             hoist=hoist,
             auto_ack=bool(job.sim_hoist or args.auto_ack),
+            identity=pending.get("identity", {}),
             log=log,
             note=note,
         )

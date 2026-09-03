@@ -243,6 +243,12 @@ class LifecycleConfig:
     # vendor's own damp, so the next one has to climb PRECHECK again; a
     # vendor stand is the explicit `s` request, never the default.
     end_state: str = "vendor_damp"
+    # Hardware runs what the plant already ran. PRECHECK refuses an interface
+    # that is not loopback until a passing rehearsal of the same bundle and
+    # motion exists under `rehearsal_root`.
+    require_rehearsal: bool = True
+    rehearsal_root: str = ""
+    rehearsal_max_age_days: float = 14.0
     # `damp` hands the joints back to the vendor after our kd-only frames
     # land, so DAMP is never a resting state with our writer still owning
     # rt/lowcmd. The kd frames are unconditional; only the hand-back waits
@@ -344,6 +350,7 @@ class Lifecycle:
         *,
         hoist: Hoist | None = None,
         auto_ack: bool = False,
+        identity: dict | None = None,
         log: LifecycleLog | None = None,
         now: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
@@ -356,6 +363,9 @@ class Lifecycle:
         self.config = config
         self.hoist = hoist
         self.auto_ack = bool(auto_ack)
+        # What this run is: bundle, motion, command source, interface. The
+        # rehearsal gate matches a hardware run against a plant run by it.
+        self.identity = dict(identity or {})
         self.log = log if log is not None else LifecycleLog(None)
         self._now = now
         self._sleep = sleep
@@ -644,6 +654,10 @@ class Lifecycle:
             "failed_transitions": sum(
                 1 for t in self.log.transitions if not t.ok
             ),
+            # What this run was, so a later hardware run can ask whether the
+            # plant already ran the same thing (robot/rehearsal.py).
+            "rehearsal": dict(self.identity),
+            "finished_at": time.time(),
         }
 
     def status(self) -> str:
@@ -886,10 +900,40 @@ class Lifecycle:
             values["vendor_mode"] = str(mode)
             if mode is RobotMode.UNKNOWN:
                 return GateResult(False, "sport service unreachable", values)
+        rehearsal = self._rehearsal_evidence()
+        if rehearsal is not None:
+            values.update(rehearsal.values)
+            if not rehearsal.ok:
+                return GateResult(False, rehearsal.detail, values)
         if not self._hoist_ready():
             return GateResult(False, "confirm the robot is hoisted (press H)", values)
         values["hoisted_ack"] = True
-        return GateResult(True, "link, vendor and hoist confirmed", values)
+        detail = "link, vendor and hoist confirmed"
+        if rehearsal is not None:
+            detail += f"; {rehearsal.detail}"
+        return GateResult(True, detail, values)
+
+    def _rehearsal_evidence(self) -> GateResult | None:
+        """The rehearsal gate, or None when it does not apply to this run."""
+        from embodied_control.robot.rehearsal import is_simulated, rehearsal_evidence
+
+        if not self.config.require_rehearsal or not self.identity:
+            return None
+        if is_simulated(self.identity):
+            return None
+        root = self.config.rehearsal_root
+        if not root:
+            return GateResult(
+                False,
+                "a hardware run needs a rehearsal root to check; set "
+                "rehearsal_root in the job or require_rehearsal: false",
+            )
+        return rehearsal_evidence(
+            root,
+            self.identity,
+            max_age_days=self.config.rehearsal_max_age_days,
+            now=time.time(),
+        )
 
     def _enter_vendor_damp_confirmed(self) -> GateResult:
         if self.vendor is None:
