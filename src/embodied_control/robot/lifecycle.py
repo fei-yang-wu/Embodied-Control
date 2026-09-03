@@ -130,6 +130,19 @@ WRITER_MODE_NAMES = {
     WRITER_HOLD: "hold",
 }
 
+# RuntimeFault, mirrored from native_fake_runtime.hpp. The writer's own
+# counters do not carry it, and "the writer damped" without the reason is
+# the one piece of evidence an operator cannot recover after the fact.
+RUNTIME_FAULT_NAMES = {
+    0: "none",
+    1: "command absent",
+    2: "command stale",
+    3: "command contract",
+    4: "tracker",
+    5: "real-time setup",
+    6: "state absent",
+}
+
 
 class LifecycleError(RuntimeError):
     """A request that is illegal in the current state."""
@@ -701,6 +714,12 @@ class Lifecycle:
         return result
 
     def _fault(self, reason: str) -> None:
+        # Read the runtime's own fault code before force_damp() overwrites
+        # the mode: "the writer damped" is a symptom, not a cause.
+        values = self._writer_snapshot()
+        name = str(values.get("runtime_fault_name", ""))
+        if name and name != "none":
+            reason = f"{reason} ({name})"
         self.fault_reason = reason
         self.tracker.force_damp()
         try:
@@ -716,7 +735,7 @@ class Lifecycle:
                 to_state=str(LifecycleState.FAULT),
                 ok=True,
                 detail=reason,
-                values=self._writer_snapshot(),
+                values=values,
             )
         )
         self._note(f"FAULT: {reason}")
@@ -735,7 +754,18 @@ class Lifecycle:
             # says which way the robot was facing when it started.
             "anchor_yaw_offset_degrees", "anchor_heading_captured",
         )
-        return {k: ws[k] for k in keys if k in ws}
+        values = {k: ws[k] for k in keys if k in ws}
+        try:
+            st = self.tracker.stats()
+        except Exception:
+            return values
+        fault = int(st.get("fault", 0))
+        values["runtime_fault"] = fault
+        values["runtime_fault_name"] = RUNTIME_FAULT_NAMES.get(fault, str(fault))
+        for key in ("control_ticks", "stale_responses", "response_overruns"):
+            if key in st:
+                values[key] = st[key]
+        return values
 
     def _wait_until(
         self, predicate: Callable[[], bool], timeout: float, what: str

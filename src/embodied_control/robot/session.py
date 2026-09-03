@@ -119,14 +119,16 @@ def oracle_worker_argv(
     request_slot: str,
     response_slot: str,
     *,
-    horizon: int = 30,
+    # 0 lets the worker read the bundle's own encoder window, which is the
+    # only value that is right for every frame stride.
+    horizon: int | None = None,
     report: str = "",
 ) -> list[str]:
     argv = [
         sys.executable, "-m", "embodied_control.cli", "lowlevel", "oracle-worker",
         bundle, "--reference-root", reference_root, "--motion", motion,
         "--start-frame", str(start_frame), "--request-slot", request_slot,
-        "--response-slot", response_slot, "--horizon", str(horizon),
+        "--response-slot", response_slot, "--horizon", str(horizon or 0),
         "--create-slots",
     ]
     if report:

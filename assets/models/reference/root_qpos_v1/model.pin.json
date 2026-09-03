@@ -1,0 +1,47 @@
+{
+  "api_version": "ec.model_pin/v1",
+  "files": {
+    "anchor_pos_w.memmap": {
+      "sha256": "799befda194eb128f992ba1a06a5a981828c1cc96ea8b801f08c473b5e51e9aa",
+      "size": 173076
+    },
+    "anchor_quat_w.memmap": {
+      "sha256": "6b56f34a5b5ccefacb6f78c3a3b915b78a11e5898c3e8cb4603137b60d96284f",
+      "size": 230768
+    },
+    "body_ang_vel_w.memmap": {
+      "sha256": "c91b41790b92df184b7adf9a8cb155a029795f27880b637d1845efd7ff96b701",
+      "size": 2423064
+    },
+    "body_lin_vel_w.memmap": {
+      "sha256": "5dc633f4ebd17acc6ba6b8b74fc6e1ece5f9755ee9a0b38f1c3e2b3c8e83f689",
+      "size": 2423064
+    },
+    "body_pos_w.memmap": {
+      "sha256": "e59f0fa1ccb3c60f7815cf9043ebd7286f7597b9c09dc2f52a621d4b8d8c95cb",
+      "size": 2423064
+    },
+    "body_quat_w.memmap": {
+      "sha256": "d5143a30dd93b010519000b0e60381e4f18ccecc1e29b3456d0fea1d1f334e54",
+      "size": 3230752
+    },
+    "qpos.memmap": {
+      "sha256": "dd759cc90c6331afecc65d7db5a3fe7b1659f59e7bb3a313f955b1f61774cada",
+      "size": 2076912
+    },
+    "qvel.memmap": {
+      "sha256": "7318d57b8d6dd96405936630da83619493dbc0ee945e73d5efa0b5c6b07a870c",
+      "size": 2019220
+    },
+    "reference_arrays_manifest.json": {
+      "sha256": "d14ca892beda9b1a27f724d3e3f42df8f4702ce4ef1685655f90b7a834a939c4",
+      "size": 5469
+    }
+  },
+  "kind": "reference",
+  "name": "root_qpos_v1",
+  "path": "reference/root_qpos_v1",
+  "repo": "GeorgiaTech/ec-latent-playkit",
+  "repo_type": "dataset",
+  "revision": "e947fd4c6fc87dcfd76a3c6d433ca46c48d3320f"
+}

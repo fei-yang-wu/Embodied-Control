@@ -622,7 +622,10 @@ def _cmd_lowlevel_oracle_worker(args) -> int:
         args.reference_root,
         args.motion,
         start_frame=args.start_frame,
-        horizon=args.horizon,
+        # 0 means the bundle's own minimum: the encoder window is
+        # (window_steps + 1 - 1) * frame_stride + hold_steps frames, and
+        # SONIC v1.1's stride of 5 needs far more than a root_qpos bundle.
+        horizon=args.horizon or None,
         create_slots=args.create_slots,
     )
     interrupted = False
@@ -1303,7 +1306,7 @@ def _build_session(args):
             argv = oracle_worker_argv(
                 str(selected_bundle.root), job.reference_root, selection.motion, selection.start_frame,
                 job.request_slot, job.response_slot,
-                horizon=job.planner.oracle_horizon, report=report,
+                horizon=job.planner.oracle_horizon or None, report=report,
             )
         else:
             if not job.planner.vla_service_command:
@@ -1738,7 +1741,12 @@ def build_parser() -> argparse.ArgumentParser:
     lnoracle.add_argument("--reference-root", required=True)
     lnoracle.add_argument("--motion", required=True)
     lnoracle.add_argument("--start-frame", type=int, default=0)
-    lnoracle.add_argument("--horizon", type=int, default=30)
+    lnoracle.add_argument(
+        "--horizon",
+        type=int,
+        default=0,
+        help="reference frames per reply; 0 uses the bundle's encoder window",
+    )
     lnoracle.add_argument("--create-slots", action="store_true")
     lnoracle.add_argument("--report", default="")
     lnoracle.set_defaults(func=_cmd_lowlevel_oracle_worker)
@@ -1932,7 +1940,9 @@ def build_parser() -> argparse.ArgumentParser:
     mpin.add_argument("directory")
     mpin.add_argument("--repo", required=True, help="Hugging Face repo id")
     mpin.add_argument("--path", default="", help="subdirectory inside the repo")
-    mpin.add_argument("--kind", choices=("controller", "planner"), default="controller")
+    mpin.add_argument(
+        "--kind", choices=("controller", "planner", "reference"), default="controller"
+    )
     mpin.add_argument("--repo-type", choices=("model", "dataset"), default="model")
     mpin.add_argument(
         "--revision", default="", help="commit sha; default is the repo head"
@@ -1946,7 +1956,7 @@ def build_parser() -> argparse.ArgumentParser:
     mfetch.add_argument("--repo", required=True, help="Hugging Face repo id")
     mfetch.add_argument("--path", default="", help="subdirectory inside the repo")
     mfetch.add_argument(
-        "--kind", choices=("controller", "planner"), default="controller"
+        "--kind", choices=("controller", "planner", "reference"), default="controller"
     )
     mfetch.add_argument("--repo-type", choices=("model", "dataset"), default="model")
     mfetch.add_argument(
@@ -1958,7 +1968,9 @@ def build_parser() -> argparse.ArgumentParser:
     mpush.add_argument("directory")
     mpush.add_argument("--repo", required=True, help="Hugging Face repo id")
     mpush.add_argument("--path", default="", help="subdirectory inside the repo")
-    mpush.add_argument("--kind", choices=("controller", "planner"), default="controller")
+    mpush.add_argument(
+        "--kind", choices=("controller", "planner", "reference"), default="controller"
+    )
     mpush.add_argument("--repo-type", choices=("model", "dataset"), default="model")
     mpush.add_argument(
         "--public",

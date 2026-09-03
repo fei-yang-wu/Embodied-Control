@@ -146,6 +146,14 @@ bundle. NVIDIA's raw release directory is not an EC bundle, and the bundled
 `fsq64_sonic_4500m` checkpoint is a separate lab-trained policy. See
 [SONIC v1.1 compatibility](docs/design/robot_lifecycle.md#sonic-v11-compatibility).
 
+The exported SONIC v1.1 bundle is pinned at
+`assets/models/controller/sonic_v1_1`, and
+`examples/lifecycle_sim_sonic_v1_1.yaml` rehearses it against the plant. Its
+reference tree must carry `qvel`, which `assets/models/reference/root_qpos_v1`
+does. Leave `--horizon` at 0 so the oracle worker sizes each reply from the
+bundle's own encoder window: stride 5 spans 45 reference frames, far past the
+old fixed default of 30.
+
 The Unitree path can opt into `--fixed-initial-anchor` for a curated
 reference, so the robot may boot facing any direction. At each runtime start
 (including the lifecycle probe and `go`), it captures the robot's heading and

@@ -36,7 +36,9 @@ class ThresholdSpec(JobModel):
 
 
 class PlannerSpec(JobModel):
-    oracle_horizon: int = Field(default=30, ge=1)
+    # Reference frames per oracle reply. 0 means the bundle's own encoder
+    # window, which is the only value that is right for every stride.
+    oracle_horizon: int = Field(default=0, ge=0)
     # The VLA planner service (`ec lowlevel planner-worker -- <command>`).
     vla_service_command: list[str] = Field(default_factory=list)
     vla_reply: Literal["latent_plan", "chunk"] = "latent_plan"

@@ -473,6 +473,28 @@ raw poses and velocities; C++ selects the requested frames and packs the
 640-value encoder input. Synthetic native tests cover packing, stride,
 per-tick encoding, and independence from the initial IMU heading.
 
+**Rehearsed on the plant, 2026-09-03.** The exported v1.1 bundle
+(`assets/models/controller/sonic_v1_1`, encoder parity 0.0, policy parity
+3.34e-6 against the torch actor) completed the whole ladder with
+`examples/lifecycle_sim_sonic_v1_1.yaml`: 504 control ticks, no runtime or
+writer fault, pose match within 0.080 rad, IMU tilt 3.05 deg at the match and
+1.15 deg at HOLD, ending in `VENDOR_RESTORED`. The boot heading the fixed
+anchor absorbed was -88.5 deg. Two things had to change first, and both were
+contract errors rather than tuning:
+
+- **The oracle horizon was fixed at 30 frames.** The control thread encodes
+  from offset `o` out to `o + (window_frames - 1) * stride` strictly inside
+  the chunk in hand, and `o` reaches `hold_steps` on the tick a new chunk is
+  due. Stride 5 spans 45 frames, so 30 could never work and even the exact
+  sum is one frame short. The worker now sizes a reply from the bundle
+  (`--horizon 0`) and adds one hold of slack, so a late reply is a deadline
+  miss instead of a `command contract` fault mid-run.
+- **The reference tree must carry `qvel`.** The playkit copy on disk declared
+  it in its manifest and did not ship the array. It is pinned now.
+
+This is closed-loop behaviour on the plant, not numerical parity with
+NVIDIA's release weights in their own stack.
+
 This is support for a matching **exported EC bundle**, not direct loading of
 NVIDIA's release directory. The local `fsq64_sonic_4500m` bundle is a
 lab-trained checkpoint with a different reference contract. It is not the

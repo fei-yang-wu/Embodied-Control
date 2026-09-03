@@ -1,0 +1,52 @@
+# Sim rehearsal of the hoist-to-run lifecycle with the official SONIC v1.1
+# tracker, exported as an EC bundle, against the vendored MuJoCo plant.
+#
+# SONIC v1.1 reads joint positions, joint velocities and a heading-relative
+# orientation, ten frames at stride 5, encoded every control tick. The
+# reference tree must therefore carry `qvel`; `assets/models/reference/
+# root_qpos_v1` does, and the same tree serves the `root_qpos` bundles.
+#
+#   T0  pixi run -e native ec lowlevel plant examples/g1_plant.yaml \
+#         --model assets/latent_playkit/model/g1_29dof_rev_1_0.xml --network lo \
+#         --vendor --hoist --dds-domain 51 --report artifacts/lifecycle_sonic/plant.json
+#   T1  pixi run -e native ec lowlevel oracle-worker assets/models/controller/sonic_v1_1 \
+#         --reference-root assets/models/reference/root_qpos_v1 \
+#         --motion hurry_idle_001_A277 --request-slot /ec_g1_request \
+#         --response-slot /ec_g1_response --create-slots
+#   T2  pixi run -e native ec lifecycle run examples/lifecycle_sim_sonic_v1_1.yaml \
+#         --enable-writes --confirm ENABLE_G1_LOWLEVEL_NON_REALTIME \
+#         --allow-non-realtime --go --recover
+#
+# `ec lifecycle console` cycles the trackers below with `t`/`T`.
+api_version: ec.lifecycle/v1alpha1
+bundle: ../assets/models/controller/sonic_v1_1
+trackers:
+  fsq64-sonic-4500m: ../assets/models/controller/fsq64_sonic_4500m
+  fsq64-10b: ../assets/models/controller/fsq64_10b
+network: lo
+dds_domain: 51
+request_slot: /ec_g1_request
+response_slot: /ec_g1_response
+connect_slots: true
+command_source: oracle
+reference_root: ../assets/models/reference/root_qpos_v1
+motion: hurry_idle_001_A277
+start_frame: 0
+fixed_initial_anchor: true
+start_pose: motion
+ramp_seconds: 3.0
+ticks: 504
+blend_ticks: 250
+end_state: vendor_damp
+sim_hoist: true
+artifacts_dir: ../artifacts/lifecycle_sonic
+mjcf: ../assets/latent_playkit/model/g1_29dof_rev_1_0.xml
+realtime:
+  control_cpu: -1
+  writer_cpu: -1
+  control_priority: 0
+  writer_priority: 0
+  lock_memory: false
+  policy_threads: 1
+thresholds:
+  settle_timeout_seconds: 15.0

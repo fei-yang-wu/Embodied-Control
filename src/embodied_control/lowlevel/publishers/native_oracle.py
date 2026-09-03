@@ -77,12 +77,24 @@ class NativeOracleWorker:
             )
         window_frames = int((command.window_steps or 9) + 1)
         frame_stride = int(command.macro_frame_stride)
-        minimum_horizon = (
-            (window_frames - 1) * frame_stride + int(command.hold_steps)
-        )
-        horizon = minimum_horizon if horizon is None else int(horizon)
+        hold_steps = int(command.hold_steps)
+        # The control thread encodes at offset `o` frames into the chunk in
+        # hand and reads out to `o + (window_frames - 1) * stride`, strictly
+        # inside it (encode_active_reference in native_fake_runtime.cpp). The
+        # offset reaches `hold_steps` on the tick a new chunk is due, so the
+        # chunk must hold one more frame than that sum.
+        minimum_horizon = (window_frames - 1) * frame_stride + hold_steps + 1
+        # A reply that arrives late leaves the offset past the hold rather
+        # than the run faulting on a command contract, so the default carries
+        # one hold of slack. SONIC v1.1's stride of 5 spans 45 frames and had
+        # no slack at all under the old default of 30.
+        horizon = minimum_horizon + hold_steps if horizon is None else int(horizon)
         if horizon < minimum_horizon:
-            raise ValueError("oracle horizon is shorter than the encoder window")
+            raise ValueError(
+                f"oracle horizon {horizon} is shorter than the encoder window: "
+                f"{window_frames} frames at stride {frame_stride} with a "
+                f"{hold_steps}-step hold needs {minimum_horizon}"
+            )
         if start_frame < 0:
             raise ValueError("start_frame must be non-negative")
 

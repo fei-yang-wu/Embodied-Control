@@ -45,8 +45,10 @@ class ModelPin(BaseModel):
 
     api_version: Literal["ec.model_pin/v1"] = MODEL_PIN_API_VERSION
     # `controller` is a deployable policy bundle the tracker loads;
-    # `planner` is what a planner worker loads. The console lists them apart.
-    kind: Literal["controller", "planner"]
+    # `planner` is what a planner worker loads; `reference` is a
+    # reference-array tree the oracle worker streams. The console lists them
+    # apart, and each is pinned the same way.
+    kind: Literal["controller", "planner", "reference"]
     name: str
     repo: str
     repo_type: Literal["model", "dataset"] = "model"

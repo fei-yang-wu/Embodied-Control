@@ -1194,3 +1194,62 @@ def test_native_latent_plan_keeps_requesting_at_hold_one(tmp_path, latent_manife
     assert stats["planner_requests"] <= ticks // slots + 2
     assert stats["plan_slot_advances"] >= (slots - 1) * 2
     assert stats["deadline_misses"] == 0
+
+
+def test_the_oracle_horizon_covers_the_window_the_control_thread_reads(
+    tmp_path, latent_manifest
+):
+    """SONIC v1.1's stride of 5 needs a chunk the encoder can read past.
+
+    `encode_active_reference` reads from offset `o` out to
+    `o + (window_frames - 1) * stride` strictly inside the chunk, and `o`
+    reaches `hold_steps` on the tick a new chunk is due. A horizon equal to
+    that sum is one frame short and faults on a command contract mid-run.
+    """
+    command = latent_manifest.command.model_copy(
+        update={
+            "state_dim": 64,
+            "encoder_state_interface": "joint_qpos_qvel_anchor_ori",
+            "macro_anchor_mode": "robot_heading",
+            "macro_frame_stride": 5,
+            "encoder_trigger": "every_control_tick",
+        }
+    )
+    manifest = latent_manifest.model_copy(update={"command": command})
+    bundle = _native_bundle(tmp_path, manifest, with_encoder=True)
+    reference_root = tmp_path / "reference_horizon"
+    _write_reference_tree(
+        reference_root, bundle.manifest.action.isaac_joint_names, frames=200
+    )
+    window_frames = int(command.window_steps + 1)
+    stride = int(command.macro_frame_stride)
+    hold = int(command.hold_steps)
+    minimum = (window_frames - 1) * stride + hold + 1
+
+    def _worker(horizon):
+        return NativeOracleWorker(
+            _shm_name("oracle_horizon_request"),
+            _shm_name("oracle_horizon_response"),
+            bundle,
+            reference_root,
+            "motion",
+            horizon=horizon,
+            create_slots=True,
+        )
+
+    with pytest.raises(ValueError, match="shorter than the encoder window"):
+        _worker(minimum - 1)
+
+    exact = _worker(minimum)
+    try:
+        assert exact.horizon == minimum
+    finally:
+        exact.close()
+
+    # The default carries one hold of slack, so a late reply is a deadline
+    # miss rather than a fault.
+    default = _worker(None)
+    try:
+        assert default.horizon == minimum + hold
+    finally:
+        default.close()

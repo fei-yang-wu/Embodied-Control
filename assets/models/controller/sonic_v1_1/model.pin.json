@@ -1,0 +1,43 @@
+{
+  "api_version": "ec.model_pin/v1",
+  "files": {
+    "action_contract.json": {
+      "sha256": "9b608f6fbe69f7fdfcf63660e14b6e4bb0b36cfd9c8fcf95369e9413f23e2151",
+      "size": 6548
+    },
+    "encoder.onnx": {
+      "sha256": "f8a92f0261cd8792e38af468dc57ad9864c7405343210b6c9fbdade32b1fbfab",
+      "size": 16928730
+    },
+    "encoder.pt": {
+      "sha256": "1f169b728fe1e796e38b2ec867310a8a24d3ddf741f2418f9ae859b9c3f8c005",
+      "size": 16946383
+    },
+    "golden_trace.npz": {
+      "sha256": "92699bfce860ee727eb0cace70584b327de00537d4949889a75ca531e32261be",
+      "size": 7918
+    },
+    "manifest.json": {
+      "sha256": "7d8104928f97be7e438b74910c361c240b033fa9fd13f4350d716fc453a89203",
+      "size": 11508
+    },
+    "obs_contract.json": {
+      "sha256": "fa4970b53e33bc1d16a46bf2183af9a0119274e00d31eede44e7b482eada30f9",
+      "size": 1349
+    },
+    "policy.onnx": {
+      "sha256": "aa74267a80b7a4705d56a1a9487548b2a8d9fef3392ca65cd411810836d825a7",
+      "size": 149580074
+    },
+    "policy.pt": {
+      "sha256": "3dedacee8f0282d09b42135d21b17c6821ceabf7227aaeb08b82f8ef2c127a44",
+      "size": 149606730
+    }
+  },
+  "kind": "controller",
+  "name": "sonic_v1_1",
+  "path": "controller/sonic_v1_1",
+  "repo": "fei-yang-wu/ec-g1-gr00t-eval-kit",
+  "repo_type": "model",
+  "revision": "1d4319437d5111b56b387568d60347a326818e16"
+}
