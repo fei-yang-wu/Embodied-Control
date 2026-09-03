@@ -52,6 +52,12 @@ struct UnitreeWriterStats {
   // held pose - the policy's first action, measured before it is applied.
   float command_target_error_max = 0.0F;
   std::uint32_t blend_ticks_remaining = 0;
+  // The yaw the fixed initial anchor captured at this runtime start: the
+  // reference start frame's heading minus the robot's, in degrees, wrapped
+  // to (-180, 180]. The robot may boot facing any direction; this is by how
+  // much, and it stays constant for the episode.
+  float anchor_yaw_offset_degrees = 0.0F;
+  bool anchor_heading_captured = false;
   UnitreeMode mode = UnitreeMode::kDisabled;
   bool writes_enabled = false;
   bool realtime_configured = false;
@@ -193,6 +199,9 @@ class NativeUnitreeBackend final : public NativeRobotBackend {
   std::array<float, 4> fixed_anchor_imu_start_{0.0F, 0.0F, 0.0F, 1.0F};
   bool fixed_anchor_enabled_ = false;
   bool fixed_anchor_imu_captured_ = false;
+  // Written by the control thread on capture, read by the operator thread.
+  std::atomic<float> anchor_yaw_offset_degrees_{0.0F};
+  std::atomic<bool> anchor_heading_captured_{false};
   std::array<float, kJointCount> init_start_position_{};
   std::array<float, kJointCount> init_target_position_{};
   std::array<float, kJointCount> hold_target_{};

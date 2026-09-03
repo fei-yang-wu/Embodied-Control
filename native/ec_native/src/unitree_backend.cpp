@@ -45,6 +45,31 @@ constexpr float kMotionSwitcherTimeoutSeconds = 5.0F;
 // the guard reads projected gravity's z, which is -cos(tilt).
 constexpr float kTiltFaultGravityZ = -0.5F;
 
+// Yaw the fixed anchor absorbs at capture: the angle of
+// heading(reference) * conj(heading(robot)), the same offset
+// align_heading_to_reference applies, in degrees on (-180, 180].
+float heading_offset_degrees(const std::array<float, 4>& robot_xyzw,
+                             const std::array<float, 4>& reference_xyzw) noexcept {
+  const auto twist = [](const std::array<float, 4>& q,
+                        std::array<float, 2>& out) noexcept {
+    const float norm = std::sqrt(q[2] * q[2] + q[3] * q[3]);
+    if (!(norm > 1e-6F)) {
+      return false;
+    }
+    out = {q[2] / norm, q[3] / norm};
+    return true;
+  };
+  std::array<float, 2> robot{}, reference{};
+  if (!twist(robot_xyzw, robot) || !twist(reference_xyzw, reference)) {
+    return 0.0F;
+  }
+  // (0,0,z,w) quaternions commute, so the product is one 2-vector multiply.
+  const float z = reference[0] * robot[1] - reference[1] * robot[0];
+  const float w = reference[1] * robot[1] + reference[0] * robot[0];
+  const float radians = 2.0F * std::atan2(z, w);
+  return static_cast<float>(radians * 180.0 / M_PI);
+}
+
 std::uint64_t monotonic_ns_unitree() noexcept {
   timespec now{};
   clock_gettime(CLOCK_MONOTONIC, &now);
@@ -220,6 +245,7 @@ void NativeUnitreeBackend::reset() {
   // Probe, go, and subsequent episodes can start at different headings.
   // NativeFakeRuntime calls reset only after the previous loop has joined.
   fixed_anchor_imu_captured_ = false;
+  anchor_heading_captured_.store(false, std::memory_order_release);
   state_cache_.anchor_pose_valid = false;
 }
 
@@ -421,6 +447,13 @@ const RobotState& NativeUnitreeBackend::read_state() noexcept {
     if (!fixed_anchor_imu_captured_) {
       fixed_anchor_imu_start_ = quaternion_xyzw;
       fixed_anchor_imu_captured_ = true;
+      // Report what the alignment absorbed, so a boot heading is evidence in
+      // the console and in lifecycle.jsonl rather than a silent constant.
+      anchor_yaw_offset_degrees_.store(
+          heading_offset_degrees(fixed_anchor_imu_start_,
+                                 fixed_anchor_quaternion_),
+          std::memory_order_release);
+      anchor_heading_captured_.store(true, std::memory_order_release);
     }
     state_cache_.anchor_position_w = fixed_anchor_position_;
     state_cache_.anchor_pose_valid = align_heading_to_reference(
@@ -572,6 +605,7 @@ void NativeUnitreeBackend::set_fixed_anchor_pose(
             fixed_anchor_quaternion_.begin());
   fixed_anchor_enabled_ = true;
   fixed_anchor_imu_captured_ = false;
+  anchor_heading_captured_.store(false, std::memory_order_release);
 }
 
 bool NativeUnitreeBackend::healthy(double state_absent_ms) const noexcept {
@@ -1080,6 +1114,10 @@ UnitreeWriterStats NativeUnitreeBackend::writer_stats() const noexcept {
           blend_ticks_.load() > blend_progress_.load()
               ? blend_ticks_.load() - blend_progress_.load()
               : 0),
+      .anchor_yaw_offset_degrees =
+          anchor_yaw_offset_degrees_.load(std::memory_order_acquire),
+      .anchor_heading_captured =
+          anchor_heading_captured_.load(std::memory_order_acquire),
       .mode = mode_.load(),
       .writes_enabled = writes_enabled_,
       .realtime_configured = realtime_configured_.load(),

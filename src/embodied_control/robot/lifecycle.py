@@ -420,7 +420,14 @@ class Lifecycle:
             wants = wants and self.config.end_state != "damp"
             if not wants or self.vendor is None or not self.vendor_name:
                 return result
-            if not self._hoist_ready():
+            try:
+                ready = self._hoist_ready()
+            except Exception as exc:
+                # The hoist is a plant RPC and can be gone. Damp is the one
+                # verb that must never raise: the kd frames already landed.
+                self._note(f"hoist unavailable, staying damped: {exc}")
+                ready = False
+            if not ready:
                 return GateResult(
                     True,
                     "damp frames on the wire; hook the hoist and press H, "
@@ -724,6 +731,9 @@ class Lifecycle:
             "watchdog_faults", "ramp_faults", "ramp_error_max", "ramp_error_joint",
             "state_frames", "state_gap_ns_max", "crc_errors", "state_fault_reason",
             "joint_speed_max", "tracking_error_max", "command_target_error_max",
+            # The boot heading the fixed anchor absorbed, so a run's evidence
+            # says which way the robot was facing when it started.
+            "anchor_yaw_offset_degrees", "anchor_heading_captured",
         )
         return {k: ws[k] for k in keys if k in ws}
 

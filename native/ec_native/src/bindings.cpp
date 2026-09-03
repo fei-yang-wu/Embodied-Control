@@ -748,6 +748,8 @@ class NativeUnitreeRuntimeBinding : public NativeFakeRuntimeBinding {
     result["tracking_error_max"] = stats.tracking_error_max;
     result["command_target_error_max"] = stats.command_target_error_max;
     result["blend_ticks_remaining"] = stats.blend_ticks_remaining;
+    result["anchor_yaw_offset_degrees"] = stats.anchor_yaw_offset_degrees;
+    result["anchor_heading_captured"] = stats.anchor_heading_captured;
     result["mode"] = static_cast<std::uint32_t>(stats.mode);
     result["writes_enabled"] = stats.writes_enabled;
     result["realtime_configured"] = stats.realtime_configured;

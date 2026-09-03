@@ -8,6 +8,7 @@ network interface differs.
 """
 
 import json
+import math
 import threading
 import time
 
@@ -304,7 +305,7 @@ def test_lifecycle_hoist_to_standing_on_the_plant(tmp_path, latent_manifest):
         # The reference clock stood still through the 50-writer-tick blend.
         assert stats["reference_ticks"] <= stats["control_ticks"] - 3, stats
 
-        result = lifecycle.recover()
+        result = lifecycle.recover("vendor_stand")
         assert result.ok, (result, lifecycle.state)
         assert lifecycle.state is S.STANDING
         assert vendor.mode() is RobotMode.READY
@@ -347,3 +348,134 @@ def test_lifecycle_hoist_to_standing_on_the_plant(tmp_path, latent_manifest):
     assert report["vendor_owned"] is True
     # It ended standing on its feet under the vendor, not on the floor.
     assert report["base_height"] > 0.5, report
+
+
+def test_the_robot_may_boot_facing_any_direction(tmp_path, latent_manifest):
+    """A yawed boot climbs the whole ladder, and the offset is reported.
+
+    The robot cannot be placed on the reference's world heading by hand, so
+    the fixed initial anchor captures the IMU heading at the first valid
+    frame and maps it onto the reference start frame. The offset is constant
+    for the episode, and `test_oracle_anchor_preserves_tilt_and_recaptures_
+    each_episode` proves the math keeps tilt and later turns. This is the
+    system statement on top of it: the plant is spawned facing 90 degrees
+    away from the reference and the lifecycle still reaches HOLD.
+    """
+    from test_native_core import _axis_quaternion, _write_reference_tree
+
+    from embodied_control.lowlevel.publishers.native_oracle import NativeOracleWorker
+
+    boot_yaw = 90.0
+    command = latent_manifest.command.model_copy(update={
+        "state_dim": 38,
+        "encoder_state_interface": "root_qpos",
+        "macro_anchor_mode": "robot",
+    })
+    bundle = _g1_bundle(
+        tmp_path,
+        latent_manifest.model_copy(update={"command": command}),
+        with_encoder=True,
+    )
+    reference_root = tmp_path / "reference"
+    _write_reference_tree(
+        reference_root, bundle.manifest.action.isaac_joint_names, frames=400
+    )
+    # [pos 3 | quat XYZW 4 | joints 29], plant-config joint order.
+    start = tmp_path / "yawed_start.npy"
+    np.save(
+        start,
+        np.concatenate(
+            [[0.0, 0.0, 0.793], _axis_quaternion(2, boot_yaw), DEFAULT_POSE]
+        ).astype(np.float32),
+    )
+    report_path = tmp_path / "plant_report.json"
+    request_slot, response_slot = _shm_name("yawreq"), _shm_name("yawresp")
+    worker = NativeOracleWorker(
+        request_slot, response_slot, bundle, reference_root, "motion",
+        create_slots=True,
+    )
+    worker.start()
+    process = _spawn_plant(
+        _g1_mjcf_path(), 90.0, report_path,
+        extra=[
+            *QUIET_PLANT, "--vendor", "--hoist", "--dds-domain", str(DOMAIN),
+            "--initial-pose", str(start),
+        ],
+    )
+    runtime = None
+    try:
+        runtime = NativeUnitreeLoop(
+            bundle,
+            "lo",
+            response_slot=response_slot,
+            request_slot=request_slot,
+            command_source="oracle",
+            create_slots=False,
+            writes_enabled=True,
+            control_cpu=-1,
+            writer_cpu=-1,
+            control_fifo_priority=0,
+            writer_fifo_priority=0,
+            lock_memory=False,
+            require_realtime=False,
+            command_stale_ms=1000.0,
+            dds_domain=DOMAIN,
+            # The reference starts on the world heading; the robot does not.
+            fixed_anchor_position=np.array([0.0, 0.0, 0.76], dtype=np.float32),
+            fixed_anchor_quaternion=np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32),
+        )
+        vendor = G1Runtime("lo", writes_enabled=True, dds_domain=DOMAIN, timeout_seconds=2.0)
+        hoist = NativePlantClient("lo", dds_domain=DOMAIN)
+        config = LifecycleConfig(
+            start_pose=list(DEFAULT_POSE),
+            ramp_seconds=1.0,
+            ticks=100,
+            blend_ticks=50,
+            allow_non_realtime=True,
+            settle_position_rad=0.15,
+            pose_tolerance_rad=0.15,
+            settle_timeout_seconds=15.0,
+            hoist_release_seconds=1.5,
+            first_action_rad=3.0,
+        )
+        lifecycle = Lifecycle(
+            runtime, vendor, config, hoist=hoist, auto_ack=True,
+            log=LifecycleLog(tmp_path / "lifecycle"),
+            note=lambda msg: print("  --", msg),
+        )
+
+        result = lifecycle.auto()
+        assert result.ok, (result, lifecycle.state)
+        assert lifecycle.state is S.PRIMED
+
+        stats = runtime.writer_stats()
+        assert stats["anchor_heading_captured"] is True
+        # reference heading - robot heading, on (-180, 180].
+        assert stats["anchor_yaw_offset_degrees"] == pytest.approx(-boot_yaw, abs=2.0)
+
+        assert lifecycle.go().ok, lifecycle.last_result
+        deadline = time.monotonic() + 20.0
+        while runtime.running and time.monotonic() < deadline:
+            lifecycle.poll()
+            time.sleep(0.01)
+        lifecycle.poll()
+        assert lifecycle.state is S.HOLD, (lifecycle.state, lifecycle.fault_reason)
+        assert runtime.stats()["fault"] == 0
+        # A yawed boot is not a tilt: the pelvis is still upright at HOLD.
+        assert lifecycle.last_result.values["pelvis_upright"] is True
+
+        lifecycle.shutdown()
+        report = _finish_plant(process, report_path)
+    finally:
+        worker.close()
+        if runtime is not None:
+            runtime.force_damp()
+            if runtime.running:
+                runtime.stop()
+                runtime.wait()
+        if process.poll() is None:
+            process.kill()
+            process.communicate()
+
+    assert report["physics_fault"] is False
+    assert report["crc_errors"] == 0

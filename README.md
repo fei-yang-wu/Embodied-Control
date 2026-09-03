@@ -147,9 +147,12 @@ bundle. NVIDIA's raw release directory is not an EC bundle, and the bundled
 [SONIC v1.1 compatibility](docs/design/robot_lifecycle.md#sonic-v11-compatibility).
 
 The Unitree path can opt into `--fixed-initial-anchor` for a curated
-reference. At each runtime start (including the lifecycle probe and `go`),
-it captures the robot's heading and maps that heading to the selected
-reference start frame. That yaw offset stays fixed during the episode:
+reference, so the robot may boot facing any direction. At each runtime start
+(including the lifecycle probe and `go`), it captures the robot's heading and
+maps that heading to the selected reference start frame. The captured offset
+is reported as `anchor_yaw_offset_degrees` in the writer's stats, shown as
+`boot yaw` in the console header, and recorded with every transition in
+`lifecycle.jsonl`. That yaw offset stays fixed during the episode:
 initial tilt and later turns remain visible to the encoder, consistent with
 the policy's gravity observations. Position stays at the reference start
 position. Root displacement is reported,

@@ -721,19 +721,25 @@ def _header_rows(snapshot: dict, width: int) -> list[Row]:
                 width,
             )
         )
-    rows.append(
-        pad(
-            [
-                Span(" vendor ", "label"),
-                Span(vendor, "ok" if vendor == "released" else "value"),
-                Span("   writer ", "label"),
-                Span(writer_mode, "warn" if writer_mode == "damp" else "value"),
-                Span("   next ", "label"),
-                Span(NEXT_ACTION.get(state, "/help"), "accent"),
-            ],
-            width,
-        )
-    )
+    status: Row = [
+        Span(" vendor ", "label"),
+        Span(vendor, "ok" if vendor == "released" else "value"),
+        Span("   writer ", "label"),
+        Span(writer_mode, "warn" if writer_mode == "damp" else "value"),
+    ]
+    # The robot may boot facing any direction. Say by how much the fixed
+    # anchor turned the reference to meet it, so an operator can see that
+    # the heading was captured rather than assumed.
+    if ws.get("anchor_heading_captured"):
+        status += [
+            Span("   boot yaw ", "label"),
+            Span(f"{float(ws.get('anchor_yaw_offset_degrees', 0.0)):+.0f}°", "value"),
+        ]
+    status += [
+        Span("   next ", "label"),
+        Span(NEXT_ACTION.get(state, "/help"), "accent"),
+    ]
+    rows.append(pad(status, width))
     return rows
 
 
