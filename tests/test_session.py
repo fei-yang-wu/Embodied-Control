@@ -332,10 +332,11 @@ def test_planner_child_is_isolated_from_the_robot_cores():
     assert child_preexec(()) is not None
 
 
-def test_a_build_does_not_launch_a_planner_by_default():
-    """A planner is its own process with its own checkpoint, several
-    gigabytes for the VLA one. Pressing a lifecycle key must not start it."""
+def test_a_build_does_not_launch_a_vla_planner_by_default():
+    """The VLA worker loads its own checkpoint, gigabytes on the GPU.
+    Pressing a lifecycle key must not be what starts it."""
     session, built, clock = _session(planner_autostart=False)
+    assert session.select_mode("vla").ok
 
     result = session.rebuild()
 
@@ -345,8 +346,9 @@ def test_a_build_does_not_launch_a_planner_by_default():
     assert built == []
 
 
-def test_a_lifecycle_key_asks_for_the_planner_instead_of_starting_one():
+def test_a_lifecycle_key_asks_for_the_vla_planner_instead_of_starting_one():
     session, built, clock = _session(planner_autostart=False)
+    assert session.select_mode("vla").ok
 
     with pytest.raises(RuntimeError, match="press p"):
         session.advance()
@@ -354,8 +356,19 @@ def test_a_lifecycle_key_asks_for_the_planner_instead_of_starting_one():
     assert FakePlanner.started == []
 
 
-def test_the_operator_starts_the_planner_and_then_builds():
+def test_the_oracle_worker_starts_with_the_tracker():
+    """It memory-maps the reference and loads no weights, so an operator
+    has nothing to decide and should not be asked."""
     session, built, clock = _session(planner_autostart=False)
+
+    assert session.rebuild().ok
+    assert len(FakePlanner.started) == 1
+    assert len(built) == 1
+
+
+def test_the_operator_starts_the_vla_planner_and_then_builds():
+    session, built, clock = _session(planner_autostart=False)
+    assert session.select_mode("vla").ok
 
     assert session.start_planner().ok
     assert len(FakePlanner.started) == 1

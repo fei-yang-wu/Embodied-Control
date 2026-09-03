@@ -287,10 +287,11 @@ pixi run -e native ec lifecycle run examples/lifecycle_sim_hurry_idle.yaml \
 display on a terminal (`--plain` for line mode) that owns the planner process
 too. Pick the command source (`o` oracle / vla), the motion (`m`/`M`) and the
 start frame (`f`/`F`), start the planner (`p`), and build the tracker for that
-choice (`r`). The planner is never started for you: it is a separate process
-with its own checkpoint, several gigabytes on the GPU for the VLA one, and a
-lifecycle key pressed before it is running says so instead of launching one.
-`--planner-autostart` couples them again. The display shows the
+choice (`r`). In oracle mode `r` starts the worker too: it memory-maps the
+reference and loads no weights. In VLA mode the planner is yours to start,
+because that worker loads its own checkpoint, several gigabytes on the GPU,
+and a build refuses until it is running rather than launching one.
+`--planner-autostart` starts either. The display shows the
 ladder, the writer's live numbers, link health (lowstate and lowcmd rates,
 state gaps, planner reply age), a progress bar over the reference trajectory
 in oracle mode, and per-episode tracking summaries. Each episode's telemetry
@@ -338,7 +339,7 @@ pixi run -e native ec lifecycle console examples/lifecycle_sim_hurry_idle.yaml \
 | Step | Key | What happens |
 |---|---|---|
 | 1 | `o` `t`/`T` `m`/`M` `f`/`F` | pick command source, tracker, motion, start frame |
-| 2 | `p` then `r` | start the planner, then build the tracker for that choice |
+| 2 | `r` | build the tracker, and the oracle worker with it (`p` first in VLA mode) |
 | 3 | `a` | climb to PRIMED: vendor damp, our damp frames, ReleaseMode, ramp, settle, lower, pose match, planner probe |
 | 4 | `g` | blend in over 0.5 s, then run the episode |
 | 5 | `h` | freeze on the last target when you want to stop early |

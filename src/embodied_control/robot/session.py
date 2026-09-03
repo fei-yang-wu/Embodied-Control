@@ -243,10 +243,9 @@ class SessionConfig:
     frame_step: int = 25
     slot_timeout_seconds: float = 20.0
     artifacts_dir: str | None = None
-    # A planner is a separate process that loads its own checkpoint: the VLA
-    # one is several gigabytes on the GPU. Building a tracker must not start
-    # it behind a keypress, so `r` and every lifecycle key ask for it and
-    # `p` is what actually launches it. Set true to restore the old coupling.
+    # Whether building a tracker may start a planner that has to be paid for.
+    # Off by default; see `_planner_is_cheap` for the modes this never
+    # applies to.
     planner_autostart: bool = False
 
 
@@ -382,6 +381,17 @@ class ExperimentSession:
         self._note(f"planner stopped: {described}")
         return GateResult(True, described)
 
+    def _planner_is_cheap(self) -> bool:
+        """Whether this selection's planner costs nothing worth asking about.
+
+        The oracle worker memory-maps the reference arrays and copies frame
+        windows out of them; it loads no weights and measures about 58 MB
+        with no GPU. The VLA worker launches a service that loads its own
+        checkpoint, several gigabytes on the GPU, which is the one an
+        operator should have to ask for.
+        """
+        return self.selection.mode == "oracle"
+
     def toggle_planner(self) -> GateResult:
         if self.planner is not None and self.planner.alive():
             return self.stop_planner()
@@ -410,9 +420,12 @@ class ExperimentSession:
             self._unlink_slots(self._slot_names)
         # The planner owns the mailboxes and the tracker connects to them, so
         # a tracker that needs slots cannot be built before one is running.
-        # That is a reason to ask, not a reason to launch a multi-gigabyte
-        # process because somebody pressed `n`.
-        if not (had_planner or self.config.planner_autostart) and self._slot_names:
+        # Starting a cheap one is a detail; starting a multi-gigabyte one
+        # because somebody pressed `n` is not.
+        may_start = (
+            had_planner or self.config.planner_autostart or self._planner_is_cheap()
+        )
+        if not may_start and self._slot_names:
             return self._refuse(
                 "no planner running: press p to start it for this "
                 "selection, then r to build the tracker"
@@ -566,7 +579,7 @@ class ExperimentSession:
             "state": "NO TRACKER", "fault_reason": "", "vendor_name": "",
             "episode": 0, "writer": {}, "control": {}, "hoist": None,
             "last_ok": None,
-            "last_detail": "press p for the planner, then r to build the tracker",
+            "last_detail": "press r to build the tracker",
         }
         planner = "not running"
         if self.planner is not None:

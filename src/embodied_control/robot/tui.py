@@ -89,7 +89,7 @@ SLASH_KEYS = {
 }
 
 NEXT_ACTION = {
-    "NO TRACKER": "/planner, then /rebuild",
+    "NO TRACKER": "/rebuild",
     "IDLE": "/next",
     "PRECHECK": "/next",
     "VENDOR_DAMP_CONFIRMED": "/next",

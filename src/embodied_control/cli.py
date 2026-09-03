@@ -1459,8 +1459,8 @@ def _cmd_lifecycle_console(args) -> int:
                 "info",
             )
             tui.note(
-                "press p to start the planner, then r to build the tracker; "
-                "the planner is a separate process and is never started for you",
+                "press r to build the tracker; in vla mode press p first, "
+                "because that planner loads its own checkpoint",
                 "info",
             )
             tui.run()
