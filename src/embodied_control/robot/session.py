@@ -243,6 +243,11 @@ class SessionConfig:
     frame_step: int = 25
     slot_timeout_seconds: float = 20.0
     artifacts_dir: str | None = None
+    # A planner is a separate process that loads its own checkpoint: the VLA
+    # one is several gigabytes on the GPU. Building a tracker must not start
+    # it behind a keypress, so `r` and every lifecycle key ask for it and
+    # `p` is what actually launches it. Set true to restore the old coupling.
+    planner_autostart: bool = False
 
 
 class ExperimentSession:
@@ -352,6 +357,10 @@ class ExperimentSession:
             return self._refuse("planner already running; press p to stop it")
         if self.selection.mode == "oracle" and not self.selection.motion:
             return self._refuse("pick a motion first")
+        # A previous worker's mailboxes outlive it, and a new one refuses to
+        # create a slot that already exists.
+        if self._slot_names:
+            self._unlink_slots(self._slot_names)
         try:
             self.planner = self._planner_factory(self.selection)
         except Exception as exc:
@@ -393,11 +402,21 @@ class ExperimentSession:
         # worker serves one start frame, so the planner restarts with the
         # tracker: stop it, drop the old mailboxes, start it for this
         # selection, then connect.
+        had_planner = self.planner is not None
         if self.planner is not None:
             self.planner.stop()
             self.planner = None
         if self._slot_names:
             self._unlink_slots(self._slot_names)
+        # The planner owns the mailboxes and the tracker connects to them, so
+        # a tracker that needs slots cannot be built before one is running.
+        # That is a reason to ask, not a reason to launch a multi-gigabyte
+        # process because somebody pressed `n`.
+        if not (had_planner or self.config.planner_autostart) and self._slot_names:
+            return self._refuse(
+                "no planner running: press p to start it for this "
+                "selection, then r to build the tracker"
+            )
         result = self.start_planner()
         if not result.ok:
             return result
@@ -546,7 +565,8 @@ class ExperimentSession:
         base = self.lifecycle.snapshot() if self.lifecycle is not None else {
             "state": "NO TRACKER", "fault_reason": "", "vendor_name": "",
             "episode": 0, "writer": {}, "control": {}, "hoist": None,
-            "last_ok": None, "last_detail": "press r to build the tracker",
+            "last_ok": None,
+            "last_detail": "press p for the planner, then r to build the tracker",
         }
         planner = "not running"
         if self.planner is not None:

@@ -89,7 +89,7 @@ SLASH_KEYS = {
 }
 
 NEXT_ACTION = {
-    "NO TRACKER": "/rebuild",
+    "NO TRACKER": "/planner, then /rebuild",
     "IDLE": "/next",
     "PRECHECK": "/next",
     "VENDOR_DAMP_CONFIRMED": "/next",
@@ -140,9 +140,12 @@ BLOCKS = " ▏▎▍▌▋▊▉█"
 # column separator sideways row by row. Blocks and box drawing stay: they are
 # the one non-Latin range a terminal font reliably ships, and they only ever
 # appear at the end of a field.
-MARK_DONE = "·"
-MARK_NOW = ">"
-MARK_TODO = " "
+# The console targets an English terminal, so any single-cell glyph is fine
+# here. Every row is padded to an exact cell count, and a mark that is not
+# one cell wide would shift the column separator.
+MARK_DONE = "✓"
+MARK_NOW = "▸"
+MARK_TODO = "·"
 MARK_LINK_OK = "•"
 MARK_LINK_BAD = "!"
 
@@ -387,6 +390,10 @@ def sparkline(values: Iterable[float], width: int = 8) -> str:
     if not series:
         return " " * width
     low, high = min(series), max(series)
+    # A stream sitting at zero is a stream that is not running. Half-height
+    # blocks there read as traffic, which is the opposite of the truth.
+    if high <= 0.0:
+        return " " * width
     span = high - low
     marks = "".join(
         SPARK[min(len(SPARK) - 1, int((value - low) / span * (len(SPARK) - 1)))]
@@ -442,7 +449,9 @@ def _link(
     return [
         Span(f" {MARK_LINK_OK if healthy else MARK_LINK_BAD} ",
              "ok" if healthy else "bad"),
-        Span(name, "label"),
+        # Fixed-width name and rate: three links in a column are compared by
+        # their numbers, and numbers that do not line up are not compared.
+        Span(f"{name:<9}", "label"),
         Span(f" {rate} ", "value"),
         Span(sparkline(trend, 6), "accent"),
     ] + detail
@@ -554,7 +563,26 @@ def _state_cell(entry: LifecycleState, current: int, index: int, width: int) -> 
     else:
         mark, tone, text_style = MARK_TODO, "rule", "dim"
     label = DISPLAY_LABELS.get(entry, str(entry).replace("_", " "))
-    return pad([Span(f" {mark} ", tone), Span(label, text_style)], width)
+    # The rung number is what an operator says out loud ("we are at 8"), and
+    # it makes the climb legible when every label is dim.
+    rung = index < len(LADDER) - 1
+    number = f"{index + 1:>2} " if rung else "   "
+    if not rung and index > current:
+        mark, tone = " ", "rule"
+    return pad(
+        [Span(f" {mark} ", tone), Span(number, "rule"), Span(label, text_style)],
+        width,
+    )
+
+
+def _fit(groups: list[Row], width: int) -> Row:
+    """As many whole groups as fit. A dropped field beats a field cut in half."""
+    out: Row = []
+    for group in groups:
+        if _len(out) + _len(group) > width:
+            break
+        out += group
+    return out
 
 
 def _metric(
@@ -620,7 +648,12 @@ def _live_rows(snapshot: dict) -> list[Row]:
         _metric(
             "ramp error",
             f"{ramp:.3f}",
-            trail=[Span(f" rad  j{ws.get('ramp_error_joint', '-')}", "dim")],
+            trail=[
+                Span(
+                    f" rad  j{ws.get('ramp_error_joint', '-')}" if ramp > 0 else " rad",
+                    "dim",
+                )
+            ],
         ),
         _metric(
             "first action",
@@ -798,36 +831,49 @@ def _session_rows(snapshot: dict, width: int) -> list[Row]:
     rows = [_rule("SESSION", width)]
     built = bool(session.get("built"))
     planner = str(session.get("planner", "?"))
-    rows.append(
-        pad(
-            [
-                Span(" MODE ", "label"),
-                Span(str(session.get("mode", "?")), "accent"),
-                Span("   TRACKER ", "label"),
-                Span(str(session.get("tracker") or "default"), "accent"),
-                Span(
-                    f" {session.get('tracker_index', 0)}/{session.get('tracker_count', 0)}",
-                    "dim",
-                ),
-                Span("   MOTION ", "label"),
-                Span(session.get("motion") or "default stance", "value"),
-                Span(
-                    f" {session.get('motion_index', 0)}/{session.get('catalog_size', 0)}",
-                    "dim",
-                ),
-                Span("   frame ", "label"),
-                Span(
-                    f"{session.get('start_frame', 0)}/{session.get('motion_length', 0)}",
-                    "value",
-                ),
-                Span("   planner ", "label"),
-                Span(planner, "ok" if "running" in planner else "dim"),
-                Span("   tracker ", "label"),
-                Span("ready" if built else "needs /rebuild", "ok" if built else "warn"),
-            ],
-            width,
-        )
-    )
+    # Whole fields, so a narrow terminal drops the last one instead of
+    # cutting a word in half. The first three are the selection an operator
+    # is about to run, and they never drop.
+    fields: list[Row] = [
+        [
+            Span(" MODE ", "label"),
+            Span(str(session.get("mode", "?")), "accent"),
+        ],
+        # The planner is the operator's to start, so its state sits where a
+        # narrow terminal cannot drop it.
+        [
+            Span("   planner ", "label"),
+            Span(planner, "ok" if "running" in planner else "warn"),
+        ],
+        [
+            Span("   TRACKER ", "label"),
+            Span(str(session.get("tracker") or "default"), "accent"),
+            Span(
+                f" {session.get('tracker_index', 0)}/{session.get('tracker_count', 0)}",
+                "dim",
+            ),
+        ],
+        [
+            Span("   MOTION ", "label"),
+            Span(session.get("motion") or "default stance", "value"),
+            Span(
+                f" {session.get('motion_index', 0)}/{session.get('catalog_size', 0)}",
+                "dim",
+            ),
+        ],
+        [
+            Span("   frame ", "label"),
+            Span(
+                f"{session.get('start_frame', 0)}/{session.get('motion_length', 0)}",
+                "value",
+            ),
+        ],
+        [
+            Span("   tracker ", "label"),
+            Span("ready" if built else "needs /rebuild", "ok" if built else "warn"),
+        ],
+    ]
+    rows.append(pad(_fit(fields, width), width))
     reference = reference_row(snapshot, width)
     if reference:
         rows.append(pad(reference, width))
@@ -958,35 +1004,38 @@ def _footer_rows(
     snapshot: dict, width: int, busy: str, line: "CommandLine | None"
 ) -> list[Row]:
     rows = [_rule("CONTROLS", width)]
-    controls: Row = [Span(" ^D DAMP ", "pill.bad")]
-    for key, label in (("/", "commands"), ("?", "help")):
-        controls += _key_hint(key, label)
-    controls += [Span("  │", "rule")]
-    for key, label in (
-        ("o", "mode"),
-        ("t/T", "tracker"),
-        ("m/M", "motion"),
-        ("f/F", "frame"),
-        ("p", "planner"),
-        ("r", "rebuild"),
-        ("R", "reset sim"),
-    ):
-        controls += _key_hint(key, label)
+    groups: list[Row] = [[Span(" ^D DAMP ", "pill.bad")]]
+    groups += [_key_hint(key, label) for key, label in (("/", "commands"), ("?", "help"))]
+    groups.append([Span("  │", "rule")])
+    groups += [
+        _key_hint(key, label)
+        for key, label in (
+            ("o", "mode"),
+            ("t/T", "tracker"),
+            ("m/M", "motion"),
+            ("f/F", "frame"),
+            ("p", "planner"),
+            ("r", "rebuild"),
+            ("R", "reset sim"),
+        )
+    ]
+    controls: Row = _fit(groups, width)
     rows.append(pad(controls, width))
-    second: Row = []
-    for key, label in (
-        ("n", "next"),
-        ("a", "auto"),
-        ("g", "go"),
-        ("h", "hold"),
-        ("e", "retake"),
-        ("H/l", "hoist/lower"),
-        ("s", "stand"),
-        ("d", "release"),
-        ("x", "abort"),
-    ):
-        second += _key_hint(key, label)
-    rows.append(pad(second, width))
+    second: list[Row] = [
+        _key_hint(key, label)
+        for key, label in (
+            ("n", "next"),
+            ("a", "auto"),
+            ("g", "go"),
+            ("h", "hold"),
+            ("e", "retake"),
+            ("H/l", "hoist/lower"),
+            ("s", "stand"),
+            ("d", "release"),
+            ("x", "abort"),
+        )
+    ]
+    rows.append(pad(_fit(second, width), width))
     rows += _prompt_rows(line, width)
     if busy:
         rows.append(

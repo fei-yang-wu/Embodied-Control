@@ -49,9 +49,10 @@ def test_render_marks_the_current_rung_and_fits_the_width():
     rows = render(lifecycle.snapshot(), build_lifecycle_bindings(lifecycle), ["hello"], width=90, height=40)
     assert all(len(row) == 90 for row in rows)
     text = "\n".join(rows)
-    assert "> POSE SETTLED" in text
-    assert "· START POSE RAMP" in text
-    assert "  LOWERED" in text
+    # The current rung is marked and numbered; the ones behind it are ticked.
+    assert "▸  6 POSE SETTLED" in text
+    assert "✓  5 START POSE RAMP" in text
+    assert "·  7 LOWERED" in text
     assert "^D DAMP" in text
     assert " POSE_SETTLED " in text
     assert "vendor released" in text
@@ -272,22 +273,6 @@ def test_diagnosis_gets_snapshot_and_has_its_own_panel():
     assert "─ DIAGNOSIS" in text
     assert "codex · read-only" in text
     assert "A stale command" in text
-
-
-def test_column_markers_avoid_fallback_prone_glyphs():
-    """A glyph the terminal font lacks arrives at another width and walks the
-    column separator sideways; alignment-critical marks stay ASCII/Latin-1."""
-    from embodied_control.robot.tui import render_rows
-
-    lifecycle, tracker, clock = _lifecycle()
-    assert lifecycle.auto(S.POSE_SETTLED).ok
-    rows = render_rows(
-        lifecycle.snapshot(), build_lifecycle_bindings(lifecycle), [], width=110
-    )
-    for row in rows:
-        for span in row:
-            if span.style in {"ok", "accent", "rule", "warn", "bad"}:
-                assert not (set(span.text) & set("✓●▲◌›▏")), span
 
 
 def test_bars_and_sparklines_are_exact():

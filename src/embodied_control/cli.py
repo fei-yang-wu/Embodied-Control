@@ -1378,6 +1378,7 @@ def _build_session(args):
             motion_lengths=lengths,
             trackers=list(tracker_paths),
             artifacts_dir=artifacts,
+            planner_autostart=bool(getattr(args, "planner_autostart", False)),
         ),
         _lifecycle_selection(job, default_tracker),
         hoist=hoist,
@@ -1453,7 +1454,15 @@ def _cmd_lifecycle_console(args) -> int:
                 tui.note("READ-ONLY: pass --enable-writes --confirm to command the robot")
             if args.diagnostic_agent != "off" and not agent.available:
                 tui.note("diagnostic agent unavailable: install or authenticate Codex/Claude Code")
-            tui.note(f"job {args.job}: {session.selection.label()}; press r to build, p for the planner")
+            tui.note(
+                f"job {args.job}: {session.selection.label()}",
+                "info",
+            )
+            tui.note(
+                "press p to start the planner, then r to build the tracker; "
+                "the planner is a separate process and is never started for you",
+                "info",
+            )
             tui.run()
         else:
             session.note_sinks.append(lambda msg: print(f"  -- {msg}", flush=True))
@@ -2040,6 +2049,12 @@ def build_parser() -> argparse.ArgumentParser:
             "--auto-ack",
             action="store_true",
             help="acknowledge hoist/lower steps without an operator",
+        )
+        parser.add_argument(
+            "--planner-autostart",
+            action="store_true",
+            help="start the planner with the tracker; off by default because "
+            "a VLA planner loads gigabytes of its own",
         )
         if name == "console":
             parser.add_argument(

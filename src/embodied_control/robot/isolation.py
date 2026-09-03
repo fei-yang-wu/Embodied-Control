@@ -114,4 +114,18 @@ class ThreadPinner:
         return pin_current_thread(self.cores)
 
     def describe(self) -> str:
-        return "cores " + ",".join(str(core) for core in sorted(self.cores))
+        """`cores 0-7,12` rather than every number: on a 24-core host the
+        full list wrapped the console log three lines deep."""
+        cores = sorted(self.cores)
+        if not cores:
+            return "no cores"
+        runs: list[str] = []
+        start = previous = cores[0]
+        for core in cores[1:] + [None]:
+            if core is not None and core == previous + 1:
+                previous = core
+                continue
+            runs.append(str(start) if start == previous else f"{start}-{previous}")
+            if core is not None:
+                start = previous = core
+        return "cores " + ",".join(runs)

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from embodied_control.robot import FakeRobotRuntime, RobotMode
 from embodied_control.robot.lifecycle import (
     Lifecycle,
@@ -71,7 +73,7 @@ class RecordingTracker(StubTracker):
         return [1000] * self.control_ticks
 
 
-def _session(tmp_path=None, *, wait_ok=True):
+def _session(tmp_path=None, *, wait_ok=True, planner_autostart=True):
     clock = FakeClock()
     FakePlanner.started = []
     built: list[RecordingTracker] = []
@@ -96,7 +98,12 @@ def _session(tmp_path=None, *, wait_ok=True):
         )
 
     session = ExperimentSession(
-        SessionConfig(catalog=list(CATALOG), motion_lengths=dict(LENGTHS), artifacts_dir=str(tmp_path) if tmp_path else None),
+        SessionConfig(
+            catalog=list(CATALOG),
+            motion_lengths=dict(LENGTHS),
+            artifacts_dir=str(tmp_path) if tmp_path else None,
+            planner_autostart=planner_autostart,
+        ),
         Selection(mode="oracle", motion=CATALOG[0], start_frame=0),
         planner_factory=FakePlanner,
         tracker_factory=tracker_factory,
@@ -143,7 +150,7 @@ def test_selection_cycles_trackers_and_marks_build_stale():
     assert session.selection.tracker == "sonic"
 
 
-def test_rebuild_starts_planner_and_tracker_and_marks_stale_selection():
+def test_rebuild_with_autostart_starts_planner_and_tracker():
     session, built, clock = _session()
     assert session.rebuild().ok
     assert session.planner is not None and session.planner.alive()
@@ -218,7 +225,7 @@ def test_session_render_shows_selection_progress_and_comm():
     text = "\n".join(rows)
     assert "MODE oracle" in text and CATALOG[0] in text
     assert "REFERENCE  [" in text and "%" in text
-    assert "LOWSTATE   500 Hz" in text and "PLANNER  5.0 Hz" in text
+    assert "LOWSTATE    500 Hz" in text and "PLANNER    5.0 Hz" in text
     assert "o mode" in text and "p planner" in text
 
 
@@ -323,3 +330,38 @@ def test_planner_child_is_isolated_from_the_robot_cores():
     # A child that outlives a SIGKILLed console keeps the slots; the default
     # asks the kernel to take it down with us.
     assert child_preexec(()) is not None
+
+
+def test_a_build_does_not_launch_a_planner_by_default():
+    """A planner is its own process with its own checkpoint, several
+    gigabytes for the VLA one. Pressing a lifecycle key must not start it."""
+    session, built, clock = _session(planner_autostart=False)
+
+    result = session.rebuild()
+
+    assert not result.ok and "press p" in result.detail
+    assert FakePlanner.started == []
+    assert session.planner is None
+    assert built == []
+
+
+def test_a_lifecycle_key_asks_for_the_planner_instead_of_starting_one():
+    session, built, clock = _session(planner_autostart=False)
+
+    with pytest.raises(RuntimeError, match="press p"):
+        session.advance()
+
+    assert FakePlanner.started == []
+
+
+def test_the_operator_starts_the_planner_and_then_builds():
+    session, built, clock = _session(planner_autostart=False)
+
+    assert session.start_planner().ok
+    assert len(FakePlanner.started) == 1
+
+    assert session.rebuild().ok
+    assert len(built) == 1
+    # A fresh tracker numbers its requests from 1, so the planner restarts
+    # with it. What must not happen is a start nobody asked for.
+    assert len(FakePlanner.started) == 2
