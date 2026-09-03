@@ -336,16 +336,44 @@ No plant-window restart is needed. Command is unavailable on hardware.
 Jobs may expose more trackers with operator-facing names:
 
 ```yaml
-bundle: ../assets/latent_playkit/bundles/fsq64_sonic_4500m
+bundle: ../assets/models/controller/fsq64_sonic_4500m
 trackers:
-  second-controller: ../assets/model/controller/second-controller-bundle
+  fsq64-10b: ../assets/models/controller/fsq64_10b
 ```
 
-Each controller entry names complete deployment bundle (`manifest.json` plus
-declared checkpoints), since joint contract and normalization travel with
-checkpoint. Raw controller and planner checkpoints can live under
-`assets/model/controller/` and `assets/model/planner/`; configure converted
-controller bundles here and planner launch command under `planner`.
+Each controller entry names a complete deployment bundle (`manifest.json` plus
+declared checkpoints), since the joint contract and the normalization travel
+with the checkpoint. Controller and planner assets live under
+`assets/models/controller/` and `assets/models/planner/`; configure converted
+controller bundles here and the planner launch command under `planner`.
+
+### Pinned model assets
+
+`assets/models/` holds no loose checkpoints. Each directory carries a
+`model.pin.json` naming a Hugging Face repository, one **commit sha** (never a
+branch), and a sha256 for every file. The pin is in git; the weights are not.
+A tracker bundle a job names is fetched and verified before it is loaded, so
+the robot runs the bytes the pin records or it does not start.
+
+```bash
+pixi run ec models list                       # what is pinned, and what is here
+pixi run ec models pull --all                 # fetch every missing file
+pixi run ec models verify assets/models/controller/fsq64_10b
+```
+
+Adopt a folder that is already in a repository, or publish a bundle you just
+exported and pin the commit the upload produced:
+
+```bash
+pixi run ec models fetch assets/models/controller/fsq64_10b \
+  --repo fei-yang-wu/ec-g1-gr00t-eval-kit --path controller/fsq64_10b
+pixi run ec models push assets/models/controller/sonic_v1_1 \
+  --repo fei-yang-wu/ec-g1-gr00t-eval-kit --path controller/sonic_v1_1
+```
+
+`push` creates the repository private unless `--public` is given, uploads the
+directory, then writes the pin. `--offline` on `ec lifecycle` refuses to fetch
+anything and requires the pinned files to be on disk already.
 
 `Ctrl-D` damps at any moment, ahead of every gate and every queued key: the
 kd-only frames land first and unconditionally, then the joints are handed

@@ -1,0 +1,47 @@
+{
+  "api_version": "ec.model_pin/v1",
+  "files": {
+    "action_contract.json": {
+      "sha256": "37d5888c9ec6cbce8c557ce2673ad5d8212ae95b02f9e65fdb44a2c172aedd4d",
+      "size": 6520
+    },
+    "encoder.onnx": {
+      "sha256": "a1e053e93f446f37e5150d6b3001dd48e73272a1b78c54079d35c889659e97f4",
+      "size": 14798294
+    },
+    "encoder.pt": {
+      "sha256": "f3403c0dca6c9267923884f1d2d4f3508333ee94accf4b00d8c7001f4e660ee0",
+      "size": 14811557
+    },
+    "golden_trace.npz": {
+      "sha256": "662a030680e0583b88440273ee9a8cd61cb36e54b52a2dca51509d112bb70da5",
+      "size": 499698
+    },
+    "manifest.json": {
+      "sha256": "098f2204bec73f154b5ff864f17cbb08f9860761af1b129659bedb90a073cea2",
+      "size": 13625
+    },
+    "norm_stats.npz": {
+      "sha256": "828e0229a37e7c8872b0bcdb476b5b7025a9c7cf29e4c95eb970cd26938afd29",
+      "size": 2223
+    },
+    "obs_contract.json": {
+      "sha256": "6abeb6e8ab3b5a453290e94862f83fae24506edb0f3a98a54ff808d5d17a1e2f",
+      "size": 1338
+    },
+    "policy.onnx": {
+      "sha256": "e9b6ac41fcd26d41fca221f65f543f8952146cc99eef76bf4c1975c093651c09",
+      "size": 33901083
+    },
+    "policy.pt": {
+      "sha256": "357bcf0dd3bda7d622ab6faa110901d4017b3389902b6036fe406e8a0ab20e93",
+      "size": 33916224
+    }
+  },
+  "kind": "controller",
+  "name": "fsq64_sonic_4500m",
+  "path": "bundles/fsq64_sonic_4500m",
+  "repo": "GeorgiaTech/ec-latent-playkit",
+  "repo_type": "dataset",
+  "revision": "e947fd4c6fc87dcfd76a3c6d433ca46c48d3320f"
+}

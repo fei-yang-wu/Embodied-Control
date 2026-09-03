@@ -22,6 +22,135 @@ from pathlib import Path
 import time
 
 
+# Pinned model assets live beside the code they are run from, so a relative
+# default works from the repository root the operating card already assumes.
+DEFAULT_MODEL_ROOT = "assets/models"
+
+
+def _models_token(args) -> str | None:
+    return getattr(args, "token", "") or None
+
+
+def _cmd_models_list(args) -> int:
+    from embodied_control.models import find_pins, load_pin, verify
+
+    directories = find_pins(args.root)
+    if not directories:
+        print(f"no pinned models under {args.root}")
+        return 0
+    for directory in directories:
+        pin = load_pin(directory)
+        missing = verify(directory, pin)
+        state = "here" if not missing else f"{len(missing)}/{len(pin.files)} missing"
+        remote = f"{pin.repo}@{pin.revision[:8]}"
+        if pin.path:
+            remote += f":{pin.path}"
+        print(f"{pin.kind:<10} {directory}  {remote}  {state}")
+    return 0
+
+
+def _cmd_models_pull(args) -> int:
+    from embodied_control.models import ModelStoreError, find_pins, materialize
+
+    if args.all:
+        targets = find_pins(args.root)
+    elif args.directory:
+        targets = [Path(args.directory)]
+    else:
+        print("FAIL: name a directory or pass --all")
+        return 2
+    for directory in targets:
+        try:
+            materialize(directory, token=_models_token(args))
+        except ModelStoreError as exc:
+            print(f"FAIL: {exc}")
+            return 1
+        print(f"ok: {directory}")
+    return 0
+
+
+def _cmd_models_verify(args) -> int:
+    from embodied_control.models import load_pin, verify
+
+    pin = load_pin(args.directory)
+    missing = verify(args.directory, pin)
+    if missing:
+        print(f"FAIL: {len(missing)} file(s) do not match the pin:")
+        for name in sorted(missing):
+            print(f"  {name}")
+        return 1
+    print(f"ok: {len(pin.files)} file(s) match {pin.repo}@{pin.revision[:8]}")
+    return 0
+
+
+def _cmd_models_pin(args) -> int:
+    from embodied_control.models import ModelStoreError, pin_local_directory
+
+    try:
+        pin = pin_local_directory(
+            args.directory,
+            kind=args.kind,
+            repo=args.repo,
+            path_in_repo=args.path,
+            revision=args.revision or None,
+            repo_type=args.repo_type,
+            token=_models_token(args),
+        )
+    except ModelStoreError as exc:
+        print(f"FAIL: {exc}")
+        return 1
+    print(f"pinned {len(pin.files)} file(s) to {pin.repo}@{pin.revision[:8]}")
+    return 0
+
+
+def _cmd_models_fetch(args) -> int:
+    from embodied_control.models import ModelStoreError, fetch_and_pin
+
+    try:
+        pin = fetch_and_pin(
+            args.directory,
+            kind=args.kind,
+            repo=args.repo,
+            path_in_repo=args.path,
+            revision=args.revision or None,
+            repo_type=args.repo_type,
+            token=_models_token(args),
+        )
+    except ModelStoreError as exc:
+        print(f"FAIL: {exc}")
+        return 1
+    print(
+        f"fetched and pinned {len(pin.files)} file(s) from "
+        f"{pin.repo}@{pin.revision[:8]}"
+    )
+    return 0
+
+
+def _cmd_models_push(args) -> int:
+    from embodied_control.models import ModelStoreError, push_model
+
+    try:
+        pin = push_model(
+            args.directory,
+            kind=args.kind,
+            repo=args.repo,
+            path_in_repo=args.path,
+            private=not args.public,
+            repo_type=args.repo_type,
+            token=_models_token(args),
+            message=args.message or None,
+        )
+    except ModelStoreError as exc:
+        print(f"FAIL: {exc}")
+        return 1
+    visibility = "public" if args.public else "private"
+    print(
+        f"published {len(pin.files)} file(s) to {visibility} {pin.repo}"
+        f"@{pin.revision[:8]}"
+    )
+    return 0
+
+
 def _cmd_doctor(args) -> int:
     # Must run before the FIRST `import mujoco` anywhere in this process: MuJoCo
     # selects its GL backend (GLFW/EGL/OSMesa) the first time it is imported, and
@@ -1018,8 +1147,21 @@ def _lifecycle_peers(job, args):
     return vendor, hoist
 
 
-def _load_lifecycle_job(args):
+def _resolved_bundle(path, args):
+    """A bundle directory, fetched first when it carries a model pin."""
     from embodied_control.lowlevel.bundle import PolicyBundle
+    from embodied_control.models import ensure_model
+
+    return PolicyBundle.load(
+        ensure_model(
+            path,
+            offline=getattr(args, "offline", False),
+            token=getattr(args, "token", "") or None,
+        )
+    )
+
+
+def _load_lifecycle_job(args):
     from embodied_control.robot.lifecycle_job import load_lifecycle_job
 
     job = load_lifecycle_job(args.job)
@@ -1030,7 +1172,7 @@ def _load_lifecycle_job(args):
     )
     if gate_error is not None:
         raise ValueError(gate_error)
-    return job, PolicyBundle.load(job.bundle)
+    return job, _resolved_bundle(job.bundle, args)
 
 
 def _build_lifecycle(args):
@@ -1126,9 +1268,7 @@ def _build_session(args):
         if name not in tracker_paths:
             raise ValueError(f"unknown tracker {name}")
         if name not in bundles:
-            from embodied_control.lowlevel.bundle import PolicyBundle
-
-            bundles[name] = PolicyBundle.load(tracker_paths[name])
+            bundles[name] = _resolved_bundle(tracker_paths[name], args)
         return bundles[name]
     # The control thread and the writer own their cores at SCHED_FIFO 80/90.
     # Everything the operator touches lives on the rest.
@@ -1769,6 +1909,66 @@ def build_parser() -> argparse.ArgumentParser:
     lplant.add_argument("--report", default="")
     lplant.set_defaults(func=_cmd_lowlevel_plant)
 
+    mdl = sub.add_parser(
+        "models",
+        help="pinned controller and planner assets under assets/models/",
+    )
+    mdls = mdl.add_subparsers(dest="models_command", required=True)
+    mlist = mdls.add_parser("list", help="every pinned model and whether it is here")
+    mlist.add_argument("--root", default=DEFAULT_MODEL_ROOT)
+    mlist.set_defaults(func=_cmd_models_list)
+    mpull = mdls.add_parser("pull", help="fetch a pinned model's missing files")
+    mpull.add_argument("directory", nargs="?", default="")
+    mpull.add_argument("--root", default=DEFAULT_MODEL_ROOT)
+    mpull.add_argument("--all", action="store_true", help="every pin under --root")
+    mpull.add_argument("--token", default="", help="Hugging Face token")
+    mpull.set_defaults(func=_cmd_models_pull)
+    mver = mdls.add_parser("verify", help="hash the local files against the pin")
+    mver.add_argument("directory")
+    mver.set_defaults(func=_cmd_models_verify)
+    mpin = mdls.add_parser(
+        "pin", help="record an existing repository's files as this directory's pin"
+    )
+    mpin.add_argument("directory")
+    mpin.add_argument("--repo", required=True, help="Hugging Face repo id")
+    mpin.add_argument("--path", default="", help="subdirectory inside the repo")
+    mpin.add_argument("--kind", choices=("controller", "planner"), default="controller")
+    mpin.add_argument("--repo-type", choices=("model", "dataset"), default="model")
+    mpin.add_argument(
+        "--revision", default="", help="commit sha; default is the repo head"
+    )
+    mpin.add_argument("--token", default="")
+    mpin.set_defaults(func=_cmd_models_pin)
+    mfetch = mdls.add_parser(
+        "fetch", help="download a repository folder and pin it here"
+    )
+    mfetch.add_argument("directory")
+    mfetch.add_argument("--repo", required=True, help="Hugging Face repo id")
+    mfetch.add_argument("--path", default="", help="subdirectory inside the repo")
+    mfetch.add_argument(
+        "--kind", choices=("controller", "planner"), default="controller"
+    )
+    mfetch.add_argument("--repo-type", choices=("model", "dataset"), default="model")
+    mfetch.add_argument(
+        "--revision", default="", help="commit sha; default is the repo head"
+    )
+    mfetch.add_argument("--token", default="")
+    mfetch.set_defaults(func=_cmd_models_fetch)
+    mpush = mdls.add_parser("push", help="upload a bundle and pin the new commit")
+    mpush.add_argument("directory")
+    mpush.add_argument("--repo", required=True, help="Hugging Face repo id")
+    mpush.add_argument("--path", default="", help="subdirectory inside the repo")
+    mpush.add_argument("--kind", choices=("controller", "planner"), default="controller")
+    mpush.add_argument("--repo-type", choices=("model", "dataset"), default="model")
+    mpush.add_argument(
+        "--public",
+        action="store_true",
+        help="create the repository public; the default is private",
+    )
+    mpush.add_argument("--message", default="")
+    mpush.add_argument("--token", default="")
+    mpush.set_defaults(func=_cmd_models_push)
+
     life = sub.add_parser(
         "lifecycle",
         help="the gated hoist-to-run lifecycle (docs/design/robot_lifecycle.md)",
@@ -1780,6 +1980,11 @@ def build_parser() -> argparse.ArgumentParser:
     ):
         parser = lifes.add_parser(name, help=helptext)
         parser.add_argument("job", help="lifecycle job YAML")
+        parser.add_argument(
+            "--offline",
+            action="store_true",
+            help="refuse to fetch a pinned bundle; require it on disk already",
+        )
         parser.add_argument("--network", default="", help="overrides the job")
         parser.add_argument("--artifacts", default="", help="overrides the job")
         parser.add_argument("--allow-non-realtime", action="store_true")

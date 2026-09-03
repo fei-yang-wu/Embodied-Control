@@ -42,6 +42,9 @@ pip = "*"
 pytest = ">=8,<9"
 pydantic = ">=2,<3"
 pyyaml = ">=6,<7"
+# `ec models` fetches and publishes pinned bundles, so every environment that
+# can start a tracker can also make its weights present.
+huggingface_hub = ">=0.20"
 
 [pypi-dependencies]
 embodied-control = { path = ".", editable = true }

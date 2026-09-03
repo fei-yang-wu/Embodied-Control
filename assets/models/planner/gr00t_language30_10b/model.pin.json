@@ -1,0 +1,27 @@
+{
+  "api_version": "ec.model_pin/v1",
+  "files": {
+    "goal_features.pt": {
+      "sha256": "6326e44b54aaf5f30bbf5cbed728f0b8d1bf1c4cc0458c834fdf0305350882ae",
+      "size": 6401815
+    },
+    "goal_features_provenance.json": {
+      "sha256": "18c01515731b206f916373b5336dee026e3173f367375e770a087efea52cfd89",
+      "size": 447
+    },
+    "gr00t_head.pt": {
+      "sha256": "c09cf071871978ee75ecd1f05db13fe6cb93df9677ebc5671e201fa10a043bc7",
+      "size": 5222543466
+    },
+    "training_provenance.json": {
+      "sha256": "3f02ed26982bce417609b06cbe369ef8dbd3a738d899090518491d6e86f59e30",
+      "size": 1523
+    }
+  },
+  "kind": "planner",
+  "name": "gr00t_language30_10b",
+  "path": "planner",
+  "repo": "fei-yang-wu/ec-g1-gr00t-eval-kit",
+  "repo_type": "model",
+  "revision": "050c343ebe3282fbeba73f37b540b11a85f7bfdd"
+}
