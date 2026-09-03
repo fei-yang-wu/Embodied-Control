@@ -123,7 +123,7 @@ def test_vendor_owns_the_joints_until_released(tmp_path, latent_manifest):
     pose_path = tmp_path / "pitched_pose.npy"
     np.save(pose_path, pose)
     process = _spawn_plant(
-        bundle.root, _g1_mjcf_path(), 60.0, report_path,
+        _g1_mjcf_path(), 60.0, report_path,
         extra=[*QUIET_PLANT, "--vendor", "--hoist", "--dds-domain", str(DOMAIN),
                "--initial-pose", str(pose_path)],
     )
@@ -183,7 +183,6 @@ def test_blocked_joint_trips_native_ramp_guard(tmp_path, latent_manifest):
     blocked_target[0] += 0.4
     report_path = tmp_path / "plant_report.json"
     process = _spawn_plant(
-        bundle.root,
         _blocked_mjcf(tmp_path),
         30.0,
         report_path,
@@ -249,7 +248,7 @@ def test_lifecycle_hoist_to_standing_on_the_plant(tmp_path, latent_manifest):
     bundle = _g1_bundle(tmp_path, latent_manifest)
     report_path = tmp_path / "plant_report.json"
     process = _spawn_plant(
-        bundle.root, _g1_mjcf_path(), 120.0, report_path,
+        _g1_mjcf_path(), 120.0, report_path,
         extra=[*QUIET_PLANT, "--vendor", "--hoist", "--dds-domain", str(DOMAIN)],
     )
     runtime = None

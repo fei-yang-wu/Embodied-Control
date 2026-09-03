@@ -10,6 +10,7 @@ import numpy as np
 
 from embodied_control.lowlevel.bundle import PolicyBundle
 from embodied_control.lowlevel.contracts import RobotState
+from embodied_control.sim.dds_plant import NativeDdsPlant
 
 _PROPRIO_TERMS = {
     "projected_gravity",
@@ -676,155 +677,8 @@ class NativeUnitreeLoop(NativeFakeLoop):
         return self.latest_state()["projected_gravity"]
 
 
-class NativeDdsPlant:
-    """MuJoCo physics serving the exact G1 hardware DDS protocol.
-
-    The Digit-style unified plant interface: the controller runs the one
-    hardware code path (``NativeUnitreeLoop``) against this plant on
-    interface ``lo`` and against the robot on its NIC; nothing else changes.
-    Per-joint data crosses the wire in SDK motor order, so this wrapper
-    derives the SDK-ordered tables from the bundle's Isaac-order contract.
-    """
-
-    def __init__(
-        self,
-        bundle: PolicyBundle,
-        model_path: str,
-        network_interface: str = "lo",
-        *,
-        timestep: float = 0.002,
-        mode_machine: int = 5,
-        physics_cpu: int = -1,
-        physics_fifo_priority: int = 0,
-        lock_memory: bool = False,
-        require_realtime: bool = False,
-        sensor_noise: dict[str, float] | None = None,
-        noise_seed: int = 0,
-        state_log_capacity: int = 0,
-        dds_domain: int = 0,
-        freeze_until_command: bool = False,
-        vendor: bool = False,
-        vendor_name: str = "ai",
-        hoist: bool = False,
-    ) -> None:
-        try:
-            import ec_native
-        except ImportError as exc:  # pragma: no cover - optional build
-            raise ImportError(
-                "NativeDdsPlant needs the Unitree-enabled native build"
-            ) from exc
-        if not ec_native.WITH_UNITREE:
-            raise RuntimeError(
-                "ec_native was built without Unitree SDK2; set "
-                "EC_UNITREE_SDK_ROOT and run `pixi run -e native build-native`"
-            )
-        action = bundle.manifest.action
-        if not action.isaac_to_sdk:
-            raise ValueError("the DDS plant requires isaac_to_sdk in the bundle")
-        if not action.armature or not action.effort_limit:
-            raise ValueError(
-                "the DDS plant requires armature and effort_limit in the bundle"
-            )
-        self._isaac_to_sdk = [int(v) for v in action.isaac_to_sdk]
-        count = len(self._isaac_to_sdk)
-        sdk_joint_names = [""] * count
-        for isaac, sdk in enumerate(self._isaac_to_sdk):
-            sdk_joint_names[sdk] = action.isaac_joint_names[isaac]
-        self.bundle = bundle
-        self._plant = ec_native.MujocoDdsPlant(
-            str(model_path),
-            str(network_interface),
-            sdk_joint_names,
-            self._to_sdk(action.default_joint_pos),
-            self._to_sdk(action.armature),
-            self._to_sdk(action.effort_limit),
-            self._to_sdk(action.stiffness),
-            self._to_sdk(action.damping),
-            float(timestep),
-            int(mode_machine),
-            int(physics_cpu),
-            int(physics_fifo_priority),
-            bool(lock_memory),
-            bool(require_realtime),
-            # A real G1 does not serve clean state; the plant puts the sensor
-            # noise on the wire so the controller sees it exactly as it will
-            # on hardware.
-            float((sensor_noise or {}).get("joint_pos", 0.0)),
-            float((sensor_noise or {}).get("joint_vel", 0.0)),
-            float((sensor_noise or {}).get("base_ang_vel", 0.0)),
-            float((sensor_noise or {}).get("imu_tilt_rad", 0.0)),
-            int(noise_seed),
-            int(state_log_capacity),
-            int(dds_domain),
-            bool(freeze_until_command),
-            bool(vendor),
-            str(vendor_name),
-            bool(hoist),
-        )
-
-    def hoist(self) -> None:
-        self._plant.hoist()
-
-    def lower(self) -> None:
-        self._plant.lower()
-
-    def slack(self) -> None:
-        self._plant.slack()
-
-    def _to_sdk(self, values) -> np.ndarray:
-        isaac = np.asarray(values, dtype=np.float32)
-        sdk = np.empty_like(isaac)
-        sdk[self._isaac_to_sdk] = isaac
-        return sdk
-
-    def set_initial_pose(self, pose) -> None:
-        """Isaac-order start pose [pos 3 | quat XYZW 4 | joints 29]."""
-        values = np.asarray(pose, dtype=np.float32)
-        if values.size == 0:
-            self._plant.set_initial_pose(np.zeros(0, np.float32))
-            return
-        if values.shape != (36,):
-            raise ValueError("initial pose must have 36 values")
-        converted = np.concatenate([values[:7], self._to_sdk(values[7:])])
-        self._plant.set_initial_pose(converted)
-
-    def state_log(self) -> np.ndarray:
-        """True simulator state, rows x [pos 3 | quat XYZW 4 | joints 29].
-
-        The hardware wire protocol carries no root pose, so scoring MPJPE on
-        this tier has to read the plant's own state, not the controller's.
-        Joints come back in Isaac order to match the reference arrays.
-        """
-        rows = np.asarray(self._plant.state_log(), dtype=np.float32)
-        if rows.size == 0:
-            return rows.reshape(0, 36)
-        isaac = np.empty_like(rows)
-        isaac[:, :7] = rows[:, :7]
-        isaac[:, 7:] = rows[:, 7:][:, self._isaac_to_sdk]
-        return isaac
-
-    def reset(self) -> None:
-        self._plant.reset()
-
-    def start(self) -> None:
-        self._plant.start()
-
-    def stop(self) -> None:
-        self._plant.stop()
-
-    def wait_for_stop(self) -> None:
-        self._plant.wait_for_stop()
-
-    @property
-    def running(self) -> bool:
-        return bool(self._plant.running)
-
-    def stats(self) -> dict[str, float | int | bool]:
-        return dict(self._plant.stats())
-
-
 class NativePlantClient:
-    """Client for the plant-only ``ec_plant`` service: the simulated hoist.
+    """Client for plant-only gantry, reset, and status controls.
 
     Hardware has no RPC for the gantry, so the lifecycle only reaches for
     this when it is rehearsing against the plant; on the robot the same step
@@ -858,6 +712,14 @@ class NativePlantClient:
 
     def slack(self) -> None:
         self._client.slack()
+
+    def reset(self) -> None:
+        self._client.reset()
+        deadline = time.monotonic() + 2.0
+        while self.status().get("reset_pending", True):
+            if time.monotonic() >= deadline:
+                raise RuntimeError("plant did not apply reset before timeout")
+            time.sleep(0.005)
 
     def status(self) -> dict:
         import json

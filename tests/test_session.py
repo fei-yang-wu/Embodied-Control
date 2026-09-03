@@ -129,6 +129,20 @@ def test_selection_keys_cycle_motions_and_clamp_frames():
     assert not session.select_mode("teleop").ok
 
 
+def test_selection_cycles_trackers_and_marks_build_stale():
+    session, built, clock = _session()
+    session.config.trackers = ["sonic", "walk"]
+    session.selection = Selection(
+        mode="oracle", motion=CATALOG[0], start_frame=0, tracker="sonic"
+    )
+    assert session.rebuild().ok
+    assert session.step_tracker(1).ok
+    assert session.selection.tracker == "walk"
+    assert session.snapshot()["session"]["built"] is False
+    assert session.step_tracker(-1).ok
+    assert session.selection.tracker == "sonic"
+
+
 def test_rebuild_starts_planner_and_tracker_and_marks_stale_selection():
     session, built, clock = _session()
     assert session.rebuild().ok
@@ -204,7 +218,7 @@ def test_session_render_shows_selection_progress_and_comm():
     text = "\n".join(rows)
     assert "MODE oracle" in text and CATALOG[0] in text
     assert "REFERENCE  [" in text and "%" in text
-    assert "lowstate   500 Hz" in text and "planner  5.0 Hz" in text
+    assert "LOWSTATE   500 Hz" in text and "PLANNER  5.0 Hz" in text
     assert "o mode" in text and "p planner" in text
 
 
@@ -214,6 +228,18 @@ def test_worker_argv_builders():
     assert oracle[oracle.index("--start-frame") + 1] == "25"
     vla = planner_worker_argv(["python", "svc.py"], "/req", "/res", reply="chunk")
     assert vla[-2:] == ["python", "svc.py"] and "chunk" in vla
+
+
+def test_lifecycle_job_resolves_named_tracker_paths(tmp_path):
+    from embodied_control.robot.lifecycle_job import load_lifecycle_job
+
+    job_file = tmp_path / "job.yaml"
+    job_file.write_text(
+        "bundle: default-bundle\ntrackers:\n  controller-b: model/controller-b\n"
+    )
+    job = load_lifecycle_job(job_file)
+    assert job.bundle == str(tmp_path / "default-bundle")
+    assert job.trackers == {"controller-b": str(tmp_path / "model/controller-b")}
 
 
 def test_rows_of_accepts_flat_and_nested_logs():
@@ -228,3 +254,72 @@ def test_episode_summary_handles_empty_logs():
     summary = episode_summary([], [], [], {}, {}, Selection(), 3)
     assert summary["episode"] == 3 and summary["frames_tracked"] == 0
     assert summary["first_frame"] is None
+
+
+def test_snapshot_never_blocks_on_the_plant_rpc():
+    """The plant's hoist status is a DDS RPC with a timeout; the render thread
+    reads a cache the watcher fills, so a hung plant cannot freeze the display."""
+    import time
+
+    class SlowHoist(FakeHoist):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        def status(self):
+            self.calls += 1
+            time.sleep(0.4)
+            return {"owned": False, "fsm_id": 1, "hoisted": False, "hoist_mode": 0}
+
+    session, built, clock = _session()
+    session.hoist = SlowHoist()
+
+    started = time.monotonic()
+    for _ in range(20):
+        assert session.snapshot()["hoist"] is None
+    assert time.monotonic() - started < 0.2
+    assert session.hoist.calls == 0
+
+    session.refresh_hoist()
+    assert session.snapshot()["hoist"]["hoist_mode"] == 0
+    # And the watcher does not re-ask on every one of its 100 Hz ticks.
+    for _ in range(10):
+        session.refresh_hoist()
+    assert session.hoist.calls == 1
+
+
+def test_sim_reset_closes_runtime_and_returns_to_no_tracker():
+    class ResettableHoist(FakeHoist):
+        def reset(self):
+            self.calls.append("reset")
+
+        def status(self):
+            return {"owned": True, "fsm_id": 1, "hoisted": True, "hoist_mode": 1}
+
+    session, built, clock = _session()
+    session.hoist = ResettableHoist()
+    assert session.rebuild().ok
+    tracker = session.tracker
+    assert session.reset_sim().ok
+    assert tracker.closed is True
+    assert session.tracker is None and session.lifecycle is None
+    assert session.planner is None and session.built_for is None
+    assert session.hoist.calls[-1] == "reset"
+    assert session.snapshot()["state"] == "NO TRACKER"
+
+
+def test_planner_child_is_isolated_from_the_robot_cores():
+    from embodied_control.robot.isolation import (
+        child_preexec,
+        non_realtime_cores,
+    )
+
+    free = non_realtime_cores((2, 3))
+    assert 2 not in free and 3 not in free or free == set()
+    # A reservation that would leave nothing gives everything back.
+    assert non_realtime_cores(range(1024))
+    assert child_preexec(free) is not None
+    assert child_preexec((), nice=0, die_with_parent=False) is None
+    # A child that outlives a SIGKILLed console keeps the slots; the default
+    # asks the kernel to take it down with us.
+    assert child_preexec(()) is not None

@@ -629,11 +629,6 @@ def _unitree_stationary_anchor(
     positions = np.asarray(selected.anchor_pos_w[start_frame:], dtype=np.float64)
     displacement = np.linalg.norm(positions - positions[0], axis=1)
     maximum = float(displacement.max(initial=0.0))
-    if maximum > max_displacement:
-        raise ValueError(
-            f"motion anchor displacement {maximum:.4f} m exceeds the "
-            f"fixed-anchor limit {max_displacement:.4f} m"
-        )
     anchor = FixedAnchor(
         position=positions[0].astype(np.float32),
         quaternion_xyzw=np.asarray(
@@ -887,11 +882,20 @@ def _pose_tolerances(bundle, spec):
     return out
 
 
-def _lifecycle_selection(job):
+def _tracker_bundle_paths(job) -> dict[str, str]:
+    paths = {Path(job.bundle).name: job.bundle}
+    paths.update(job.trackers)
+    return paths
+
+
+def _lifecycle_selection(job, tracker: str = ""):
     from embodied_control.robot.session import Selection
 
     return Selection(
-        mode=job.command_source, motion=job.motion, start_frame=int(job.start_frame)
+        mode=job.command_source,
+        motion=job.motion,
+        start_frame=int(job.start_frame),
+        tracker=tracker,
     )
 
 
@@ -1049,7 +1053,7 @@ def _build_lifecycle(args):
     return job, lifecycle, runtime, vendor
 
 
-def _episode_mpjpe(job, bundle):
+def _episode_mpjpe(job, bundle_for):
     """In-line MPJPE from an episode's telemetry, when MuJoCo and an MJCF exist."""
     if not job.mjcf or not job.reference_root:
         return None
@@ -1075,6 +1079,7 @@ def _episode_mpjpe(job, bundle):
         motion = arrays.motion(selection.motion)
         if motion.body_pos_w is None or not arrays.body_names:
             return None
+        bundle = bundle_for(selection)
         robot_body = fk_body_positions(job.mjcf, bundle.manifest.action, joint, anchor, arrays.body_names)
         reference_body = motion.body_pos_w[frames]
         aligned_body = _align_reference(
@@ -1103,7 +1108,33 @@ def _build_session(args):
         planner_worker_argv,
     )
 
-    job, bundle = _load_lifecycle_job(args)
+    from embodied_control.robot.isolation import (
+        ThreadPinner,
+        child_preexec,
+        non_realtime_cores,
+    )
+
+    job, default_bundle = _load_lifecycle_job(args)
+    tracker_paths = _tracker_bundle_paths(job)
+    default_tracker = next(iter(tracker_paths))
+    bundles = {default_tracker: default_bundle}
+
+    def bundle_for(selection):
+        name = selection.tracker or default_tracker
+        if name not in tracker_paths:
+            raise ValueError(f"unknown tracker {name}")
+        if name not in bundles:
+            from embodied_control.lowlevel.bundle import PolicyBundle
+
+            bundles[name] = PolicyBundle.load(tracker_paths[name])
+        return bundles[name]
+    # The control thread and the writer own their cores at SCHED_FIFO 80/90.
+    # Everything the operator touches lives on the rest.
+    free_cores = non_realtime_cores(
+        (job.realtime.control_cpu, job.realtime.writer_cpu)
+    )
+    pinner = ThreadPinner(free_cores)
+    planner_preexec = child_preexec(free_cores)
     catalog: list[str] = []
     lengths: dict[str, int] = {}
     if job.reference_root:
@@ -1126,8 +1157,9 @@ def _build_session(args):
         report = str(artifacts_path / f"planner_{selection.mode}.json") if artifacts_path else ""
         planner_log = artifacts_path / "planner.log" if artifacts_path else None
         if selection.mode == "oracle":
+            selected_bundle = bundle_for(selection)
             argv = oracle_worker_argv(
-                job.bundle, job.reference_root, selection.motion, selection.start_frame,
+                str(selected_bundle.root), job.reference_root, selection.motion, selection.start_frame,
                 job.request_slot, job.response_slot,
                 horizon=job.planner.oracle_horizon, report=report,
             )
@@ -1140,11 +1172,12 @@ def _build_session(args):
                 plan_slots=job.planner.vla_plan_slots, hold_steps=job.planner.vla_hold_steps,
                 lead_ticks=job.lead_ticks, report=report,
             )
-        return SubprocessPlanner(argv, planner_log)
+        return SubprocessPlanner(argv, planner_log, preexec=planner_preexec)
 
     pending: dict = {}
 
     def tracker_factory(selection):
+        bundle = bundle_for(selection)
         runtime, start_pose, reference_gravity, ticks = _tracker_for(job, args, bundle, selection)
         pending["config"] = _lifecycle_config(job, args, bundle, start_pose, reference_gravity, ticks)
         return runtime
@@ -1164,22 +1197,27 @@ def _build_session(args):
         SessionConfig(
             catalog=catalog,
             motion_lengths=lengths,
+            trackers=list(tracker_paths),
             artifacts_dir=artifacts,
         ),
-        _lifecycle_selection(job),
+        _lifecycle_selection(job, default_tracker),
+        hoist=hoist,
         planner_factory=planner_factory,
         tracker_factory=tracker_factory,
         lifecycle_factory=lifecycle_factory,
         slot_names=[job.request_slot, job.response_slot] if job.connect_slots else [],
         note=note,
-        mpjpe=_episode_mpjpe(job, bundle),
+        mpjpe=_episode_mpjpe(job, bundle_for),
     )
     session.note_sinks = notes
+    session.pinner = pinner
     return job, session, vendor
 
 
 def _cmd_lifecycle_console(args) -> int:
     import threading
+
+    from embodied_control.robot.isolation import child_preexec
 
     from embodied_control.console import KeyConsole
     from embodied_control.robot.shell import build_session_bindings
@@ -1190,13 +1228,15 @@ def _cmd_lifecycle_console(args) -> int:
         print(f"FAIL: {exc}")
         return 2
     stop = threading.Event()
+    watch_note = [lambda message: print(f"  !! {message}", flush=True)]
 
     def watch() -> None:
+        session.pinner.apply()
         while not stop.is_set():
             try:
                 session.poll()
             except Exception as exc:  # the watcher must outlive any one fault
-                print(f"  !! poll: {exc}", flush=True)
+                watch_note[0](f"poll: {exc}")
             stop.wait(0.01)
 
     watcher = threading.Thread(target=watch, daemon=True)
@@ -1205,12 +1245,35 @@ def _cmd_lifecycle_console(args) -> int:
     use_tui = not args.plain and sys.stdin.isatty() and sys.stdout.isatty()
     try:
         if use_tui:
+            from embodied_control.robot.diagnostics import DiagnosticAgent
             from embodied_control.robot.tui import LifecycleTui
 
-            tui = LifecycleTui(session, bindings)
+            # The agent is an LLM CLI: off the robot's cores and renice'd, so
+            # a diagnosis never competes with the control loop.
+            agent = DiagnosticAgent(
+                args.diagnostic_agent,
+                cwd=Path.cwd(),
+                preexec=child_preexec(session.pinner.cores, nice=10),
+            )
+            diagnose = agent.diagnose if agent.available else None
+            session.pinner.apply()
+            tui = LifecycleTui(
+                session,
+                bindings,
+                diagnose=diagnose,
+                agent_label=agent.label if args.diagnostic_agent != "off" else "off",
+                pin=session.pinner.apply,
+            )
+            watch_note[0] = tui.note
+            tui.note(
+                f"console threads on {session.pinner.describe()}; robot threads keep "
+                f"cpu {job.realtime.control_cpu} and {job.realtime.writer_cpu}"
+            )
             session.note_sinks.append(tui.note)
             if not args.enable_writes:
                 tui.note("READ-ONLY: pass --enable-writes --confirm to command the robot")
+            if args.diagnostic_agent != "off" and not agent.available:
+                tui.note("diagnostic agent unavailable: install or authenticate Codex/Claude Code")
             tui.note(f"job {args.job}: {session.selection.label()}; press r to build, p for the planner")
             tui.run()
         else:
@@ -1293,11 +1356,12 @@ def _cmd_lifecycle_run(args) -> int:
 def _cmd_lowlevel_plant(args) -> int:
     import numpy as np
 
-    from embodied_control.lowlevel.bundle import PolicyBundle
-    from embodied_control.lowlevel.native_core import NativeDdsPlant
+    from embodied_control.robot.plant import load_plant_config
+    from embodied_control.sim.dds_plant import NativeDdsPlant
 
+    robot = load_plant_config(args.robot)
     plant = NativeDdsPlant(
-        PolicyBundle.load(args.bundle),
+        robot,
         args.model,
         args.network,
         timestep=args.timestep,
@@ -1329,15 +1393,37 @@ def _cmd_lowlevel_plant(args) -> int:
     plant.start()
     print("PLANT_READY", flush=True)
     deadline = time.monotonic() + args.seconds if args.seconds > 0 else None
+    view = {}
+
+    def finished() -> bool:
+        return not plant.running or (deadline is not None and time.monotonic() >= deadline)
+
     try:
-        while plant.running and (deadline is None or time.monotonic() < deadline):
-            time.sleep(0.05)
+        if args.viewer or args.video:
+            from embodied_control.lowlevel.plant_view import watch
+
+            view = watch(
+                plant,
+                args.model,
+                robot.joint_names,
+                live=args.viewer,
+                video=args.video,
+                fps=args.view_fps,
+                width=args.view_width,
+                height=args.view_height,
+                camera=args.view_camera,
+                should_stop=finished,
+            )
+        else:
+            while not finished():
+                time.sleep(0.05)
     except KeyboardInterrupt:
         pass
     finally:
         plant.stop()
         plant.wait_for_stop()
     report = plant.stats()
+    report.update(view)
     if args.states:
         rows = plant.state_log()
         states_path = Path(args.states).resolve()
@@ -1347,6 +1433,7 @@ def _cmd_lowlevel_plant(args) -> int:
             root_pos=rows[:, 0:3],
             root_quat_xyzw=rows[:, 3:7],
             joint_pos=rows[:, 7:],
+            joint_names=np.asarray(robot.joint_names),
             publish_hz=np.asarray(1.0 / args.timestep, dtype=np.float64),
         )
         report["states_path"] = str(states_path)
@@ -1584,7 +1671,7 @@ def build_parser() -> argparse.ArgumentParser:
     lplant = lows.add_parser(
         "plant", help="serve MuJoCo physics on the G1 hardware DDS protocol"
     )
-    lplant.add_argument("bundle")
+    lplant.add_argument("robot", help="standalone robot/plant YAML; no policy bundle")
     lplant.add_argument("--model", required=True)
     lplant.add_argument("--network", default="lo")
     lplant.add_argument("--timestep", type=float, default=0.002)
@@ -1595,7 +1682,7 @@ def build_parser() -> argparse.ArgumentParser:
     lplant.add_argument(
         "--initial-pose",
         default="",
-        help=".npy with the 36-value Isaac-order start pose",
+        help=".npy with the 36-value start pose in plant-config joint order",
     )
     # SONIC's policy-group observation noise, as uniform half-ranges. The
     # rehearsal protocol runs WITH noise by default (user directive
@@ -1616,7 +1703,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help=(
             ".npz for the plant's TRUE state trajectory (pos, quat XYZW, "
-            "joints in Isaac order). The DDS wire carries no root pose, so "
+            "joints in plant-config order, with joint_names). The DDS wire carries no root pose, so "
             "this is the only ground truth for MPJPE on this tier."
         ),
     )
@@ -1642,6 +1729,23 @@ def build_parser() -> argparse.ArgumentParser:
         "--hoist",
         action="store_true",
         help="hang the pelvis from a virtual gantry until `lower` is requested",
+    )
+    lplant.add_argument(
+        "--viewer",
+        action="store_true",
+        help=(
+            "open a MuJoCo window showing the plant's true state; a render-only "
+            "copy, so a slow frame never reaches the physics thread"
+        ),
+    )
+    lplant.add_argument(
+        "--video", default="", help="also record the same view to this mp4"
+    )
+    lplant.add_argument("--view-fps", type=int, default=30)
+    lplant.add_argument("--view-width", type=int, default=960)
+    lplant.add_argument("--view-height", type=int, default=540)
+    lplant.add_argument(
+        "--view-camera", default="", help="named MJCF camera (default: free)"
     )
     lplant.add_argument("--physics-cpu", type=int, default=-1)
     lplant.add_argument("--physics-fifo-priority", type=int, default=0)
@@ -1676,6 +1780,12 @@ def build_parser() -> argparse.ArgumentParser:
                 "--plain",
                 action="store_true",
                 help="line-mode console instead of the full-screen display",
+            )
+            parser.add_argument(
+                "--diagnostic-agent",
+                choices=("auto", "codex", "claude", "off"),
+                default="auto",
+                help="read-only agent used by /diagnose (default: Codex, then Claude Code)",
             )
             parser.set_defaults(func=_cmd_lifecycle_console)
         else:

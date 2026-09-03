@@ -1,7 +1,7 @@
 # Sim rehearsal of the hoist-to-run lifecycle with the real SONIC bundle and
 # the stationary hurry_idle reference, against the vendored MuJoCo plant.
 #
-#   T0  pixi run -e native ec lowlevel plant assets/latent_playkit/bundles/fsq64_sonic_4500m \
+#   T0  pixi run -e native ec lowlevel plant examples/g1_plant.yaml \
 #         --model assets/latent_playkit/model/g1_29dof_rev_1_0.xml --network lo \
 #         --vendor --hoist --dds-domain 51 --report artifacts/lifecycle_sim/plant.json
 #   T1  pixi run -e native ec lowlevel oracle-worker assets/latent_playkit/bundles/fsq64_sonic_4500m \
@@ -16,6 +16,9 @@
 # false, and drop --allow-non-realtime.
 api_version: ec.lifecycle/v1alpha1
 bundle: ../assets/latent_playkit/bundles/fsq64_sonic_4500m
+# Extra tracker bundles appear in the panel and cycle with t/T.
+# trackers:
+#   second-controller: ../assets/model/controller/second-controller-bundle
 network: lo
 dds_domain: 51
 request_slot: /ec_g1_request

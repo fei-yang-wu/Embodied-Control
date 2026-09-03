@@ -273,6 +273,14 @@ void MujocoDdsPlant::slack() noexcept {
   }
 }
 
+std::array<float, kPlantStateRow> MujocoDdsPlant::latest_state() const noexcept {
+  std::array<float, kPlantStateRow> out{};
+  for (std::size_t index = 0; index < kPlantStateRow; ++index) {
+    out[index] = live_state_[index].load(std::memory_order_relaxed);
+  }
+  return out;
+}
+
 MujocoDdsPlant::~MujocoDdsPlant() {
   stop();
   wait_for_stop();
@@ -313,6 +321,10 @@ void MujocoDdsPlant::reset() {
     throw std::runtime_error("stop the plant before reset");
   }
   wait_for_stop();
+  reset_data(false);
+}
+
+void MujocoDdsPlant::reset_data(bool while_running) {
   mj_resetData(impl_->model, impl_->data);
   mjData* data = impl_->data;
   if (has_initial_pose_) {
@@ -347,9 +359,11 @@ void MujocoDdsPlant::reset() {
   command_slot_->sequence.store(0, std::memory_order_relaxed);
   command_slot_->valid.store(false, std::memory_order_relaxed);
   command_slot_->receive_ns.store(0, std::memory_order_relaxed);
-  stop_requested_.store(false, std::memory_order_relaxed);
-  thread_ready_.store(false, std::memory_order_relaxed);
-  realtime_configured_.store(false, std::memory_order_relaxed);
+  if (!while_running) {
+    stop_requested_.store(false, std::memory_order_relaxed);
+    thread_ready_.store(false, std::memory_order_relaxed);
+    realtime_configured_.store(false, std::memory_order_relaxed);
+  }
   // splitmix64 keeps the noise stream reproducible and allocation-free on
   // the physics thread; the seed makes a repeat of an episode identical.
   noise_state_ = sensor_noise_.seed * 0x9e3779b97f4a7c15ull + 0x123456789abcdefull;
@@ -542,6 +556,19 @@ void MujocoDdsPlant::publish_low_state() noexcept {
       static_cast<double>(steps_.load(std::memory_order_relaxed)) * timestep_ *
       1000.0);
   bool valid = std::isfinite(data->time) && std::isfinite(data->qpos[2]);
+  // The viewer's copy: always written, whether or not the run logs states.
+  live_state_[0].store(static_cast<float>(data->qpos[0]), std::memory_order_relaxed);
+  live_state_[1].store(static_cast<float>(data->qpos[1]), std::memory_order_relaxed);
+  live_state_[2].store(static_cast<float>(data->qpos[2]), std::memory_order_relaxed);
+  live_state_[3].store(static_cast<float>(data->qpos[4]), std::memory_order_relaxed);
+  live_state_[4].store(static_cast<float>(data->qpos[5]), std::memory_order_relaxed);
+  live_state_[5].store(static_cast<float>(data->qpos[6]), std::memory_order_relaxed);
+  live_state_[6].store(static_cast<float>(data->qpos[3]), std::memory_order_relaxed);
+  for (std::size_t actuator = 0; actuator < kJointCount; ++actuator) {
+    live_state_[7 + actuator_to_sdk_[actuator]].store(
+        static_cast<float>(data->qpos[qpos_address_[actuator]]),
+        std::memory_order_relaxed);
+  }
   const std::size_t logged_rows = state_log_rows_.load(std::memory_order_relaxed);
   if (logged_rows < state_log_capacity_) {
     float* row = state_log_.data() + logged_rows * kPlantStateRow;
@@ -769,6 +796,18 @@ void MujocoDdsPlant::physics_loop() noexcept {
     }
     if (stop_requested_.load(std::memory_order_relaxed)) {
       break;
+    }
+    if (vendor_) {
+      const std::uint64_t reset_generation = vendor_->reset_generation();
+      if (reset_generation != reset_generation_seen_) {
+        reset_generation_seen_ = reset_generation;
+        reset_data(true);
+        previous_owned_ = vendor_->owned();
+        scheduled_ns = monotonic_ns_plant();
+        publish_low_state();
+        vendor_->mark_reset_applied(reset_generation);
+        continue;
+      }
     }
     const std::uint64_t woke_ns = monotonic_ns_plant();
     if (woke_ns > scheduled_ns) {

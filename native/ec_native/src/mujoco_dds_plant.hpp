@@ -113,6 +113,11 @@ class MujocoDdsPlant {
   void hoist() noexcept;
   void lower() noexcept;
   void slack() noexcept;
+  // The most recent published state, [pos 3 | quat XYZW 4 | joints 29 SDK
+  // order]: what a viewer draws. Read from any thread; a torn read costs one
+  // frame of a wobble, and the alternative is handing a renderer a pointer
+  // into mjData while the physics thread writes it.
+  std::array<float, 7 + kJointCount> latest_state() const noexcept;
 
  private:
   struct Impl;
@@ -123,6 +128,7 @@ class MujocoDdsPlant {
   bool snapshot_command(CommandSnapshot& destination) const noexcept;
   void set_servo_gains(std::span<const float> stiffness,
                        std::span<const float> damping) noexcept;
+  void reset_data(bool while_running);
   void physics_loop() noexcept;
   bool configure_physics_thread() noexcept;
   void publish_low_state() noexcept;
@@ -172,6 +178,7 @@ class MujocoDdsPlant {
   double hoist_gain_ = 0.0;
   double hoist_release_seconds_ = 3.0;
   std::uint64_t hoist_generation_seen_ = 0;
+  std::uint64_t reset_generation_seen_ = 0;
   std::array<double, 3> hoist_target_position_{};
   std::array<double, 4> hoist_target_quaternion_wxyz_{1.0, 0.0, 0.0, 0.0};
   std::atomic<float> hoist_gain_reported_{0.0F};
@@ -180,6 +187,7 @@ class MujocoDdsPlant {
   // TRUE simulator state, sampled at the publish rate: the only ground truth
   // in the rig, because the hardware wire protocol carries no root pose.
   // Rows are [pos 3 | quat XYZW 4 | joint q 29] in SDK motor order.
+  std::array<std::atomic<float>, 7 + kJointCount> live_state_{};
   std::vector<float> state_log_;
   std::size_t state_log_capacity_ = 0;
   std::atomic<std::size_t> state_log_rows_{0};

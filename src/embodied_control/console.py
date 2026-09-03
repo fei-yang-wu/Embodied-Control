@@ -18,10 +18,22 @@ from dataclasses import dataclass
 
 KEY_ESCAPE = "\x1b"
 KEY_SPACE = " "
+# Ctrl-D damps. Not SPACE: an operator rests a hand on the space bar, scrolls
+# with it, and taps it while thinking, and an unwanted damp drops a standing
+# robot. A control chord cannot be typed by accident, is never inserted into
+# the command line, and Ctrl-D is neither SIGINT (Ctrl-C), SIGTSTP (Ctrl-Z)
+# nor terminal flow control (Ctrl-S/Q).
+KEY_DAMP = "\x04"
 KEY_UP = "<up>"
 KEY_DOWN = "<down>"
 KEY_LEFT = "<left>"
 KEY_RIGHT = "<right>"
+KEY_BACKSPACE = "<backspace>"
+KEY_DELETE = "<delete>"
+KEY_HOME = "<home>"
+KEY_END = "<end>"
+KEY_TAB = "<tab>"
+KEY_ENTER = "<enter>"
 
 _ARROWS = {"A": KEY_UP, "B": KEY_DOWN, "C": KEY_RIGHT, "D": KEY_LEFT}
 
@@ -61,7 +73,7 @@ class KeyConsole:
             if binding.group != current:
                 current = binding.group
                 self._print(f"  [{current}]")
-            shown = {KEY_SPACE: "SPACE"}.get(binding.key, binding.key)
+            shown = {KEY_SPACE: "SPACE", KEY_DAMP: "^D"}.get(binding.key, binding.key)
             self._print(f"    {shown:<8} {binding.label}")
         self._print("    ?        this help")
         self._print("")

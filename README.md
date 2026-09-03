@@ -87,8 +87,9 @@ Native deployment bundles must contain static batch-one opset-18
 `policy.onnx`, an `encoder.onnx` for latent chunk input, exact input/output
 names and shapes, parity tolerances, hashes, gains, joint order, and joint
 limits. The C++ runtime rejects incomplete contracts before it starts.
-Native chunk encoding currently requires `root_qpos` with macro stride 1;
-another stride is rejected instead of receiving consecutive frames silently.
+Native oracle encoding supports `root_qpos` with a full robot anchor and
+`joint_qpos_qvel_anchor_ori` with a heading-only robot anchor. Frame stride
+and encoder cadence come from the bundle contract.
 
 For asynchronous language-conditioned GR00T inference, start the planner
 worker first. The language goal is an explicit argument to the GR00T service.
@@ -137,15 +138,24 @@ pixi run -e native ec lowlevel mujoco-native /absolute/path/to/bundle \
   --connect-slots --report /absolute/path/to/oracle_eval.json
 ```
 
-Native oracle encoding is fixed to a robot-anchored `root_qpos` window of ten
-38-value frames at stride 1. The runtime refuses another encoder contract.
-The Unitree path can opt into `--fixed-initial-anchor` for a stationary
-reference. It uses reference frame 0's anchor pose (position and
-orientation) for the whole episode, so the robot's start heading is free:
-the policy's own observations carry no yaw, and the encoder sees the
-reference exactly as the sim does at frame 0. The CLI rejects a motion whose root moves
-more than `--fixed-anchor-max-displacement` (default 0.05 m); moving references
-still require external localization.
+The lab's `root_qpos` bundle uses ten 38-value frames at stride 1. The native
+path also supports the SONIC v1.1 G1 reference representation: joint positions,
+joint velocities, and heading-relative orientation, with ten frames at stride
+5 and encoding on every control tick. This requires a matching exported EC
+bundle. NVIDIA's raw release directory is not an EC bundle, and the bundled
+`fsq64_sonic_4500m` checkpoint is a separate lab-trained policy. See
+[SONIC v1.1 compatibility](docs/design/robot_lifecycle.md#sonic-v11-compatibility).
+
+The Unitree path can opt into `--fixed-initial-anchor` for a curated
+reference. At each runtime start (including the lifecycle probe and `go`),
+it captures the robot's heading and maps that heading to the selected
+reference start frame. That yaw offset stays fixed during the episode:
+initial tilt and later turns remain visible to the encoder, consistent with
+the policy's gravity observations. Position stays at the reference start
+position. Root displacement is reported,
+not rejected: moving references run open-loop from that fixed initial anchor.
+External localization remains necessary for position-error feedback, but is
+not required to deploy a curated reference.
 
 MuJoCo deployment evaluation is always wall-clock paced. Use `--cpu` and
 `--physics-cpu` to place the two schedules on different cores. Their wake
@@ -227,6 +237,18 @@ pixi run -e native ec lowlevel unitree /absolute/path/to/bundle \
 
 ### Lifecycle: hoist to run from the control PC
 
+The simulated robot uses its own [plant configuration](examples/g1_plant.yaml)
+and MJCF. The plant does not load a policy bundle. Joint motor IDs, rotor
+armature, torque limits, nominal pose, and simulated vendor gains belong to
+that configuration; the active controller supplies its own targets and PD
+gains through DDS after takeover. The initial G1 profile preserves the
+existing rehearsal calibration independently of future checkpoint choices.
+
+`ec lowlevel plant <robot.yaml> --model <robot.xml>` replaces the old
+bundle-based plant command. `--initial-pose` joint values follow the plant
+configuration's joint list. `--states` includes `joint_names` in its NPZ;
+use those names to map plant state into a controller or reference ordering.
+
 `ec lifecycle` drives the whole hardware session as a gated state machine
 (`docs/design/robot_lifecycle.md`): vendor damp, our damp frames on the wire,
 `ReleaseMode`, ramp to the start pose, settle, lower, pose match against the
@@ -236,7 +258,7 @@ the plant serves the vendor (`--vendor`) and a virtual gantry (`--hoist`):
 
 ```bash
 # T0: the plant, owning the joints until ReleaseMode and hanging the robot
-pixi run -e native ec lowlevel plant assets/latent_playkit/bundles/fsq64_sonic_4500m \
+pixi run -e native ec lowlevel plant examples/g1_plant.yaml \
   --model assets/latent_playkit/model/g1_29dof_rev_1_0.xml --network lo \
   --vendor --hoist --dds-domain 51
 # T1: the planner (stays up across episodes, owns the slots)
@@ -259,13 +281,93 @@ ladder, the writer's live numbers, link health (lowstate and lowcmd rates,
 state gaps, planner reply age), a progress bar over the reference trajectory
 in oracle mode, and per-episode tracking summaries. Each episode's telemetry
 lands under `episodes/` in the artifacts directory with a `summary.json`
-(joint MAE, and MPJPE when the job names an `mjcf`). Lifecycle keys: `SPACE` damp, `n` next state, `a` auto to PRIMED, `g` go, `h`
+(joint MAE, and MPJPE when the job names an `mjcf`). Lifecycle keys: `Ctrl-D` damp, `n` next state, `a` auto to PRIMED, `g` go, `h`
 hold, `H`/`l` hoist/lowered acknowledgements, `s` recover to vendor stand,
 `d` to vendor damp, `e` retake from HOLD, `x` abort, `q` quit. Every
 transition lands in `lifecycle.jsonl` with its evidence; the pose check
 writes `pose_match.json`. Against the robot the job changes `network`,
 `dds_domain: 0`, `sim_hoist: false`, and the write gate is
 `--confirm ENABLE_G1_LOWLEVEL` without `--allow-non-realtime`.
+
+The full-screen console also has a slash-command palette. Press `/` or `?` to
+open it; every operator key has a named equivalent such as `/next`, `/auto`,
+`/go`, `/hold`, `/stand`, and `/damp`. Slash commands take no arguments.
+
+#### Operating card
+
+One episode, from a robot hanging limp on the hoist to a robot standing under
+the vendor again. Three terminals; the console owns the planner, so terminal 2
+is only for the simulated robot.
+
+```bash
+# 1. plant (sim only; on hardware this is the robot)
+pixi run -e native ec lowlevel plant examples/g1_plant.yaml \
+  --model assets/latent_playkit/model/g1_29dof_rev_1_0.xml \
+  --network lo --vendor --hoist --dds-domain 51
+# 2. console
+pixi run -e native ec lifecycle console examples/lifecycle_sim_hurry_idle.yaml \
+  --enable-writes --confirm ENABLE_G1_LOWLEVEL_NON_REALTIME --allow-non-realtime
+```
+
+| Step | Key | What happens |
+|---|---|---|
+| 1 | `o` `t`/`T` `m`/`M` `f`/`F` | pick command source, tracker, motion, start frame |
+| 2 | `r` | start the planner and build the tracker for that choice |
+| 3 | `a` | climb to PRIMED: vendor damp, our damp frames, ReleaseMode, ramp, settle, lower, pose match, planner probe |
+| 4 | `g` | blend in over 0.5 s, then run the episode |
+| 5 | `h` | freeze on the last target when you want to stop early |
+| 6 | `H` | tell the console the hoist is hooked and carrying |
+| 7 | `s` | damp, release, hand back to the vendor, stand |
+| 8 | `n` | next episode from PRECHECK, planner still up |
+
+`R` (`/reset-sim`) closes current tracker and planner, then atomically resets
+running MuJoCo plant to configured initial pose (bundle default when absent),
+vendor damp, and hoisted state.
+No plant-window restart is needed. Command is unavailable on hardware.
+
+Jobs may expose more trackers with operator-facing names:
+
+```yaml
+bundle: ../assets/latent_playkit/bundles/fsq64_sonic_4500m
+trackers:
+  second-controller: ../assets/model/controller/second-controller-bundle
+```
+
+Each controller entry names complete deployment bundle (`manifest.json` plus
+declared checkpoints), since joint contract and normalization travel with
+checkpoint. Raw controller and planner checkpoints can live under
+`assets/model/controller/` and `assets/model/planner/`; configure converted
+controller bundles here and planner launch command under `planner`.
+
+`Ctrl-D` damps at any moment, ahead of every gate and every queued key.
+`e` re-runs the same motion from HOLD without handing the robot back. `x`
+aborts the climb. `?` lists every key as a slash command. On hardware, drop
+`--allow-non-realtime`, use `--confirm ENABLE_G1_LOWLEVEL`, and set
+`sim_hoist: false` in the job so `H` and `l` wait for a real person.
+
+Nothing the operator touches shares a thread or a core with the robot: the
+50 Hz control thread and the 500 Hz writer are C++ threads that never take the
+GIL, pinned to their own cores at SCHED_FIFO 80 and 90, while every console
+thread pins itself to the remaining cores and the planner runs in its own
+process off those cores too. The render path makes no blocking call, so a hung
+plant or a slow planner cannot freeze the display.
+
+`Ctrl-D` remains an unconditional damp even while the palette is open or the
+prompt has text. Damp is a chord, not `SPACE`: an operator rests a hand on the
+space bar, and an unwanted damp drops a standing robot. The prompt is a real
+line editor: arrows and Home/End move, Backspace and Delete edit, `Ctrl-U`
+`Ctrl-W` `Ctrl-K` cut, `TAB` completes, `↑`/`↓` recall earlier commands, and
+matching commands are listed under the line as you type.
+
+`/diagnose` sends the current lifecycle snapshot, writer/control counters, and
+last 30 console messages to a coding-agent CLI for one read-only diagnostic
+turn. `--diagnostic-agent auto` prefers Codex and falls back to Claude Code;
+`codex`, `claude`, and `off` select an explicit behavior. The subprocess cannot
+write the workspace, runs no persistent conversation, and its prompt forbids
+robot commands and safety-gate bypasses. It can inspect source to explain an
+error, but cannot fix it or operate the robot. Invoking `/diagnose` sends that
+runtime context to the selected provider using the operator's existing CLI
+authentication; use `--diagnostic-agent off` where telemetry must stay local.
 
 ## Run an eval
 

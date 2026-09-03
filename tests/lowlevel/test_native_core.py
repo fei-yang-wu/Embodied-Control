@@ -39,7 +39,60 @@ from embodied_control.lowlevel.maths import (  # noqa: E402
     rotate_inverse,
     rot6d_from_quat,
     subtract_frame,
+    quat_mul,
+    quat_to_mat,
 )
+
+
+def _axis_quaternion(axis, degrees):
+    half = np.radians(degrees) / 2
+    result = np.zeros(4, dtype=np.float32)
+    result[axis], result[3] = np.sin(half), np.cos(half)
+    return result
+
+
+@pytest.mark.parametrize("start_yaw", [-179.0, -90.0, 0.0, 88.0, 179.0])
+@pytest.mark.parametrize("turn", [0.0, 35.0])
+def test_reference_heading_preserves_tilt_and_relative_turn(start_yaw, turn):
+    ref_heading = _axis_quaternion(2, 47)
+    ref_start = quat_mul(ref_heading, _axis_quaternion(1, -8))
+    initial = quat_mul(_axis_quaternion(2, start_yaw), _axis_quaternion(0, 12))
+    current = quat_mul(
+        _axis_quaternion(2, start_yaw + turn), _axis_quaternion(1, 19)
+    )
+    aligned = ec_native.align_heading_to_reference(initial, ref_start, current)
+    expected = quat_mul(_axis_quaternion(2, 47 + turn), _axis_quaternion(1, 19))
+    np.testing.assert_allclose(quat_to_mat(aligned), quat_to_mat(expected), atol=1e-6)
+    np.testing.assert_allclose(
+        ec_native.projected_gravity_from_xyzw(aligned),
+        ec_native.projected_gravity_from_xyzw(current), atol=1e-6,
+    )
+    opposite_sign = ec_native.align_heading_to_reference(-initial, -ref_start, -current)
+    np.testing.assert_allclose(quat_to_mat(opposite_sign), quat_to_mat(expected), atol=1e-6)
+
+    # A forward offset in the reference must give the same encoder input
+    # regardless of the IMU world's arbitrary starting yaw.
+    origin = np.array([2.0, -3.0, 0.76], dtype=np.float32)
+    raw = np.zeros((10, 36), dtype=np.float32)
+    raw[:, 29:32] = origin + quat_to_mat(ref_heading) @ [0.2, 0.0, 0.03]
+    raw[:, 32:36] = ref_start
+    packed = ec_native.reexpress_root_qpos_window(raw, origin, aligned)
+    expected_pos, expected_ori = subtract_frame(origin, expected, raw[0, 29:32], ref_start)
+    np.testing.assert_allclose(packed[:, 29:32], np.tile(expected_pos, (10, 1)), atol=1e-6)
+    np.testing.assert_allclose(packed[:, 32:38], np.tile(rot6d_from_quat(expected_ori), (10, 1)), atol=1e-6)
+    joint_raw = np.zeros((10, 62), dtype=np.float32)
+    joint_raw[:, 58:62] = ref_start
+    np.testing.assert_allclose(
+        ec_native.pack_joint_qpos_qvel_anchor_ori_window(joint_raw, 0, 10, 1, aligned),
+        ec_native.pack_joint_qpos_qvel_anchor_ori_window(joint_raw, 0, 10, 1, expected),
+        atol=1e-6,
+    )
+
+
+@pytest.mark.parametrize("bad", [[0, 0, 0, 0], [float("nan"), 0, 0, 1], [1, 0, 0, 0]])
+def test_reference_heading_rejects_undefined_initial_heading(bad):
+    with pytest.raises(RuntimeError, match="heading alignment quaternion is invalid"):
+        ec_native.align_heading_to_reference(bad, [0, 0, 0, 1], [0, 0, 0, 1])
 
 
 def _g1_mjcf_path() -> Path:

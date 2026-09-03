@@ -249,6 +249,9 @@ class FakeHoist:
     def slack(self) -> None:
         self.calls.append("slack")
 
+    def reset(self) -> None:
+        self.calls.append("reset")
+
 
 def _lifecycle(tmp_path=None, *, auto_ack=True, tracker_kwargs=None, **config):
     clock = FakeClock()
@@ -312,6 +315,15 @@ def test_happy_path_hoist_to_standing(tmp_path):
     assert states[-1] == "STANDING"
     assert all(json.loads(line)["ok"] for line in lines)
     assert (tmp_path / "pose_match.json").exists()
+
+
+def test_start_pose_ramp_auto_lengthens_to_stay_below_speed_cap():
+    lifecycle, tracker, vendor, hoist, clock = _lifecycle(ramp_seconds=0.1)
+    tracker.joint_pos = [-1.9] + [0.0] * 28
+    result = lifecycle.auto(S.START_POSE_RAMP)
+    assert result.ok
+    # 2 rad travel / (0.5 rad/s * 0.8 safety margin).
+    assert result.values["ramp_seconds"] == pytest.approx(5.0)
 
 
 def test_next_episode_restarts_at_precheck(tmp_path):

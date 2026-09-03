@@ -1,7 +1,7 @@
 import io
 
 from embodied_control.robot import Capability, FakeRobotRuntime, RobotMode
-from embodied_control.console import KEY_SPACE, KeyBinding, KeyConsole
+from embodied_control.console import KEY_DAMP, KeyBinding, KeyConsole
 from embodied_control.robot.shell import build_robot_bindings, robot_status
 
 
@@ -9,11 +9,11 @@ def _console(bindings, **kwargs):
     return KeyConsole(bindings, out=io.StringIO(), **kwargs)
 
 
-def test_damp_is_a_single_keypress():
+def test_damp_is_one_chord():
     robot = FakeRobotRuntime(writes_enabled=True, mode=RobotMode.READY)
     console = _console(build_robot_bindings(robot))
 
-    assert console.handle(KEY_SPACE) is True
+    assert console.handle(KEY_DAMP) is True
     assert robot.mode() is RobotMode.DAMP
 
 
@@ -50,7 +50,7 @@ def test_bindings_follow_capabilities():
     armless = FakeRobotRuntime(capabilities=frozenset({Capability.POSTURE}))
     # Capability advertisement and protocol structure are separate concerns;
     # what matters is that the console builds from the runtime it is given.
-    assert {b.key for b in build_robot_bindings(armless)} >= {KEY_SPACE, "q"}
+    assert {b.key for b in build_robot_bindings(armless)} >= {KEY_DAMP, "q"}
 
 
 def test_run_consumes_a_key_stream_until_quit():
@@ -73,7 +73,7 @@ def test_read_only_console_refuses_without_dying():
     out = io.StringIO()
     console = KeyConsole(build_robot_bindings(robot), out=out)
 
-    assert console.handle(KEY_SPACE) is True
+    assert console.handle(KEY_DAMP) is True
     assert "RobotWriteGateError" in out.getvalue()
 
 

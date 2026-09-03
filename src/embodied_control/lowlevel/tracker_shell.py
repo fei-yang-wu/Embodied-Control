@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from embodied_control.console import KEY_SPACE, ConsoleQuit, KeyBinding
+from embodied_control.console import KEY_DAMP, ConsoleQuit, KeyBinding
 
 
 @dataclass
@@ -107,7 +107,7 @@ def build_tracker_bindings(
         raise ConsoleQuit
 
     return [
-        KeyBinding(KEY_SPACE, "DAMP (safety stop)", damp, "safety"),
+        KeyBinding(KEY_DAMP, "DAMP (safety stop)", damp, "safety"),
         KeyBinding("p", "cycle predefined pose", cycle_pose, "pose"),
         KeyBinding("i", "ramp to selected pose", goto_pose, "pose"),
         KeyBinding("a", "engage control", engage, "serving"),

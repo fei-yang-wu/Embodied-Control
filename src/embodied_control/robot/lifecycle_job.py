@@ -57,6 +57,10 @@ class RealtimeSpec(JobModel):
 class LifecycleJob(JobModel):
     api_version: Literal["ec.lifecycle/v1alpha1"] = LIFECYCLE_API_VERSION
     bundle: str
+    # Additional deployable policy bundles. Keys are operator-facing tracker
+    # names; values are bundle directories. `bundle` remains the default and
+    # keeps existing jobs valid.
+    trackers: dict[str, str] = Field(default_factory=dict)
     network: str = "lo"
     dds_domain: int = 0
     request_slot: str = "/ec_g1_request"
@@ -67,6 +71,8 @@ class LifecycleJob(JobModel):
     motion: str = ""
     start_frame: int = Field(default=0, ge=0)
     fixed_initial_anchor: bool = False
+    # Legacy compatibility knob. Displacement is now reported, never rejected:
+    # curated moving references intentionally deploy from a fixed start anchor.
     fixed_anchor_max_displacement: float = Field(default=0.05, gt=0.0)
     # "default" is the bundle stance, "motion" is reference frame
     # `start_frame`, a list is an explicit 29-value Isaac-order qpos.
@@ -131,4 +137,8 @@ def load_lifecycle_job(path: str | Path) -> LifecycleJob:
         value = getattr(job, name)
         if value and not Path(value).is_absolute():
             setattr(job, name, str((base / value).resolve()))
+    job.trackers = {
+        name: str((base / value).resolve()) if not Path(value).is_absolute() else value
+        for name, value in job.trackers.items()
+    }
     return job

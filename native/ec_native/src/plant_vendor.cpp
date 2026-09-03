@@ -25,6 +25,7 @@ constexpr std::int32_t kPlantApiHoist = 9001;
 constexpr std::int32_t kPlantApiLower = 9002;
 constexpr std::int32_t kPlantApiStatus = 9003;
 constexpr std::int32_t kPlantApiSlack = 9004;
+constexpr std::int32_t kPlantApiReset = 9005;
 
 // Nonzero statuses in the vendor's own numbering range, so a refused call
 // reads as "the robot said no", never as a transport error.
@@ -37,6 +38,8 @@ struct SharedState {
   std::atomic<int> fsm_id{1};
   std::atomic<int> hoist_mode{PlantVendor::kHoistHoisted};
   std::atomic<std::uint64_t> hoist_generation{1};
+  std::atomic<std::uint64_t> reset_generation{0};
+  std::atomic<std::uint64_t> reset_applied_generation{0};
   std::string service_name;
 };
 
@@ -203,6 +206,8 @@ class PlantServer : public unitree::robot::Server {
                                              &PlantServer::Status);
     UT_ROBOT_SERVER_REG_API_HANDLER_NO_LEASE(kPlantApiSlack,
                                              &PlantServer::Slack);
+    UT_ROBOT_SERVER_REG_API_HANDLER_NO_LEASE(kPlantApiReset,
+                                             &PlantServer::Reset);
   }
 
  private:
@@ -222,6 +227,15 @@ class PlantServer : public unitree::robot::Server {
     return 0;
   }
 
+  std::int32_t Reset(const std::string&, std::string&) {
+    state_->fsm_id.store(1);
+    state_->owned.store(true);
+    state_->hoist_generation.fetch_add(1);
+    state_->hoist_mode.store(PlantVendor::kHoistHoisted);
+    state_->reset_generation.fetch_add(1);
+    return 0;
+  }
+
   std::int32_t Status(const std::string&, std::string& data) {
     const int mode = state_->hoist_mode.load();
     data = "{\"owned\":" + std::string(state_->owned.load() ? "true" : "false") +
@@ -229,6 +243,11 @@ class PlantServer : public unitree::robot::Server {
            ",\"hoisted\":" +
            std::string(mode == PlantVendor::kHoistHoisted ? "true" : "false") +
            ",\"hoist_mode\":" + std::to_string(mode) +
+           ",\"reset_pending\":" +
+           std::string(state_->reset_generation.load() !=
+                               state_->reset_applied_generation.load()
+                           ? "true"
+                           : "false") +
            ",\"service\":\"" + state_->service_name + "\"}";
     return 0;
   }
@@ -246,6 +265,7 @@ class PlantClientStub : public unitree::robot::Client {
     UT_ROBOT_CLIENT_REG_API_NO_PROI(kPlantApiLower);
     UT_ROBOT_CLIENT_REG_API_NO_PROI(kPlantApiStatus);
     UT_ROBOT_CLIENT_REG_API_NO_PROI(kPlantApiSlack);
+    UT_ROBOT_CLIENT_REG_API_NO_PROI(kPlantApiReset);
   }
 
   std::int32_t Slack() {
@@ -269,6 +289,12 @@ class PlantClientStub : public unitree::robot::Client {
   std::int32_t Status(std::string& data) {
     std::string parameter;
     return Call(kPlantApiStatus, parameter, data);
+  }
+
+  std::int32_t Reset() {
+    std::string parameter;
+    std::string data;
+    return Call(kPlantApiReset, parameter, data);
   }
 };
 
@@ -328,6 +354,14 @@ std::uint64_t PlantVendor::hoist_generation() const noexcept {
   return impl_->state->hoist_generation.load();
 }
 
+std::uint64_t PlantVendor::reset_generation() const noexcept {
+  return impl_->state->reset_generation.load();
+}
+
+void PlantVendor::mark_reset_applied(std::uint64_t generation) noexcept {
+  impl_->state->reset_applied_generation.store(generation);
+}
+
 const std::string& PlantVendor::service_name() const noexcept {
   return impl_->state->service_name;
 }
@@ -343,6 +377,14 @@ void PlantVendor::lower() noexcept {
 
 void PlantVendor::slack() noexcept {
   impl_->state->hoist_mode.store(kHoistSlack);
+}
+
+void PlantVendor::reset() noexcept {
+  impl_->state->fsm_id.store(1);
+  impl_->state->owned.store(true);
+  impl_->state->hoist_generation.fetch_add(1);
+  impl_->state->hoist_mode.store(kHoistHoisted);
+  impl_->state->reset_generation.fetch_add(1);
 }
 
 struct PlantClient::Impl {
@@ -368,6 +410,8 @@ void PlantClient::hoist() { check(impl_->client.Hoist(), "hoist"); }
 void PlantClient::lower() { check(impl_->client.Lower(), "lower"); }
 
 void PlantClient::slack() { check(impl_->client.Slack(), "slack"); }
+
+void PlantClient::reset() { check(impl_->client.Reset(), "reset"); }
 
 std::string PlantClient::status() {
   std::string data;

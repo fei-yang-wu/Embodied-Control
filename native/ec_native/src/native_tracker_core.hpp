@@ -68,6 +68,12 @@ struct RobotState {
   bool anchor_pose_valid = false;
 };
 
+bool align_heading_to_reference(
+    std::span<const float> initial_robot_quaternion,
+    std::span<const float> initial_reference_quaternion,
+    std::span<const float> robot_quaternion,
+    std::span<float> aligned_quaternion) noexcept;
+
 // Convert raw world-frame reference records
 // [joint qpos 29 | anchor position 3 | anchor quaternion XYZW 4] into
 // robot-anchored root_qpos frames

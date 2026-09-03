@@ -215,7 +215,7 @@ the split between the robot shell and the tracker shell for lifecycle work
 
 | Key | Request | Notes |
 |---|---|---|
-| `SPACE` | damp | from anywhere, never gated, never goes through `stop()` |
+| `Ctrl-D` | damp | from anywhere, never gated, never goes through `stop()` |
 | `n` | advance one state | runs the next gate, prints its evidence, stops on failure |
 | `a` | auto-advance to `PRIMED` | stops at the first failing gate or at an operator-ack state |
 | `g` | go | `PRIMED` → `BLEND_IN` → `RUNNING` (SONIC `]`) |
@@ -225,6 +225,8 @@ the split between the robot shell and the tracker shell for lifecycle work
 | `d` | release to vendor damp only | same chain without the stand (`end_state: vendor_damp`) |
 | `e` | retake episode | `HOLD` → `START_POSE_RAMP`, generation + 1 (SONIC `R`) |
 | `q` | quit | damps first (SONIC `O`) |
+| `t` / `T` | next / previous tracker | selects a named bundle while joints are unowned |
+| `R` | reset sim | closes tracker/planner and resets plant to nominal, vendor damp, hoisted |
 
 The console is an experiment session (`robot/session.py`), not one
 lifecycle: it owns the planner process (oracle worker or VLA planner worker,
@@ -238,9 +240,77 @@ remembering to save.
 On a terminal the console is full-screen (`robot/tui.py`): the ladder with
 the current rung marked, the writer's live numbers, the key legend, the last
 gate result and a log. Keys run on one worker thread so the screen never
-freezes behind a gate; `SPACE` bypasses the lifecycle lock and stores DAMP
+freezes behind a gate; `Ctrl-D` bypasses the lifecycle lock and stores DAMP
 straight into the writer, then records the transition once the gate returns.
 `--plain` keeps the line-mode console for pipes and tests.
+
+### Who runs where
+
+Nothing the operator touches shares a thread, a core or a process with the
+robot.
+
+| Runs | Where | Priority |
+|---|---|---|
+| 500 Hz writer | C++ thread, this process, pinned `writer_cpu` | SCHED_FIFO 90 |
+| 50 Hz control + policy | C++ thread, this process, pinned `control_cpu` | SCHED_FIFO 80 |
+| planner (oracle or VLA) | its own process, own session, off the robot cores | normal |
+| lifecycle gates and keys | console worker thread, off the robot cores | normal |
+| display and key reader | console main thread, off the robot cores | normal |
+| `/diagnose` agent | its own process, off the robot cores, `nice +10` | idle-ish |
+
+Three rules hold it together. The C++ threads never take the GIL, so Python
+cannot delay a control tick and a control tick cannot delay the display.
+Every console thread pins itself away from `control_cpu` and `writer_cpu` on
+first use (`robot/isolation.py`); a SCHED_OTHER thread that lands on a
+SCHED_FIFO 90 core is not slow, it is starved, and the thread in question is
+the one reading the damp key. And the render path performs no blocking call:
+`snapshot()` reads native counters and a cached copy of the plant's hoist
+status, which the watcher thread refreshes at 2 Hz, because that status is a
+DDS RPC with a timeout and a hung plant must never freeze the display.
+
+The planner is a child process and is never renice'd: the control loop waits
+on its replies inside a deadline. The diagnostic agent is renice'd hard,
+because it is an LLM CLI that would otherwise take every core it can find
+while a robot is standing on the floor.
+
+Damp is `Ctrl-D`, not `SPACE`. The space bar is the key an operator rests a
+hand on, scrolls with and taps while thinking, and an unwanted damp drops a
+standing robot; a control chord cannot be typed by accident, is never inserted
+into the prompt, and Ctrl-D collides with no terminal signal (Ctrl-C, Ctrl-Z,
+Ctrl-S/Q all do). `SPACE` is inert and says so once when pressed.
+
+The prompt is a real line editor (`CommandLine`), because the console is a
+harness and behaves like one: a cursor with arrows and Home/End, Backspace and
+Delete, `Ctrl-U`/`Ctrl-W`/`Ctrl-K`, `TAB` completion to the longest shared
+prefix, `↑`/`↓` history that outlives the prompt, the single remaining match
+shown as ghost text, and the matching commands listed under the line. Curses
+key codes are decoded to tokens first: with `keypad(True)` Backspace arrives as
+263, and `chr(263)` is a letter, which is why the first version inserted a
+character instead of deleting one.
+
+`render_rows` returns rows of styled spans and `render` flattens the same
+rows to plain text, which is what `--plain`, a pipe and every test read.
+Colour therefore lands on a word rather than a line: a label stays grey while
+its value is white, and one link's dot turns red without taking its
+neighbours with it. The state is a reverse-video badge toned by urgency, each
+link carries a sparkline of its own rate, and joint speed and tracking error
+draw gauges against the writer's own guards. The palette is xterm-256 with an
+8-colour fallback that keeps the same meanings; a terminal without colour
+still gets bold and dim. The layout reflows rather than truncates: above 118
+columns the three links share a row, below 96 the ladder is one column and
+the episode summary gives up its row, and under about fifteen rows the ladder
+leaves rather than showing a header with nothing under it.
+
+The full-screen view uses a command palette modeled after coding-agent CLIs.
+`/help` lists named forms of every key (`/next`, `/auto`, `/go`, `/hold`,
+`/stand`, `/damp`, and the selection commands). Commands intentionally accept
+no free-form arguments: `Ctrl-D` remains the emergency action during command
+entry. `/diagnose` is the sole agent command. It runs Codex or Claude Code as
+a bounded, non-persistent subprocess with read-only repository access and
+gives it the current snapshot plus recent console errors. It may explain and
+suggest safe checks; it cannot edit files, execute robot commands, or dispatch
+lifecycle actions. Agent use is explicit per diagnosis and can be disabled
+with `--diagnostic-agent off` when runtime telemetry must not leave the host.
 
 `ec lifecycle run <job.yaml> --until <STATE>` is the scripted form for tests
 and for CI-style loopback rehearsals, exit code 0 only if the target state
@@ -250,6 +320,21 @@ was reached and no fault was recorded. The job YAML carries the start pose
 (teleport).
 
 ### 5.1 How a session runs
+
+The plant starts from `examples/g1_plant.yaml` and an MJCF, independently of
+the session's tracker bundle:
+
+```bash
+pixi run -e native ec lowlevel plant examples/g1_plant.yaml \
+  --model assets/latent_playkit/model/g1_29dof_rev_1_0.xml \
+  --network lo --vendor --hoist --dds-domain 51
+```
+
+Its nominal pose and simulated vendor gains belong to the robot config.
+The session still selects a policy bundle for the tracker and a reference
+for the planner. Those choices do not reconfigure the plant. Initial-pose
+arrays use the plant config's joint order; recorded state includes names
+for explicit remapping when scoring against a reference.
 
 Three terminals on the control PC; the same three against the plant with
 `--network lo` plus a fourth for `ec lowlevel plant --hoist`.
@@ -268,7 +353,7 @@ T2  lifecycle + tracker + console (RT, owns rt/lowcmd, one process)
 T3  watch (optional, read-only): ec robot status, telemetry tail
 ```
 
-The console and the tracker share one process on purpose: `SPACE` reaches the
+The console and the tracker share one process on purpose: `Ctrl-D` reaches the
 writer through a lock-free mode store, which no socket can promise. A control
 socket so T2 can be split (or scripted from another host) is a later step,
 after M3.
@@ -287,7 +372,7 @@ The operator's script for one episode, hoisted, robot under vendor damp:
    `pose_match.json`. `n` → `POLICY_COMMAND_FRESH` prints probe latencies.
    `n` → `PRIMED`.
 6. `g` → `BLEND_IN` → `RUNNING`. The status line shows ticks and reference
-   frame. `SPACE` at any moment damps.
+   frame. `Ctrl-D` at any moment damps.
 7. The tick budget ends, or `h`: `HOLD`. Hook the hoist, take the load, press
    `H`.
 8. `s`: `DAMP` → `RELEASED` → `VENDOR_RESTORED` → `VENDOR_STAND`. Lower the
@@ -357,6 +442,38 @@ written down before the session.
    frame) relative to its first frame. H3 confirms the convention on the
    robot before H4 trusts the tilt term.
 
+### SONIC v1.1 compatibility
+
+The native runtime supports the exported G1 reference contract used for
+SONIC v1.1: `encoder_state_interface: joint_qpos_qvel_anchor_ori`,
+`macro_anchor_mode: robot_heading`, `state_dim: 64`, ten frames at
+`macro_frame_stride: 5`, and `encoder_trigger: every_control_tick`.
+Reference arrays must include joint velocities. The oracle worker streams
+raw poses and velocities; C++ selects the requested frames and packs the
+640-value encoder input. Synthetic native tests cover packing, stride,
+per-tick encoding, and independence from the initial IMU heading.
+
+This is support for a matching **exported EC bundle**, not direct loading of
+NVIDIA's release directory. The local `fsq64_sonic_4500m` bundle is a
+lab-trained checkpoint with a different reference contract. It is not the
+official SONIC v1.1 checkpoint.
+
+The official release is `nvidia/GEAR-SONIC/sonic_v1_1`, checked against Hub
+revision `6733128a3d8a523b1418b06bca3cdf61c8b0987f`. Its
+[observation configuration](https://huggingface.co/nvidia/GEAR-SONIC/blob/6733128a3d8a523b1418b06bca3cdf61c8b0987f/sonic_v1_1/observation_config.yaml)
+declares a 1,751-value multimode encoder input, a 994-value decoder input,
+and a 64-value token. The G1 reference uses ten frames at step 5; other
+modalities have their own cadence. Its encoder, decoder, and observation
+configuration must remain matched; see the
+[NVIDIA model card](https://nvlabs.github.io/GR00T-WholeBodyControl/model_card.html).
+
+Making the official release selectable here still requires an export or
+adapter for the G1 encoder branch, exact decoder observation ordering and
+history, the matching action/joint/gain contract, provenance hashes, and
+parity traces. The current tests do not establish numerical parity or
+closed-loop performance for NVIDIA's release weights. The Python
+`ec lowlevel run` path is also separate from this native encoder support.
+
 ## 8. Non-goals
 
 - No joystick path, no `SwitchToUserCtrl`, no second write topic.
@@ -386,9 +503,12 @@ would have reached hardware otherwise.
 - **The fixed anchor needs the robot's own tilt.** An IMU-only anchor told
   the policy its target was rotated by the start-heading offset (88° on the
   plant: it turned, then fell); a reference-only anchor left it blind to its
-  tilt and it drifted over. The anchor orientation is now the reference's
-  frame-0 orientation rotated by the IMU's change since the first frame;
-  the position stays frozen at frame 0.
+  tilt and it drifted over. A full initial-orientation alignment also erased
+  the initial tilt error. The anchor now uses a constant yaw-only offset,
+  `heading(q_ref_start) * inverse(heading(q_imu_start)) * q_imu_current`.
+  This maps the robot into the reference world while preserving absolute
+  tilt and subsequent turns. The heading is recaptured at every runtime start
+  (probe, go, and retake); position stays at the selected reference start.
 - **The policy's own PD gains cannot hold the start pose.** Under gravity the
   28 N m/rad waist sagged 0.42 rad and the robot toppled when lowered. Ramp,
   settle and HOLD use 3x stiffness (√3x damping); the blend-in walks gains
@@ -438,4 +558,3 @@ would have reached hardware otherwise.
   robot on the floor re-damped a DISABLED writer and blocked `close_gate`;
   the latch no longer touches a disabled writer, and PRECHECK clears it so
   the next episode can start.
-

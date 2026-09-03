@@ -39,11 +39,16 @@ class Selection:
     mode: str = "oracle"
     motion: str = ""
     start_frame: int = 0
+    tracker: str = ""
 
     def label(self) -> str:
+        suffix = f" [{self.tracker}]" if self.tracker else ""
         if self.mode == "oracle":
-            return f"oracle {self.motion}@{self.start_frame}"
-        return f"vla planner (start pose {self.motion or 'default'}@{self.start_frame})"
+            return f"oracle {self.motion}@{self.start_frame}{suffix}"
+        return (
+            f"vla planner (start pose {self.motion or 'default'}@{self.start_frame})"
+            f"{suffix}"
+        )
 
 
 class PlannerHandle(Protocol):
@@ -61,14 +66,29 @@ class TrackerHandle(Protocol):
 
 
 class SubprocessPlanner:
-    """oracle-worker or planner-worker as a child of the console."""
+    """oracle-worker or planner-worker as a child of the console.
 
-    def __init__(self, argv: list[str], log_path: Path | None = None) -> None:
+    Its own process, so its ONNX session, its disk reads and its Python GC
+    cannot touch the control loop's deadline or the console's key handler.
+    `preexec` keeps it off the cores the robot threads are pinned to; it is
+    never renice'd, because the control loop waits on its replies.
+    """
+
+    def __init__(
+        self,
+        argv: list[str],
+        log_path: Path | None = None,
+        preexec: Callable[[], None] | None = None,
+    ) -> None:
         self.argv = list(argv)
         self.log_path = log_path
         self._log = open(log_path, "ab") if log_path else subprocess.DEVNULL
         self._process = subprocess.Popen(
-            self.argv, stdout=self._log, stderr=subprocess.STDOUT
+            self.argv,
+            stdout=self._log,
+            stderr=subprocess.STDOUT,
+            preexec_fn=preexec,
+            start_new_session=True,
         )
 
     def alive(self) -> bool:
@@ -194,6 +214,7 @@ def episode_summary(
     return {
         "episode": episode,
         "mode": selection.mode,
+        "tracker": selection.tracker,
         "motion": selection.motion,
         "start_frame": selection.start_frame,
         "ticks": int(stats.get("control_ticks", 0)),
@@ -215,6 +236,7 @@ def episode_summary(
 class SessionConfig:
     catalog: list[str]
     motion_lengths: dict[str, int]
+    trackers: list[str] = field(default_factory=list)
     modes: tuple[str, ...] = MODES
     frame_step: int = 25
     slot_timeout_seconds: float = 20.0
@@ -227,6 +249,7 @@ class ExperimentSession:
         config: SessionConfig,
         selection: Selection,
         *,
+        hoist: Hoist | None = None,
         planner_factory: Callable[[Selection], PlannerHandle],
         tracker_factory: Callable[[Selection], TrackerHandle],
         lifecycle_factory: Callable[[TrackerHandle, Selection, "ExperimentSession"], Lifecycle],
@@ -238,6 +261,7 @@ class ExperimentSession:
     ) -> None:
         self.config = config
         self.selection = selection
+        self.hoist = hoist
         self._planner_factory = planner_factory
         self._tracker_factory = tracker_factory
         self._lifecycle_factory = lifecycle_factory
@@ -253,6 +277,12 @@ class ExperimentSession:
         self.episodes: list[dict] = []
         self._episode_written: tuple | None = None
         self.note_sinks: list = []
+        # The plant's hoist status is a blocking DDS RPC. `poll` refreshes it
+        # from the watcher thread; `snapshot` only ever reads the cache, so a
+        # hung plant cannot freeze the display.
+        self._hoist_status: dict | None = None
+        self._hoist_checked = 0.0
+        self._hoist_period = 0.5
 
     # ---------------------------------------------------------- selection
 
@@ -299,6 +329,16 @@ class ExperimentSession:
         length = self.motion_length(self.selection.motion)
         frame = max(0, min(length - 1, self.selection.start_frame + delta))
         return self._reconfigure(replace(self.selection, start_frame=frame))
+
+    def step_tracker(self, step: int) -> GateResult:
+        if not self.config.trackers:
+            return self._refuse("no tracker catalog")
+        try:
+            index = self.config.trackers.index(self.selection.tracker)
+        except ValueError:
+            index = -1
+        tracker = self.config.trackers[(index + step) % len(self.config.trackers)]
+        return self._reconfigure(replace(self.selection, tracker=tracker))
 
     def motion_length(self, motion: str) -> int:
         return int(self.config.motion_lengths.get(motion, 1))
@@ -386,6 +426,31 @@ class ExperimentSession:
             self.planner.stop()
             self.planner = None
 
+    def reset_sim(self) -> GateResult:
+        """Drop controller state, then ask simulated plant for a clean boot."""
+        reset = getattr(self.hoist, "reset", None)
+        if reset is None:
+            return self._refuse("sim reset is unavailable for this session")
+        if self.tracker is not None:
+            self.emergency_damp()
+            self.tracker.close()
+            self.tracker = None
+        if self.planner is not None:
+            self.planner.stop()
+            self.planner = None
+        if self.lifecycle is not None:
+            self.lifecycle.log.finish(self.lifecycle.summary())
+            self.lifecycle = None
+        self.built_for = None
+        self._episode_written = None
+        try:
+            reset()
+            self.refresh_hoist(now=self._hoist_checked + self._hoist_period)
+        except Exception as exc:
+            return self._refuse(f"sim reset failed: {exc}")
+        self._note("sim reset to nominal pose; rebuild tracker when ready")
+        return GateResult(True, "sim reset to nominal pose")
+
     # ------------------------------------------------------------ episodes
 
     def _on_transition(self, transition: Transition) -> None:
@@ -423,8 +488,10 @@ class ExperimentSession:
         )
         directory = None
         if self.config.artifacts_dir:
+            tracker_prefix = f"{self.selection.tracker}_" if self.selection.tracker else ""
             directory = Path(self.config.artifacts_dir) / "episodes" / (
-                f"ep{episode:03d}_{self.selection.mode}_{self.selection.motion or 'default'}"
+                f"ep{episode:03d}_{tracker_prefix}{self.selection.mode}_"
+                f"{self.selection.motion or 'default'}"
                 f"@{self.selection.start_frame}"
             )
             directory.mkdir(parents=True, exist_ok=True)
@@ -459,6 +526,20 @@ class ExperimentSession:
 
     # ------------------------------------------------------------- view
 
+    def refresh_hoist(self, now: float | None = None) -> None:
+        """Blocking plant RPC, called from the watcher thread only."""
+        status = getattr(self.hoist, "status", None)
+        if status is None:
+            return
+        moment = time.monotonic() if now is None else now
+        if moment - self._hoist_checked < self._hoist_period:
+            return
+        self._hoist_checked = moment
+        try:
+            self._hoist_status = status()
+        except Exception:
+            self._hoist_status = None
+
     def snapshot(self) -> dict:
         base = self.lifecycle.snapshot() if self.lifecycle is not None else {
             "state": "NO TRACKER", "fault_reason": "", "vendor_name": "",
@@ -470,6 +551,10 @@ class ExperimentSession:
             planner = self.planner.describe()
         base["session"] = {
             "mode": self.selection.mode,
+            "tracker": self.selection.tracker,
+            "tracker_index": (self.config.trackers.index(self.selection.tracker) + 1)
+            if self.selection.tracker in self.config.trackers else 0,
+            "tracker_count": len(self.config.trackers),
             "motion": self.selection.motion,
             "motion_index": (self.config.catalog.index(self.selection.motion) + 1)
             if self.selection.motion in self.config.catalog else 0,
@@ -481,6 +566,8 @@ class ExperimentSession:
             "built_for": self.built_for.label() if self.built_for else "",
             "episodes": self.episodes[-3:],
         }
+        if self._hoist_status is not None:
+            base["hoist"] = self._hoist_status
         return base
 
     def emergency_damp(self) -> None:
@@ -540,5 +627,6 @@ class ExperimentSession:
             self.lifecycle.ack_lowered()
 
     def poll(self) -> None:
+        self.refresh_hoist()
         if self.lifecycle is not None:
             self.lifecycle.poll()

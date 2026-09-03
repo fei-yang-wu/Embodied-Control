@@ -16,7 +16,7 @@ from embodied_control.console import (
     KEY_DOWN,
     KEY_LEFT,
     KEY_RIGHT,
-    KEY_SPACE,
+    KEY_DAMP,
     KEY_UP,
     ConsoleQuit,
     KeyBinding,
@@ -41,7 +41,7 @@ def build_robot_bindings(
         raise ConsoleQuit
 
     bindings = [
-        KeyBinding(KEY_SPACE, "DAMP (safety stop)", runtime.damp, "safety"),
+        KeyBinding(KEY_DAMP, "DAMP (safety stop)", runtime.damp, "safety"),
         KeyBinding("z", "zero torque", runtime.zero_torque, "safety"),
         KeyBinding("r", "ready (stand + balance)", runtime.ready, "lifecycle"),
     ]
@@ -122,14 +122,17 @@ def build_session_bindings(session) -> list[KeyBinding]:
             raise RuntimeError(result.detail)
 
     return [
-        KeyBinding(KEY_SPACE, "DAMP (safety stop)", lambda: report(session.damp()), "safety"),
+        KeyBinding(KEY_DAMP, "DAMP (safety stop)", lambda: report(session.damp()), "safety"),
         KeyBinding("o", "mode: oracle / vla", lambda: report(session.toggle_mode()), "select"),
         KeyBinding("m", "motion: next", lambda: report(session.step_motion(1)), "select"),
         KeyBinding("M", "motion: previous", lambda: report(session.step_motion(-1)), "select"),
+        KeyBinding("t", "tracker: next", lambda: report(session.step_tracker(1)), "select"),
+        KeyBinding("T", "tracker: previous", lambda: report(session.step_tracker(-1)), "select"),
         KeyBinding("f", "start frame +25", lambda: report(session.step_frame(session.config.frame_step)), "select"),
         KeyBinding("F", "start frame -25", lambda: report(session.step_frame(-session.config.frame_step)), "select"),
         KeyBinding("p", "planner: start / stop", lambda: report(session.toggle_planner()), "select"),
         KeyBinding("r", "rebuild tracker for selection", lambda: report(session.rebuild()), "select"),
+        KeyBinding("R", "reset simulated robot to nominal pose", lambda: report(session.reset_sim()), "safety"),
         KeyBinding("n", "next: advance one state", lambda: report(session.advance()), "ladder"),
         KeyBinding("a", "auto-advance to PRIMED", lambda: report(session.auto(LifecycleState.PRIMED)), "ladder"),
         KeyBinding("g", "go: PRIMED -> BLEND_IN -> RUNNING", lambda: report(session.go()), "episode"),
@@ -156,7 +159,7 @@ def build_lifecycle_bindings(lifecycle) -> list[KeyBinding]:
             raise RuntimeError(result.detail)
 
     return [
-        KeyBinding(KEY_SPACE, "DAMP (safety stop)", lambda: report(lifecycle.damp()), "safety"),
+        KeyBinding(KEY_DAMP, "DAMP (safety stop)", lambda: report(lifecycle.damp()), "safety"),
         KeyBinding("n", "next: advance one state", lambda: report(lifecycle.advance()), "ladder"),
         KeyBinding("a", "auto-advance to PRIMED", lambda: report(lifecycle.auto(LifecycleState.PRIMED)), "ladder"),
         KeyBinding("g", "go: PRIMED -> BLEND_IN -> RUNNING", lambda: report(lifecycle.go()), "episode"),

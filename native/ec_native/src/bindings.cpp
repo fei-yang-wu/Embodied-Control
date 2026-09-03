@@ -81,6 +81,21 @@ py::array_t<float> reexpress_root_qpos_binding(
   return output;
 }
 
+py::array_t<float> align_heading_binding(
+    const FloatArray& initial_robot, const FloatArray& initial_reference,
+    const FloatArray& current_robot) {
+  const auto initial = vector_from_array(initial_robot, 4, "initial_robot");
+  const auto reference = vector_from_array(initial_reference, 4, "initial_reference");
+  const auto current = vector_from_array(current_robot, 4, "current_robot");
+  py::array_t<float> output(4);
+  if (!ec_native::align_heading_to_reference(
+          initial, reference, current,
+          std::span<float>(output.mutable_data(), 4))) {
+    throw std::runtime_error("heading alignment quaternion is invalid");
+  }
+  return output;
+}
+
 py::array_t<float> projected_gravity_binding(const FloatArray& quaternion) {
   const auto values = vector_from_array(quaternion, 4, "quaternion_xyzw");
   py::array_t<float> output(3);
@@ -940,6 +955,13 @@ class MujocoDdsPlantBinding {
     plant_.set_initial_pose(values);
   }
 
+  py::array_t<float> latest_state() const {
+    const auto values = plant_.latest_state();
+    py::array_t<float> out(static_cast<py::ssize_t>(values.size()));
+    std::copy(values.begin(), values.end(), out.mutable_data());
+    return out;
+  }
+
   py::array_t<float> state_log() const {
     const std::vector<float> values = plant_.state_log();
     const std::size_t rows = values.size() / 36;
@@ -1036,6 +1058,9 @@ PYBIND11_MODULE(_ec_native, m) {
         py::arg("anchor_quaternion_w"));
   m.def("projected_gravity_from_xyzw", &projected_gravity_binding,
         py::arg("quaternion_xyzw"));
+  m.def("align_heading_to_reference", &align_heading_binding,
+        py::arg("initial_robot"), py::arg("initial_reference"),
+        py::arg("current_robot"));
   m.def("pack_joint_qpos_qvel_anchor_ori_window",
         &pack_joint_reference_binding, py::arg("raw_world_frames"),
         py::arg("start_frame"), py::arg("frame_count"),
@@ -1409,6 +1434,7 @@ PYBIND11_MODULE(_ec_native, m) {
       .def("reset", &MujocoDdsPlantBinding::reset)
       .def("set_initial_pose", &MujocoDdsPlantBinding::set_initial_pose,
            py::arg("pose"))
+      .def("latest_state", &MujocoDdsPlantBinding::latest_state)
       .def("state_log", &MujocoDdsPlantBinding::state_log)
       .def("stats", &MujocoDdsPlantBinding::stats);
 
@@ -1421,6 +1447,8 @@ PYBIND11_MODULE(_ec_native, m) {
       .def("lower", &ec_native::PlantClient::lower,
            py::call_guard<py::gil_scoped_release>())
       .def("slack", &ec_native::PlantClient::slack,
+           py::call_guard<py::gil_scoped_release>())
+      .def("reset", &ec_native::PlantClient::reset,
            py::call_guard<py::gil_scoped_release>())
       .def("status", &ec_native::PlantClient::status,
            py::call_guard<py::gil_scoped_release>());

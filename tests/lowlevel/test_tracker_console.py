@@ -1,6 +1,6 @@
 import io
 
-from embodied_control.console import KEY_SPACE, KeyConsole
+from embodied_control.console import KEY_DAMP, KeyConsole
 from embodied_control.lowlevel.tracker_shell import (
     Pose,
     TrackerConsoleState,
@@ -53,7 +53,7 @@ def test_damp_does_not_route_through_stop():
     tracker, state, console = _setup()
     state.serving = True
 
-    console.handle(KEY_SPACE)
+    console.handle(KEY_DAMP)
 
     # force_damp lands on the independent writer thread even if the control
     # thread is wedged; requiring stop() first would defeat that.

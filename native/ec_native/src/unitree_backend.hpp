@@ -89,15 +89,12 @@ class NativeUnitreeBackend final : public NativeRobotBackend {
 
   bool state_ready() const noexcept;
   // Anchor the encoder at the reference's start-frame pose. The G1 has no
-  // external localization, so the position stays frozen at frame 0 (the
-  // >=5 cm displacement guard in the CLI bounds that error). The orientation
-  // is the reference's frame-0 orientation rotated by the IMU's change since
-  // the first frame: the same thing the sim's measured anchor reports when
-  // the episode starts on the reference frame, so tilt and heading drift
-  // still feed back into the command. Using the raw IMU orientation instead
-  // told the policy its target was rotated by the start-heading offset
-  // (88 deg on the plant: it turned, then fell); using the reference's alone
-  // left it blind to its own tilt.
+  // external localization, so position feedback stays at the selected
+  // reference start frame even for a moving reference. The orientation
+  // is expressed in the reference world using a constant yaw-only offset
+  // captured at each runtime start. Absolute tilt and subsequent heading
+  // changes remain visible. Using raw IMU yaw made the policy chase the
+  // dataset's heading; matching full initial orientation hid real tilt error.
   void set_fixed_anchor_pose(std::span<const float> position,
                              std::span<const float> quaternion_xyzw);
   // hold_current ramps to the pose the robot is already in instead of the
@@ -192,7 +189,7 @@ class NativeUnitreeBackend final : public NativeRobotBackend {
   std::array<float, 3> fixed_anchor_position_{};
   // XYZW, matching RobotState::anchor_quaternion_w everywhere else.
   std::array<float, 4> fixed_anchor_quaternion_{0.0F, 0.0F, 0.0F, 1.0F};
-  // IMU orientation (XYZW) at the first valid frame after the anchor was set.
+  // IMU orientation (XYZW) at the first valid frame of each runtime start.
   std::array<float, 4> fixed_anchor_imu_start_{0.0F, 0.0F, 0.0F, 1.0F};
   bool fixed_anchor_enabled_ = false;
   bool fixed_anchor_imu_captured_ = false;

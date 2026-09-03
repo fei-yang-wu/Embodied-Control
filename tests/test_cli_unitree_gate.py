@@ -63,7 +63,7 @@ def test_hurry_idle_is_accepted_for_fixed_initial_anchor():
     assert ticks == 504
 
 
-def test_hurry_idle_rejects_an_overly_tight_fixed_anchor_limit():
+def test_fixed_anchor_accepts_every_curated_motion():
     pytest.importorskip("numpy")
     from embodied_control.lowlevel.bundle import PolicyBundle
 
@@ -71,11 +71,18 @@ def test_hurry_idle_rejects_an_overly_tight_fixed_anchor_limit():
     bundle = PolicyBundle.load(
         root / "assets/latent_playkit/bundles/fsq64_sonic_4500m"
     )
-    with pytest.raises(ValueError, match="exceeds the fixed-anchor limit"):
-        _unitree_stationary_anchor(
+    reference_root = root / "assets/latent_playkit/reference/root_qpos_v1"
+    from embodied_control.lowlevel.reference import ReferenceArrays
+
+    arrays = ReferenceArrays(reference_root)
+    for motion in arrays.motion_names:
+        anchor, displacement, ticks = _unitree_stationary_anchor(
             bundle,
-            str(root / "assets/latent_playkit/reference/root_qpos_v1"),
-            "hurry_idle_001_A277",
+            str(reference_root),
+            motion,
             0,
             0.001,
         )
+        assert anchor.position.shape == (3,)
+        assert displacement >= 0.0
+        assert ticks == arrays.motion(motion).length - 1

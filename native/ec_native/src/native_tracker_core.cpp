@@ -106,6 +106,32 @@ std::size_t expected_width(TermKind kind) {
 
 }  // namespace
 
+bool align_heading_to_reference(
+    std::span<const float> initial_robot_quaternion,
+    std::span<const float> initial_reference_quaternion,
+    std::span<const float> robot_quaternion,
+    std::span<float> aligned_quaternion) noexcept {
+  std::array<float, 4> initial{}, reference{}, current{};
+  if (aligned_quaternion.size() != 4 ||
+      !normalized_quaternion(initial_robot_quaternion, initial) ||
+      !normalized_quaternion(initial_reference_quaternion, reference) ||
+      !normalized_quaternion(robot_quaternion, current)) {
+    return false;
+  }
+  initial[0] = initial[1] = reference[0] = reference[1] = 0.0F;
+  if (!normalized_quaternion(initial, initial) ||
+      !normalized_quaternion(reference, reference)) {
+    return false;
+  }
+  initial[2] = -initial[2];
+  // Only world yaw is arbitrary. Cancelling the full initial pose would
+  // erase real tilt error and disagree with the policy's projected gravity.
+  const auto offset = multiply_quaternions(reference, initial);
+  const auto aligned = multiply_quaternions(offset, current);
+  std::copy(aligned.begin(), aligned.end(), aligned_quaternion.begin());
+  return true;
+}
+
 bool reexpress_root_qpos_window(
     std::span<const float> raw_world_frames, std::size_t frame_count,
     std::span<const float> anchor_position_w,

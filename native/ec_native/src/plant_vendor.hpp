@@ -40,19 +40,22 @@ class PlantVendor {
   // Bumps on every hoist request, so the plant re-captures the hoist target
   // at the robot's current pose rather than the one it started at.
   std::uint64_t hoist_generation() const noexcept;
+  std::uint64_t reset_generation() const noexcept;
+  void mark_reset_applied(std::uint64_t generation) noexcept;
   const std::string& service_name() const noexcept;
 
   // In-process controls, for tests and for a plant driven from Python.
   void hoist() noexcept;
   void lower() noexcept;
   void slack() noexcept;
+  void reset() noexcept;
 
  private:
   struct Impl;
   std::unique_ptr<Impl> impl_;
 };
 
-// Client for the plant-only "ec_plant" service (hoist / lower / status).
+// Client for the plant-only "ec_plant" service (gantry, reset, status).
 class PlantClient {
  public:
   PlantClient(const std::string& network_interface, int dds_domain,
@@ -65,7 +68,8 @@ class PlantClient {
   void hoist();
   void lower();
   void slack();
-  // JSON: {"owned":bool,"fsm_id":int,"hoisted":bool,"hoist_mode":int,"service":str}
+  void reset();
+  // JSON: ownership, FSM, hoist mode, reset acknowledgement, service name.
   std::string status();
 
  private:

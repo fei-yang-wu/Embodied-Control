@@ -77,23 +77,6 @@ bool finite_values(std::span<const float> values) {
 // hundred nanoseconds *after* `now` was sampled. Unsigned subtraction then
 // wraps to 1.8e10 ms and trips a watchdog; that fired about once every 20 s
 // of loopback and would have damped a walking robot for no reason.
-// Hamilton product on XYZW quaternions.
-std::array<float, 4> quat_multiply_xyzw(const std::array<float, 4>& a,
-                                        const std::array<float, 4>& b) noexcept {
-  const float ax = a[0], ay = a[1], az = a[2], aw = a[3];
-  const float bx = b[0], by = b[1], bz = b[2], bw = b[3];
-  return {
-      aw * bx + ax * bw + ay * bz - az * by,
-      aw * by - ax * bz + ay * bw + az * bx,
-      aw * bz + ax * by - ay * bx + az * bw,
-      aw * bw - ax * bx - ay * by - az * bz,
-  };
-}
-
-std::array<float, 4> quat_conjugate_xyzw(const std::array<float, 4>& q) noexcept {
-  return {-q[0], -q[1], -q[2], q[3]};
-}
-
 double age_ms_since(std::uint64_t now_ns, std::uint64_t stamp_ns) noexcept {
   const std::int64_t delta = static_cast<std::int64_t>(now_ns) -
                              static_cast<std::int64_t>(stamp_ns);
@@ -233,7 +216,12 @@ NativeUnitreeBackend::~NativeUnitreeBackend() {
   impl_->subscriber.reset();
 }
 
-void NativeUnitreeBackend::reset() {}
+void NativeUnitreeBackend::reset() {
+  // Probe, go, and subsequent episodes can start at different headings.
+  // NativeFakeRuntime calls reset only after the previous loop has joined.
+  fixed_anchor_imu_captured_ = false;
+  state_cache_.anchor_pose_valid = false;
+}
 
 bool NativeUnitreeBackend::snapshot_state(StateSnapshot& destination) const
     noexcept {
@@ -434,16 +422,10 @@ const RobotState& NativeUnitreeBackend::read_state() noexcept {
       fixed_anchor_imu_start_ = quaternion_xyzw;
       fixed_anchor_imu_captured_ = true;
     }
-    // q_ref0 * (q_imu0^-1 * q_imu): the body-side rotation since the first
-    // frame, applied to the reference's start orientation. Body-side, so the
-    // unknown heading offset between the IMU world and the reference world
-    // cancels.
-    const std::array<float, 4> delta = quat_multiply_xyzw(
-        quat_conjugate_xyzw(fixed_anchor_imu_start_), quaternion_xyzw);
     state_cache_.anchor_position_w = fixed_anchor_position_;
-    state_cache_.anchor_quaternion_w =
-        quat_multiply_xyzw(fixed_anchor_quaternion_, delta);
-    state_cache_.anchor_pose_valid = true;
+    state_cache_.anchor_pose_valid = align_heading_to_reference(
+        fixed_anchor_imu_start_, fixed_anchor_quaternion_, quaternion_xyzw,
+        state_cache_.anchor_quaternion_w);
   }
   return state_cache_;
 }
