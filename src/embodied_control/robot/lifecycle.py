@@ -27,6 +27,7 @@ from embodied_control.robot.gates import (
     counter_advanced,
     max_abs_diff,
     pose_match,
+    tilt_degrees,
     tilt_match,
     unchanged,
 )
@@ -80,6 +81,19 @@ RESTART_STATES = frozenset(
         LifecycleState.STANDING,
         LifecycleState.VENDOR_RESTORED,
         LifecycleState.RELEASED,
+    }
+)
+
+# Where `recover()` has something left to hand back. Every other state
+# either never took the joints or has already given them up.
+RECOVERABLE_STATES = frozenset(
+    {
+        LifecycleState.HOLD,
+        LifecycleState.FAULT,
+        LifecycleState.DAMP,
+        LifecycleState.RELEASED,
+        LifecycleState.VENDOR_RESTORED,
+        LifecycleState.VENDOR_STAND,
     }
 )
 
@@ -212,7 +226,19 @@ class LifecycleConfig:
     pin_reference: bool = True
     ticks: int = 500
     blend_ticks: int = 250
-    end_state: str = "vendor_stand"
+    # Where a run rests. An episode ends with the robot limp under the
+    # vendor's own damp, so the next one has to climb PRECHECK again; a
+    # vendor stand is the explicit `s` request, never the default.
+    end_state: str = "vendor_damp"
+    # `damp` hands the joints back to the vendor after our kd-only frames
+    # land, so DAMP is never a resting state with our writer still owning
+    # rt/lowcmd. The kd frames are unconditional; only the hand-back waits
+    # for the hoist acknowledgement.
+    damp_hands_back: bool = True
+    # A retake re-reads the link before it drives the robot again. It is a
+    # subset of PRECHECK: the vendor is already released and the ladder's
+    # vendor rows would fail by design.
+    retake_precheck: bool = True
     vendor_name: str = ""
     require_vendor: bool = True
     allow_non_realtime: bool = False
@@ -375,10 +401,50 @@ class Lifecycle:
                 return self._refuse(f"hold needs RUNNING, not {self.state}")
             return self._attempt(LifecycleState.HOLD)
 
-    def damp(self) -> GateResult:
-        """Always legal. Never goes through stop() first."""
+    def damp(self, *, hand_back: bool | None = None) -> GateResult:
+        """Always legal. Never goes through stop() first.
+
+        The kd-only frames land first and unconditionally. Then, unless the
+        caller says otherwise, the joints go back to the vendor's own damp
+        (`SelectMode`, FSM 1) so the robot rests limp under the vendor and
+        the next trajectory has to climb PRECHECK again. That hand-back
+        needs the hoist: `SelectMode` restarts the vendor service in damp,
+        and the robot is limp for about a second while it comes back.
+        """
         with self._lock:
-            return self._attempt(LifecycleState.DAMP)
+            result = self._attempt(LifecycleState.DAMP)
+            if not result.ok:
+                return result
+            wants = self.config.damp_hands_back if hand_back is None else hand_back
+            # `end_state: damp` is a deliberate "our frames keep the joints".
+            wants = wants and self.config.end_state != "damp"
+            if not wants or self.vendor is None or not self.vendor_name:
+                return result
+            if not self._hoist_ready():
+                return GateResult(
+                    True,
+                    "damp frames on the wire; hook the hoist and press H, "
+                    "then `d` to hand the joints back to the vendor",
+                    result.values,
+                )
+            handed = self._hand_back_to_vendor()
+            if not handed.ok:
+                return handed
+            return GateResult(
+                True,
+                f"damped, then handed back: {handed.detail}",
+                {**result.values, **handed.values},
+            )
+
+    def _hand_back_to_vendor(self) -> GateResult:
+        """DAMP -> RELEASED -> VENDOR_RESTORED. The caller holds the lock."""
+        if self.state is LifecycleState.DAMP:
+            result = self._attempt(LifecycleState.RELEASED)
+            if not result.ok:
+                return result
+        if self.state is LifecycleState.RELEASED:
+            return self._attempt(LifecycleState.VENDOR_RESTORED)
+        return GateResult(True, f"already at {self.state}")
 
     def emergency_damp(self) -> None:
         """Damp without waiting for the lock.
@@ -440,6 +506,8 @@ class Lifecycle:
         """
         with self._lock:
             end = end_state or self.config.end_state
+            if self.state not in RECOVERABLE_STATES:
+                return self._refuse(f"nothing to recover from {self.state}")
             if self.state in {LifecycleState.HOLD, LifecycleState.FAULT}:
                 if self.state is LifecycleState.HOLD and not self._hoist_ready():
                     return self._refuse(
@@ -474,12 +542,31 @@ class Lifecycle:
             return self._refuse(f"nothing to recover from {self.state}")
 
     def retake(self) -> GateResult:
-        """HOLD -> START_POSE_RAMP with the vendor still released."""
+        """HOLD -> START_POSE_RAMP with the vendor still released.
+
+        A second episode drives the robot again, so it re-reads the link
+        first: the PRECHECK rows that do not involve the vendor, which is
+        already released and would fail those rows by design.
+        """
         with self._lock:
             if self.state is not LifecycleState.HOLD:
                 return self._refuse(f"retake needs HOLD, not {self.state}")
             if not self._hoist_ready():
                 return self._refuse("hook the hoist and press H before retaking")
+            if self.config.retake_precheck:
+                link = self._link_evidence({})
+                self._record(
+                    Transition(
+                        at=self._now(),
+                        from_state=str(self.state),
+                        to_state="RETAKE_PRECHECK",
+                        ok=link.ok,
+                        detail=link.detail,
+                        values=dict(link.values),
+                    )
+                )
+                if not link.ok:
+                    return self._refuse(f"retake precheck failed: {link.detail}")
             self.lowered_ack = False
             self.episode += 1
             self.state = LifecycleState.USER_CONTROL_CONFIRMED
@@ -710,11 +797,9 @@ class Lifecycle:
 
     # --------------------------------------------------------- the ladder
 
-    def _enter_precheck(self) -> GateResult:
-        values: dict = {}
-        self.fault_reason = ""
-        self.lowered_ack = False
-        self.episode += 1
+    def _link_evidence(self, values: dict) -> GateResult:
+        """The link rows shared by PRECHECK and a retake: a fresh state
+        stream, no CRC errors and no latched hardware fault."""
         if not self.tracker.wait_for_state(self.config.state_timeout_seconds):
             return GateResult(False, "no fresh rt/lowstate", values)
         # A previous episode's latch (a fall trips joint limits) must not
@@ -736,6 +821,17 @@ class Lifecycle:
                 f"hardware fault latched (reason {ws.get('state_fault_reason')})",
                 values,
             )
+        return GateResult(True, "link fresh, no CRC errors, no latched fault", values)
+
+    def _enter_precheck(self) -> GateResult:
+        values: dict = {}
+        self.fault_reason = ""
+        self.lowered_ack = False
+        self.episode += 1
+        link = self._link_evidence(values)
+        if not link.ok:
+            return link
+        ws = self.tracker.writer_stats()
         if not ws.get("realtime_configured", False) and not self.config.allow_non_realtime:
             return GateResult(False, "real-time setup failed and non-RT was not acknowledged", values)
         if self.vendor is not None:
@@ -1068,11 +1164,40 @@ class Lifecycle:
         self.tracker.wait()
         self.hoisted_ack = False
         st = self.tracker.stats()
+        values = {
+            "control_ticks": int(st.get("control_ticks", 0)),
+            "runtime_fault": int(st.get("fault", 0)),
+        }
+        values.update(self._upright_evidence())
         return GateResult(
             True,
             "frozen on the last target; hook the hoist and press H",
-            {"control_ticks": int(st.get("control_ticks", 0)), "runtime_fault": int(st.get("fault", 0))},
+            values,
         )
+
+    def _upright_evidence(self) -> dict:
+        """Pelvis tilt at HOLD, recorded for the untethered question.
+
+        An untethered end would skip the hoist and hand a robot that is
+        already on its feet straight to the vendor's stand. Whether the
+        vendor accepts `SelectMode` on a loaded robot is rung H2 of the
+        hardware ladder and is not answered here, so this is evidence in
+        `lifecycle.jsonl`, not a gate: the tilt says only that the pelvis is
+        near vertical, never that both feet carry the weight.
+        """
+        try:
+            gravity = [float(v) for v in self.tracker.projected_gravity()]
+        except Exception:
+            return {}
+        if len(gravity) != 3:
+            return {}
+        # Upright is the body frame reading world down, the same convention
+        # projected_gravity_from_xyzw produces.
+        tilt = tilt_degrees(gravity, [0.0, 0.0, -1.0])
+        return {
+            "pelvis_tilt_degrees": tilt,
+            "pelvis_upright": tilt <= self.config.tilt_tolerance_degrees,
+        }
 
     def _enter_damp(self) -> GateResult:
         self.tracker.force_damp()

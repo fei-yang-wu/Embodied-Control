@@ -95,18 +95,27 @@ Why the five additions:
 - **`RELEASED`** because `SelectMode` with our writer still publishing is two
   controllers on one topic, the exact thing the takeover order avoided.
 
-### 3.1 End of run: recover to standing
+### 3.1 End of run: damp, under the vendor
 
-The default end state is **the robot standing still under the vendor's
-balance controller**, not hanging damped. Job setting `end_state:
-vendor_stand | vendor_damp | damp`, default `vendor_stand`. The chain after
-`RUNNING`, and the same chain out of `FAULT`:
+**A run ends with the robot limp under the vendor's own damp**, not standing
+and not hanging on our frames. Job setting `end_state: vendor_damp |
+vendor_stand | damp`, default `vendor_damp` (changed 2026-09-03; it was
+`vendor_stand`). The chain after `RUNNING`, and the same chain out of
+`FAULT`:
 
 ```
 RUNNING ─h─▶ HOLD ──(operator hooks the hoist, `H`)──▶ DAMP ▶ RELEASED
-        ▶ VENDOR_RESTORED (vendor FSM 1) ▶ VENDOR_STAND (StandUp, FSM 4, hoisted)
-        ──(operator lowers, `l`)──▶ STANDING (idle; next episode starts at PRECHECK)
+        ▶ VENDOR_RESTORED (vendor FSM 1: the robot is limp, the vendor owns it)
+        ══ next trajectory starts at PRECHECK ══
+                                 ─s─▶ VENDOR_STAND (StandUp, FSM 4, hoisted)
+                                 ──(operator lowers, `l`)──▶ STANDING
 ```
+
+`damp` is one request, not three. `Ctrl-D` and `/damp` put the kd-only frames
+on the wire immediately and unconditionally, then close the gate and hand the
+joints back with `SelectMode`, so `DAMP` is never a resting state with our
+writer still owning `rt/lowcmd`. Only the hand-back waits for the hoist; the
+frames never do.
 
 Rules that shape it:
 
@@ -115,16 +124,27 @@ Rules that shape it:
   is the only proven stand. Recovery therefore always hands back to the vendor.
 - **The hoist ack (`H`) is a gate, not a courtesy.** `SelectMode` restarts the
   vendor service in damp, so the robot is limp for at least a second during
-  restore. Standing on its feet, that is a fall.
+  restore. Standing on its feet, that is a fall. Without the ack, `damp`
+  stops after the kd frames and says so.
+- **A second trajectory re-runs the checks.** `VENDOR_RESTORED` is a restart
+  state: `advance()` rewinds to `PRECHECK` and climbs the whole ladder. The
+  one shortcut, `e` from `HOLD`, now re-reads the link first (`RETAKE_PRECHECK`
+  in `lifecycle.jsonl`): fresh `rt/lowstate`, zero CRC errors, no latched
+  hardware fault. It skips only the vendor rows, which would fail by design
+  with the vendor already released.
 - **`FAULT` recovers the same way**, after `DAMP` and `RELEASED`, so the
   operator has exactly one recovery procedure to learn.
 - **`HOLD` target is the last commanded pose**, not the start pose: dragging a
   mid-stride robot back to frame 0 is itself a motion. For the stationary
   references this plan covers, the two are the same pose.
-- **Retake without releasing.** `HOLD ─e─▶ START_POSE_RAMP` is a legal edge:
-  a second episode ramps back to the start pose, re-verifies (rows 4–9) and
-  re-arms with the vendor still released and the planner still up. This is the
-  SONIC "restart at frame 0" move, but gated.
+
+**Untethered, later.** An untethered end would skip the hoist and hand a
+robot that is already on its feet straight to a vendor stand. Two things
+block it and neither is answered in sim: `SelectMode` on a loaded robot has
+never been tried (rung H2), and "standing-ish" needs to mean both feet carry
+the weight, which an IMU cannot see. `HOLD` therefore records what it can —
+`pelvis_tilt_degrees` and `pelvis_upright` in `lifecycle.jsonl` — as evidence
+for that decision, never as a gate.
 
 ## 4. Where it lives
 

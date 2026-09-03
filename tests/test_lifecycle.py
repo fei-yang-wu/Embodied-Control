@@ -64,6 +64,8 @@ class StubTracker:
         self.vendor_released = False
         self.publishes = 0
         self.publish_failures = 0
+        self.crc_errors = 0
+        self.hardware_faults = 0
         self.ramp_faults = 0
         self.running = False
         self.control_ticks = 0
@@ -122,8 +124,8 @@ class StubTracker:
             "vendor_released": self.vendor_released,
             "publishes": self.publishes,
             "publish_failures": self.publish_failures,
-            "crc_errors": 0,
-            "hardware_faults": 0,
+            "crc_errors": self.crc_errors,
+            "hardware_faults": self.hardware_faults,
             "watchdog_faults": self.ramp_faults,
             "ramp_faults": self.ramp_faults,
             "state_fault_reason": 0,
@@ -283,7 +285,9 @@ def _run_to_hold(lifecycle, tracker, clock):
 
 
 def test_happy_path_hoist_to_standing(tmp_path):
-    lifecycle, tracker, vendor, hoist, clock = _lifecycle(tmp_path)
+    lifecycle, tracker, vendor, hoist, clock = _lifecycle(
+        tmp_path, end_state="vendor_stand"
+    )
 
     result = lifecycle.auto()
     assert result.ok, result
@@ -376,7 +380,7 @@ def test_ramp_guard_trips_into_fault_and_recovers():
     assert tracker.mode == WRITER_DAMP
 
     assert lifecycle.recover().ok
-    assert lifecycle.state is S.STANDING
+    assert lifecycle.state is S.VENDOR_RESTORED
     assert tracker.restored_with == "ai"
 
 
@@ -477,7 +481,7 @@ def test_abort_before_arming_hands_back_to_the_vendor():
     lifecycle, tracker, vendor, hoist, clock = _lifecycle()
     assert lifecycle.auto(S.POSE_SETTLED).ok
     assert lifecycle.abort().ok
-    assert lifecycle.state is S.STANDING
+    assert lifecycle.state is S.VENDOR_RESTORED
     assert tracker.restored_with == "ai"
 
 
@@ -493,3 +497,104 @@ def test_missing_vendor_service_fails_precheck():
 def test_config_rejects_bad_end_state():
     with pytest.raises(ValueError):
         LifecycleConfig(end_state="fly")
+
+
+def test_damp_hands_the_joints_back_to_the_vendor(tmp_path):
+    """The default stop: our kd frames, then the vendor's own damp."""
+    lifecycle, tracker, vendor, hoist, clock = _lifecycle(tmp_path)
+    assert lifecycle.auto().ok
+    assert lifecycle.go().ok
+
+    result = lifecycle.damp()
+
+    assert result.ok, result
+    assert lifecycle.state is S.VENDOR_RESTORED
+    assert tracker.mode == WRITER_DISABLED
+    assert not tracker.gate_open
+    assert tracker.restored_with == "ai"
+    assert vendor.mode() is RobotMode.DAMP
+    states = [
+        json.loads(line)["to_state"]
+        for line in (tmp_path / "lifecycle.jsonl").read_text().splitlines()
+    ]
+    assert states[-3:] == ["DAMP", "RELEASED", "VENDOR_RESTORED"]
+
+
+def test_damp_without_the_hoist_keeps_our_frames_on_the_wire():
+    """SelectMode restarts the vendor limp, so the hand-back waits for H."""
+    lifecycle, tracker, vendor, hoist, clock = _lifecycle(auto_ack=False)
+    lifecycle.ack_hoisted()
+    assert lifecycle.auto(S.POSE_SETTLED).ok
+    lifecycle.hoisted_ack = False
+
+    result = lifecycle.damp()
+
+    assert result.ok and "press H" in result.detail
+    assert lifecycle.state is S.DAMP
+    assert tracker.mode == WRITER_DAMP
+    assert tracker.restored_with == ""
+
+
+def test_damp_keeps_the_joints_when_the_job_ends_in_damp():
+    lifecycle, tracker, vendor, hoist, clock = _lifecycle(end_state="damp")
+    assert lifecycle.auto().ok
+    assert lifecycle.go().ok
+
+    assert lifecycle.damp().ok
+    assert lifecycle.state is S.DAMP
+    assert tracker.restored_with == ""
+
+
+def test_the_next_trajectory_after_a_damp_climbs_precheck():
+    lifecycle, tracker, vendor, hoist, clock = _lifecycle()
+    assert lifecycle.auto().ok
+    assert lifecycle.go().ok
+    assert lifecycle.damp().ok
+    assert lifecycle.state is S.VENDOR_RESTORED
+
+    assert lifecycle.advance().ok
+    assert lifecycle.state is S.PRECHECK
+
+
+def test_retake_reruns_the_link_precheck(tmp_path):
+    lifecycle, tracker, vendor, hoist, clock = _lifecycle(tmp_path)
+    assert lifecycle.auto().ok
+    _run_to_hold(lifecycle, tracker, clock)
+
+    assert lifecycle.retake().ok, lifecycle.last_result
+
+    states = [
+        json.loads(line)["to_state"]
+        for line in (tmp_path / "lifecycle.jsonl").read_text().splitlines()
+    ]
+    assert "RETAKE_PRECHECK" in states
+    # The vendor rows are not repeated: it is still released from episode one.
+    assert tracker.calls.count("release_vendor") == 1
+
+
+def test_retake_is_refused_when_the_link_is_bad():
+    lifecycle, tracker, vendor, hoist, clock = _lifecycle()
+    assert lifecycle.auto().ok
+    _run_to_hold(lifecycle, tracker, clock)
+    tracker.crc_errors = 4
+
+    result = lifecycle.retake()
+
+    assert not result.ok and "CRC" in result.detail
+    assert lifecycle.state is S.HOLD
+
+
+def test_hold_records_the_pelvis_tilt_for_the_untethered_question():
+    lifecycle, tracker, vendor, hoist, clock = _lifecycle()
+    assert lifecycle.auto().ok
+    _run_to_hold(lifecycle, tracker, clock)
+
+    values = lifecycle.last_result.values
+    assert values["pelvis_upright"] is True
+    assert values["pelvis_tilt_degrees"] == pytest.approx(0.0, abs=1e-6)
+
+
+def test_recover_is_refused_before_the_robot_was_ever_taken():
+    lifecycle, tracker, vendor, hoist, clock = _lifecycle(end_state="vendor_damp")
+    assert not lifecycle.recover().ok
+    assert lifecycle.state is S.IDLE

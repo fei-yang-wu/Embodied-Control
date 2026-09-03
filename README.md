@@ -317,8 +317,13 @@ pixi run -e native ec lifecycle console examples/lifecycle_sim_hurry_idle.yaml \
 | 4 | `g` | blend in over 0.5 s, then run the episode |
 | 5 | `h` | freeze on the last target when you want to stop early |
 | 6 | `H` | tell the console the hoist is hooked and carrying |
-| 7 | `s` | damp, release, hand back to the vendor, stand |
+| 7 | `Ctrl-D` | damp: kd-only frames now, then the joints go back to the vendor's own damp |
 | 8 | `n` | next episode from PRECHECK, planner still up |
+
+`s` recovers to a vendor stand instead, when you want the robot on its feet.
+A run ends limp under the vendor (`end_state: vendor_damp`), so the next
+trajectory climbs the whole ladder again. `e` is the one shortcut, and it
+re-reads the link before it drives the robot a second time.
 
 `R` (`/reset-sim`) closes current tracker and planner, then atomically resets
 running MuJoCo plant to configured initial pose (bundle default when absent),
@@ -339,9 +344,11 @@ checkpoint. Raw controller and planner checkpoints can live under
 `assets/model/controller/` and `assets/model/planner/`; configure converted
 controller bundles here and planner launch command under `planner`.
 
-`Ctrl-D` damps at any moment, ahead of every gate and every queued key.
-`e` re-runs the same motion from HOLD without handing the robot back. `x`
-aborts the climb. `?` lists every key as a slash command. On hardware, drop
+`Ctrl-D` damps at any moment, ahead of every gate and every queued key: the
+kd-only frames land first and unconditionally, then the joints are handed
+back to the vendor's damp once the hoist is acknowledged. `e` re-runs the
+same motion from HOLD without handing the robot back, after a link precheck.
+`x` aborts the climb. `?` lists every key as a slash command. On hardware, drop
 `--allow-non-realtime`, use `--confirm ENABLE_G1_LOWLEVEL`, and set
 `sim_hoist: false` in the job so `H` and `l` wait for a real person.
 

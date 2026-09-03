@@ -122,7 +122,7 @@ def build_session_bindings(session) -> list[KeyBinding]:
             raise RuntimeError(result.detail)
 
     return [
-        KeyBinding(KEY_DAMP, "DAMP (safety stop)", lambda: report(session.damp()), "safety"),
+        KeyBinding(KEY_DAMP, "DAMP (safety stop, then vendor damp)", lambda: report(session.damp()), "safety"),
         KeyBinding("o", "mode: oracle / vla", lambda: report(session.toggle_mode()), "select"),
         KeyBinding("m", "motion: next", lambda: report(session.step_motion(1)), "select"),
         KeyBinding("M", "motion: previous", lambda: report(session.step_motion(-1)), "select"),
@@ -137,11 +137,11 @@ def build_session_bindings(session) -> list[KeyBinding]:
         KeyBinding("a", "auto-advance to PRIMED", lambda: report(session.auto(LifecycleState.PRIMED)), "ladder"),
         KeyBinding("g", "go: PRIMED -> BLEND_IN -> RUNNING", lambda: report(session.go()), "episode"),
         KeyBinding("h", "hold: freeze on the last target", lambda: report(session.hold()), "episode"),
-        KeyBinding("e", "retake: HOLD -> START_POSE_RAMP", lambda: report(session.retake()), "episode"),
+        KeyBinding("e", "retake: HOLD -> link precheck -> ramp", lambda: report(session.retake()), "episode"),
         KeyBinding("l", "ack: lowered onto the feet", session.ack_lowered, "operator"),
         KeyBinding("H", "ack: hoist hooked, load taken", session.ack_hoisted, "operator"),
-        KeyBinding("s", "recover to vendor stand (default end)", lambda: report(session.recover("vendor_stand")), "end"),
-        KeyBinding("d", "release to vendor damp only", lambda: report(session.recover("vendor_damp")), "end"),
+        KeyBinding("s", "recover to vendor stand", lambda: report(session.recover("vendor_stand")), "end"),
+        KeyBinding("d", "hand back to vendor damp", lambda: report(session.recover("vendor_damp")), "end"),
         KeyBinding("x", "abort the ladder (damp, hand back)", lambda: report(session.abort()), "end"),
         KeyBinding("q", "quit (damps, silences, restores)", quit_console, "console"),
     ]
@@ -159,16 +159,16 @@ def build_lifecycle_bindings(lifecycle) -> list[KeyBinding]:
             raise RuntimeError(result.detail)
 
     return [
-        KeyBinding(KEY_DAMP, "DAMP (safety stop)", lambda: report(lifecycle.damp()), "safety"),
+        KeyBinding(KEY_DAMP, "DAMP (safety stop, then vendor damp)", lambda: report(lifecycle.damp()), "safety"),
         KeyBinding("n", "next: advance one state", lambda: report(lifecycle.advance()), "ladder"),
         KeyBinding("a", "auto-advance to PRIMED", lambda: report(lifecycle.auto(LifecycleState.PRIMED)), "ladder"),
         KeyBinding("g", "go: PRIMED -> BLEND_IN -> RUNNING", lambda: report(lifecycle.go()), "episode"),
         KeyBinding("h", "hold: freeze on the last target", lambda: report(lifecycle.hold()), "episode"),
-        KeyBinding("e", "retake: HOLD -> START_POSE_RAMP", lambda: report(lifecycle.retake()), "episode"),
+        KeyBinding("e", "retake: HOLD -> link precheck -> ramp", lambda: report(lifecycle.retake()), "episode"),
         KeyBinding("l", "ack: lowered onto the feet", lifecycle.ack_lowered, "operator"),
         KeyBinding("H", "ack: hoist hooked, load taken", lifecycle.ack_hoisted, "operator"),
-        KeyBinding("s", "recover to vendor stand (default end)", lambda: report(lifecycle.recover("vendor_stand")), "end"),
-        KeyBinding("d", "release to vendor damp only", lambda: report(lifecycle.recover("vendor_damp")), "end"),
+        KeyBinding("s", "recover to vendor stand", lambda: report(lifecycle.recover("vendor_stand")), "end"),
+        KeyBinding("d", "hand back to vendor damp", lambda: report(lifecycle.recover("vendor_damp")), "end"),
         KeyBinding("x", "abort the ladder (damp, hand back)", lambda: report(lifecycle.abort()), "end"),
         KeyBinding("q", "quit (damps, silences, restores)", quit_console, "console"),
     ]

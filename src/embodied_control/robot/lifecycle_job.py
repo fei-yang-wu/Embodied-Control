@@ -83,7 +83,14 @@ class LifecycleJob(JobModel):
     lead_ticks: int = Field(default=4, ge=0)
     command_stale_ms: float = Field(default=500.0, gt=0.0)
     state_absent_ms: float = Field(default=500.0, gt=0.0)
-    end_state: Literal["vendor_stand", "vendor_damp", "damp"] = "vendor_stand"
+    # An episode rests limp under the vendor, so the next one climbs
+    # PRECHECK again. `vendor_stand` stays available as the `s` request.
+    end_state: Literal["vendor_stand", "vendor_damp", "damp"] = "vendor_damp"
+    # `damp` hands the joints back to the vendor once the kd-only frames are
+    # on the wire and the hoist is acknowledged.
+    damp_hands_back: bool = True
+    # A retake re-reads the link before driving the robot a second time.
+    retake_precheck: bool = True
     # Empty reads the active service from CheckMode at PRECHECK.
     vendor_name: str = ""
     require_vendor: bool = True

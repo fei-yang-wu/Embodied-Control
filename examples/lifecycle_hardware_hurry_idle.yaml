@@ -34,7 +34,9 @@ start_pose: motion
 ramp_seconds: 3.0
 ticks: 504
 blend_ticks: 250
-end_state: vendor_stand
+# An episode rests limp under the vendor and the next one climbs PRECHECK
+# again. `s` in the console still recovers to a vendor stand.
+end_state: vendor_damp
 # Real vendor sport service, not the plant's — read at PRECHECK from
 # CheckMode rather than assumed.
 vendor_name: ""
