@@ -1,4 +1,4 @@
-"""Watch the DDS plant: a live MuJoCo window, a recording, or both.
+"""Watch the DDS plant: an interactive 3D web view, a recording, or both.
 
 The plant's own `mjModel`/`mjData` live in C++ and are stepped by a real-time
 thread; MuJoCo's Python bindings cannot wrap an existing `mjData`, and handing
@@ -8,6 +8,12 @@ So the view is a puppet: a second model loaded from the same MJCF, whose pose
 is overwritten from the plant's published true state each frame and settled
 with `mj_forward`. It never steps physics, never touches the plant's memory,
 and costs the plant nothing but one 36-float read per drawn frame.
+
+The live view is served by `mjviser` (`PlantStreamer`): real geometry pushed
+to a three.js client over Viser's own HTTP/WebSocket server, so orbit / pan /
+zoom are native mouse controls in the browser, not something reimplemented
+server-side. Works from a headless/remote host: `ssh -L` the port to your
+workstation and open it in a browser. No GLFW/X11.
 """
 
 from __future__ import annotations
@@ -96,6 +102,41 @@ class PlantRecorder:
         self._renderer.close()
 
 
+class PlantStreamer:
+    """Serves the puppet as an interactive 3D scene via mjviser (Viser).
+
+    Real geometry is pushed to a three.js client over Viser's own
+    HTTP/WebSocket server, so orbit/pan/zoom are the browser's native mouse
+    controls — nothing server-side to reimplement. Binds to loopback by
+    default — reach it through an SSH port forward
+    (`ssh -L 8765:localhost:8765 host`), not by exposing the port itself.
+    """
+
+    def __init__(
+        self,
+        puppet: PlantPuppet,
+        *,
+        host: str = "127.0.0.1",
+        port: int = 8765,
+    ) -> None:
+        import viser
+        from mjviser import ViserMujocoScene
+
+        self.puppet = puppet
+        self._server = viser.ViserServer(host=host, port=port, verbose=False)
+        self._scene = ViserMujocoScene(self._server, puppet.model, num_envs=1)
+        self._scene.create_visualization_gui()
+        self.host = host
+        self.port = self._server.get_port()
+        self.url = f"http://{self.host}:{self.port}/"
+
+    def capture(self) -> None:
+        self._scene.update_from_mjdata(self.puppet.data)
+
+    def close(self) -> None:
+        self._server.stop()
+
+
 def watch(
     plant,
     model_path: str | Path,
@@ -107,10 +148,12 @@ def watch(
     width: int = 960,
     height: int = 540,
     camera: str = "",
+    host: str = "127.0.0.1",
+    port: int = 8765,
     should_stop=lambda: False,
     sleep=None,
 ):
-    """Drive a viewer and/or a recorder until `should_stop` says otherwise.
+    """Drive a stream and/or a recorder until `should_stop` says otherwise.
 
     Runs on the caller's thread, which is the plant process's main thread: the
     physics thread keeps its own core and its own schedule, so a slow GPU
@@ -125,24 +168,19 @@ def watch(
         if video
         else None
     )
-    viewer = None
+    streamer = None
     if live:
-        import mujoco.viewer
-
-        viewer = mujoco.viewer.launch_passive(
-            puppet.model, puppet.data, show_left_ui=False, show_right_ui=False
-        )
+        streamer = PlantStreamer(puppet, host=host, port=port)
+        print(f"VIEWER_URL {streamer.url}", flush=True)
     period = 1.0 / max(1, fps)
     next_frame = time.monotonic()
     try:
         while not should_stop():
-            if viewer is not None and not viewer.is_running():
-                break
             puppet.pose(plant.latest_state())
             if recorder is not None:
                 recorder.capture()
-            if viewer is not None:
-                viewer.sync()
+            if streamer is not None:
+                streamer.capture()
             next_frame += period
             delay = next_frame - time.monotonic()
             if delay > 0:
@@ -150,11 +188,12 @@ def watch(
             else:  # a slow frame never accumulates debt
                 next_frame = time.monotonic()
     finally:
-        if viewer is not None:
-            viewer.close()
+        if streamer is not None:
+            streamer.close()
         if recorder is not None:
             recorder.close()
     return {
         "video": str(recorder.path) if recorder else "",
         "frames": recorder.frames if recorder else 0,
+        "stream_url": streamer.url if streamer else "",
     }

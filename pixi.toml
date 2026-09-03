@@ -136,6 +136,7 @@ scikit-build-core = ">=0.10"
 
 [feature.native.pypi-dependencies]
 ec-native = { path = "native/ec_native", editable = true }
+mjviser = ">=0.0.14"
 
 [feature.native.tasks]
 build-native = "pixi reinstall -e native ec-native && python -c \"import ec_native; print(ec_native.__version__)\""

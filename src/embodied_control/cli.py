@@ -1412,6 +1412,8 @@ def _cmd_lowlevel_plant(args) -> int:
                 width=args.view_width,
                 height=args.view_height,
                 camera=args.view_camera,
+                host=args.viewer_host,
+                port=args.viewer_port,
                 should_stop=finished,
             )
         else:
@@ -1734,8 +1736,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--viewer",
         action="store_true",
         help=(
-            "open a MuJoCo window showing the plant's true state; a render-only "
-            "copy, so a slow frame never reaches the physics thread"
+            "serve an interactive 3D view of the plant's true state over "
+            "HTTP (mjviser/Viser; a render-only copy, so a slow frame never "
+            "reaches the physics thread) with native mouse orbit/pan/zoom; "
+            "open the printed VIEWER_URL in a browser, or "
+            "`ssh -L <port>:localhost:<port>` first if the plant is remote"
         ),
     )
     lplant.add_argument(
@@ -1746,6 +1751,14 @@ def build_parser() -> argparse.ArgumentParser:
     lplant.add_argument("--view-height", type=int, default=540)
     lplant.add_argument(
         "--view-camera", default="", help="named MJCF camera (default: free)"
+    )
+    lplant.add_argument(
+        "--viewer-host",
+        default="127.0.0.1",
+        help="bind address for --viewer's HTTP server (default: loopback only)",
+    )
+    lplant.add_argument(
+        "--viewer-port", type=int, default=8765, help="port for --viewer's HTTP server"
     )
     lplant.add_argument("--physics-cpu", type=int, default=-1)
     lplant.add_argument("--physics-fifo-priority", type=int, default=0)
