@@ -37,6 +37,18 @@ using unitree::robot::ChannelSubscriberPtr;
 
 constexpr int kPlantSnapshotAttempts = 8;
 constexpr double kGravity = 9.81;
+// The vendor's damp: kd only, the value the tracker's own DAMP frame uses.
+constexpr float kVendorDampKd = 8.0F;
+// Gantry spring: ~2 cm sag under a 35 kg robot, critically damped.
+constexpr double kHoistKpPosition = 20000.0;
+constexpr double kHoistKdPosition = 1600.0;
+constexpr double kHoistKpRotation = 600.0;
+constexpr double kHoistKdRotation = 40.0;
+// Lowered: the strap target drops this far so the feet take the weight; the
+// rope then only catches a fall (one-sided in z) and steadies the tilt at
+// reduced gain, like a harness on a slack gantry.
+constexpr double kHoistLowerMeters = 0.05;
+constexpr double kHoistLoweredLateralGain = 0.5;
 
 std::uint64_t monotonic_ns_plant() noexcept {
   timespec now{};
@@ -119,7 +131,8 @@ MujocoDdsPlant::MujocoDdsPlant(
     double timestep, std::uint8_t mode_machine, int physics_cpu,
     int physics_fifo_priority, bool lock_memory, bool require_realtime,
     const PlantSensorNoise& sensor_noise, std::size_t state_log_capacity,
-    int dds_domain, bool freeze_until_command)
+    int dds_domain, bool freeze_until_command, bool vendor_enabled,
+    const std::string& vendor_name, bool hoist_enabled)
     : impl_(std::make_unique<Impl>()),
       command_slot_(std::make_unique<CommandSlot>()),
       timestep_(timestep),
@@ -130,7 +143,10 @@ MujocoDdsPlant::MujocoDdsPlant(
       sensor_noise_(sensor_noise),
       state_log_capacity_(state_log_capacity),
       freeze_until_command_(freeze_until_command),
+      hoist_enabled_(hoist_enabled),
       require_realtime_(require_realtime) {
+  zero_gains_.fill(0.0F);
+  vendor_damp_kd_.fill(kVendorDampKd);
   // Preallocated once, outside the physics thread: the log never allocates
   // while the plant is running.
   state_log_.assign(state_log_capacity_ * kPlantStateRow, 0.0F);
@@ -232,6 +248,29 @@ MujocoDdsPlant::MujocoDdsPlant(
   impl_->subscriber->InitChannel(
       std::bind(&MujocoDdsPlant::low_cmd_handler, this, std::placeholders::_1),
       1);
+  if (vendor_enabled || hoist_enabled_) {
+    vendor_ = std::make_unique<PlantVendor>(vendor_name, vendor_enabled,
+                                            hoist_enabled_);
+    previous_owned_ = vendor_->owned();
+  }
+}
+
+void MujocoDdsPlant::hoist() noexcept {
+  if (vendor_) {
+    vendor_->hoist();
+  }
+}
+
+void MujocoDdsPlant::lower() noexcept {
+  if (vendor_) {
+    vendor_->lower();
+  }
+}
+
+void MujocoDdsPlant::slack() noexcept {
+  if (vendor_) {
+    vendor_->slack();
+  }
 }
 
 MujocoDdsPlant::~MujocoDdsPlant() {
@@ -329,6 +368,14 @@ void MujocoDdsPlant::reset() {
                      std::memory_order_relaxed);
   min_base_height_.store(static_cast<float>(data->qpos[2]),
                          std::memory_order_relaxed);
+  rejected_commands_.store(0, std::memory_order_relaxed);
+  mode_machine_rejections_.store(0, std::memory_order_relaxed);
+  hoist_generation_seen_ = 0;
+  hoist_gain_ = 0.0;
+  hoist_gain_reported_.store(0.0F, std::memory_order_relaxed);
+  for (std::size_t index = 0; index < 6; ++index) {
+    data->xfrc_applied[6 * pelvis_body_id_ + index] = 0.0;
+  }
 }
 
 void MujocoDdsPlant::low_cmd_handler(const void* message) noexcept {
@@ -337,6 +384,17 @@ void MujocoDdsPlant::low_cmd_handler(const void* message) noexcept {
       crc32_core(reinterpret_cast<std::uint32_t*>(const_cast<LowCmd*>(&input)),
                  (sizeof(LowCmd) >> 2) - 1)) {
     crc_errors_.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
+  // The firmware ignores a frame stamped for another machine mode; so does
+  // the plant, and it counts them because a controller that copies the wrong
+  // mode_machine is silent on hardware.
+  if (input.mode_machine() != mode_machine_) {
+    mode_machine_rejections_.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
+  if (vendor_ && vendor_->owned()) {
+    rejected_commands_.fetch_add(1, std::memory_order_relaxed);
     return;
   }
   for (std::size_t sdk = 0; sdk < kJointCount; ++sdk) {
@@ -591,6 +649,106 @@ void MujocoDdsPlant::publish_low_state() noexcept {
   }
 }
 
+void MujocoDdsPlant::apply_vendor_drive() noexcept {
+  const int fsm = vendor_->fsm_id();
+  mjData* data = impl_->data;
+  const float* stiffness = hold_stiffness_.data();
+  const float* damping = hold_damping_.data();
+  if (fsm == 0) {
+    stiffness = zero_gains_.data();
+    damping = zero_gains_.data();
+  } else if (fsm == 1) {
+    stiffness = zero_gains_.data();
+    damping = vendor_damp_kd_.data();
+  }
+  if (std::memcmp(stiffness, impl_->applied_stiffness.data(),
+                  sizeof(impl_->applied_stiffness)) != 0 ||
+      std::memcmp(damping, impl_->applied_damping.data(),
+                  sizeof(impl_->applied_damping)) != 0) {
+    set_servo_gains(std::span<const float>(stiffness, kJointCount),
+                    std::span<const float>(damping, kJointCount));
+  }
+  for (std::size_t actuator = 0; actuator < kJointCount; ++actuator) {
+    data->ctrl[actuator] = default_joint_position_[actuator_to_sdk_[actuator]];
+    data->qfrc_applied[dof_address_[actuator]] = 0.0;
+  }
+}
+
+void MujocoDdsPlant::apply_hoist() noexcept {
+  mjData* data = impl_->data;
+  double* wrench = data->xfrc_applied + 6 * pelvis_body_id_;
+  const double* position = data->xpos + 3 * pelvis_body_id_;
+  const double* quaternion = data->xquat + 4 * pelvis_body_id_;
+  const std::uint64_t generation = vendor_ ? vendor_->hoist_generation() : 1;
+  if (generation != hoist_generation_seen_) {
+    for (std::size_t index = 0; index < 3; ++index) {
+      hoist_target_position_[index] = position[index];
+    }
+    // A strap holds the pelvis where it is but lets it hang level: keep the
+    // heading, drop the roll and pitch. Capturing a leaning robot's full
+    // orientation carried an 8 deg tilt from one episode into the next.
+    const double w = quaternion[0];
+    const double x = quaternion[1];
+    const double y = quaternion[2];
+    const double z = quaternion[3];
+    const double yaw = std::atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z));
+    hoist_target_quaternion_wxyz_ = {std::cos(0.5 * yaw), 0.0, 0.0, std::sin(0.5 * yaw)};
+    hoist_generation_seen_ = generation;
+    hoist_gain_ = 1.0;
+  }
+  const int mode = vendor_ ? vendor_->hoist_mode() : PlantVendor::kHoistHoisted;
+  if (mode == PlantVendor::kHoistSlack) {
+    if (hoist_gain_ > 0.0) {
+      hoist_gain_ =
+          std::max(0.0, hoist_gain_ - timestep_ / hoist_release_seconds_);
+    }
+  } else {
+    hoist_gain_ = 1.0;
+  }
+  hoist_gain_reported_.store(static_cast<float>(hoist_gain_),
+                             std::memory_order_relaxed);
+  if (hoist_gain_ <= 0.0) {
+    for (std::size_t index = 0; index < 6; ++index) {
+      wrench[index] = 0.0;
+    }
+    return;
+  }
+  const bool lowered = mode == PlantVendor::kHoistLowered;
+  const double lateral_gain = lowered ? kHoistLoweredLateralGain : 1.0;
+  // Linear: spring to the captured pose, damper on the world-frame velocity.
+  for (std::size_t index = 0; index < 2; ++index) {
+    wrench[index] =
+        hoist_gain_ * lateral_gain *
+        (kHoistKpPosition * (hoist_target_position_[index] - position[index]) -
+         kHoistKdPosition * data->qvel[index]);
+  }
+  const double target_z =
+      hoist_target_position_[2] - (lowered ? kHoistLowerMeters : 0.0);
+  double vertical = kHoistKpPosition * (target_z - position[2]) -
+                    kHoistKdPosition * data->qvel[2];
+  if (lowered && vertical < 0.0) {
+    // A rope cannot push.
+    vertical = 0.0;
+  }
+  wrench[2] = hoist_gain_ * vertical;
+  // Angular: small-angle error of q_target * conj(q), damped on the world
+  // angular velocity (the free joint's qvel is body-frame).
+  double conjugate[4] = {quaternion[0], -quaternion[1], -quaternion[2],
+                         -quaternion[3]};
+  double error_quaternion[4];
+  mju_mulQuat(error_quaternion, hoist_target_quaternion_wxyz_.data(),
+              conjugate);
+  const double sign = error_quaternion[0] < 0.0 ? -1.0 : 1.0;
+  double omega_world[3];
+  mju_rotVecQuat(omega_world, data->qvel + 3, quaternion);
+  for (std::size_t index = 0; index < 3; ++index) {
+    wrench[3 + index] =
+        hoist_gain_ * lateral_gain *
+        (kHoistKpRotation * 2.0 * sign * error_quaternion[1 + index] -
+         kHoistKdRotation * omega_world[index]);
+  }
+}
+
 void MujocoDdsPlant::physics_loop() noexcept {
   const bool configured = configure_physics_thread();
   thread_ready_.store(true, std::memory_order_release);
@@ -616,7 +774,19 @@ void MujocoDdsPlant::physics_loop() noexcept {
     if (woke_ns > scheduled_ns) {
       update_plant_max(wake_late_ns_max_, woke_ns - scheduled_ns);
     }
-    if (snapshot_command(command)) {
+    const bool owned = vendor_ && vendor_->owned();
+    if (owned != previous_owned_) {
+      // A hand-over in either direction starts from a clean slot: the last
+      // frame from before the switch is nobody's current command.
+      command_slot_->valid.store(false, std::memory_order_relaxed);
+      previous_owned_ = owned;
+    }
+    if (hoist_enabled_) {
+      apply_hoist();
+    }
+    if (owned) {
+      apply_vendor_drive();
+    } else if (snapshot_command(command)) {
       holding_.store(false, std::memory_order_relaxed);
       if (std::memcmp(command.kp.data(), impl_->applied_stiffness.data(),
                       sizeof(command.kp)) != 0 ||
@@ -683,10 +853,19 @@ PlantStats MujocoDdsPlant::stats() const noexcept {
       .publishes = publishes_.load(std::memory_order_relaxed),
       .publish_failures = publish_failures_.load(std::memory_order_relaxed),
       .commands_received = commands_received_.load(std::memory_order_relaxed),
+      .rejected_commands = rejected_commands_.load(std::memory_order_relaxed),
+      .mode_machine_rejections =
+          mode_machine_rejections_.load(std::memory_order_relaxed),
       .crc_errors = crc_errors_.load(std::memory_order_relaxed),
       .wake_late_ns_max = wake_late_ns_max_.load(std::memory_order_relaxed),
       .deadline_misses = deadline_misses_.load(std::memory_order_relaxed),
       .holding = holding_.load(std::memory_order_relaxed),
+      .vendor_owned = vendor_ ? vendor_->owned() : false,
+      .vendor_fsm_id = vendor_ ? vendor_->fsm_id() : -1,
+      .hoisted = vendor_ ? vendor_->hoisted() : false,
+      .hoist_mode = vendor_ ? vendor_->hoist_mode() : 0,
+      .hoist_gain = static_cast<double>(
+          hoist_gain_reported_.load(std::memory_order_relaxed)),
       .physics_fault = physics_fault_.load(std::memory_order_relaxed),
       .realtime_configured =
           realtime_configured_.load(std::memory_order_relaxed),

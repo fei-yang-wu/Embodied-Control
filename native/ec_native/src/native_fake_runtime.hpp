@@ -49,6 +49,10 @@ struct NativeRuntimeStats {
   std::uint64_t planner_responses = 0;
   std::uint64_t encoder_inferences = 0;
   std::uint64_t response_overruns = 0;
+  std::uint64_t stale_responses = 0;
+  std::uint64_t reference_ticks = 0;
+  // Milliseconds since the last accepted planner reply; -1 before the first.
+  double command_age_ms = -1.0;
   std::uint64_t plan_slot_advances = 0;
   std::uint64_t plan_late_starts = 0;
   std::uint64_t scheduler_deadlines_missed = 0;
@@ -137,6 +141,12 @@ class NativeFakeRuntime {
   NativeFakeRuntime& operator=(const NativeFakeRuntime&) = delete;
 
   void start(std::size_t max_ticks, bool paced = true);
+  // Pin the reference clock: the oracle keeps serving frame 0 and the
+  // encoder keeps looking at it until unpaused, so a motion begins the tick
+  // the policy fully owns the joints, not the tick the loop started.
+  void set_reference_paused(bool paused) noexcept {
+    reference_paused_.store(paused, std::memory_order_relaxed);
+  }
   void stop() noexcept;
   void wait();
   bool running() const noexcept { return running_.load(); }
@@ -238,6 +248,8 @@ class NativeFakeRuntime {
 
   std::atomic<std::uint64_t> ticks_{0};
   std::atomic<std::uint64_t> control_ticks_{0};
+  std::atomic<bool> reference_paused_{false};
+  std::uint64_t reference_tick_ = 0;
   std::atomic<std::uint64_t> wait_ticks_{0};
   std::atomic<std::uint64_t> damp_ticks_{0};
   std::atomic<std::uint64_t> deadline_misses_{0};
@@ -245,6 +257,7 @@ class NativeFakeRuntime {
   std::atomic<std::uint64_t> planner_responses_{0};
   std::atomic<std::uint64_t> encoder_inferences_{0};
   std::atomic<std::uint64_t> response_overruns_{0};
+  std::atomic<std::uint64_t> stale_responses_{0};
   std::atomic<std::uint64_t> plan_slot_advances_{0};
   std::atomic<std::uint64_t> plan_late_starts_{0};
   std::atomic<std::uint64_t> scheduler_deadlines_missed_{0};

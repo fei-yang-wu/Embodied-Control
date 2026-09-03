@@ -204,6 +204,7 @@ void NativeFakeRuntime::start(std::size_t max_ticks, bool paced) {
   outstanding_request_tick_ = 0;
   outstanding_reference_tick_ = 0;
   loop_tick_ = 0;
+  reference_tick_ = 0;
   ++episode_generation_;
   command_recv_stamp_ = 0.0;
   command_.fill(0.0F);
@@ -222,6 +223,7 @@ void NativeFakeRuntime::start(std::size_t max_ticks, bool paced) {
   planner_responses_.store(0);
   encoder_inferences_.store(0);
   response_overruns_.store(0);
+  stale_responses_.store(0);
   plan_slot_advances_.store(0);
   plan_late_starts_.store(0);
   scheduler_deadlines_missed_.store(0);
@@ -324,6 +326,9 @@ void NativeFakeRuntime::run(std::size_t max_ticks, bool paced) noexcept {
 
     const std::uint64_t started_ns = monotonic_ns();
     loop_tick_ = tick;
+    if (tick > 0 && !reference_paused_.load(std::memory_order_relaxed)) {
+      ++reference_tick_;
+    }
     one_tick();
     const std::uint64_t finished_ns = monotonic_ns();
     const std::uint64_t elapsed_ns = finished_ns - started_ns;
@@ -389,8 +394,10 @@ void NativeFakeRuntime::publish_planner_request() noexcept {
   try {
     ++request_sequence_;
     if (planner_.oracle_reference) {
-      outstanding_reference_tick_ =
-          command_available_ ? loop_tick_ + steps_remaining_ : loop_tick_;
+      const bool paused = reference_paused_.load(std::memory_order_relaxed);
+      outstanding_reference_tick_ = command_available_ && !paused
+                                        ? reference_tick_ + steps_remaining_
+                                        : reference_tick_;
       const std::array<float, 2> request = {
           static_cast<float>(episode_generation_),
           static_cast<float>(outstanding_reference_tick_),
@@ -430,6 +437,13 @@ void NativeFakeRuntime::read_response() noexcept {
   static_cast<void>(sender_stamp);
   last_response_sequence_ = sequence;
   planner_responses_.fetch_add(1, std::memory_order_relaxed);
+  if (request_slot_ && sequence < outstanding_request_sequence_) {
+    // A reply to a request from before the last stop(): the planner stays up
+    // across episodes and answers whatever was in flight when the control
+    // thread went away. It is stale, not a broken contract.
+    stale_responses_.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
   if (request_slot_ && sequence != outstanding_request_sequence_) {
     transition_to_damp(RuntimeFault::kCommandContract);
     return;
@@ -644,8 +658,8 @@ bool NativeFakeRuntime::accept_reference_chunk(std::uint32_t length) noexcept {
     return false;
   }
   const std::size_t offset_steps =
-      loop_tick_ >= pending_reference_tick_
-          ? static_cast<std::size_t>(loop_tick_ - pending_reference_tick_)
+      reference_tick_ >= pending_reference_tick_
+          ? static_cast<std::size_t>(reference_tick_ - pending_reference_tick_)
           : 0;
   if (offset_steps +
           (planner_.window_frames - 1) * planner_.encoder_frame_stride >=
@@ -756,12 +770,12 @@ void NativeFakeRuntime::record_reference_metrics() noexcept {
     }
   }
   if (!planner_.oracle_reference || active_reference_length_ == 0 ||
-      loop_tick_ < active_reference_tick_ ||
+      reference_tick_ < active_reference_tick_ ||
       loop_tick_ >= reference_joint_mae_.size()) {
     return;
   }
   const std::size_t frame =
-      static_cast<std::size_t>(loop_tick_ - active_reference_tick_);
+      static_cast<std::size_t>(reference_tick_ - active_reference_tick_);
   const std::size_t available_frames =
       (active_reference_length_ - kReferenceHeaderWidth) /
       raw_reference_width_;
@@ -865,8 +879,8 @@ void NativeFakeRuntime::one_tick() noexcept {
           NativePlannerConfig::EncoderTrigger::kEveryControlTick &&
       (!encoder_ran_ || last_encoder_tick_ != loop_tick_)) {
     const std::size_t reference_offset =
-        loop_tick_ >= active_reference_tick_
-            ? static_cast<std::size_t>(loop_tick_ - active_reference_tick_)
+        reference_tick_ >= active_reference_tick_
+            ? static_cast<std::size_t>(reference_tick_ - active_reference_tick_)
             : 0;
     if (!encode_active_reference(reference_offset)) {
       transition_to_damp(RuntimeFault::kCommandContract);
@@ -909,7 +923,23 @@ void NativeFakeRuntime::one_tick() noexcept {
     const auto& result = tracker_.step(
         robot_state_,
         std::span<const float>(command_.data(), tracker_.command_width()));
-    backend_->write_target(result.joint_target);
+    const float weight = backend_->blend_weight();
+    std::array<float, kJointCount> held{};
+    if (weight < 1.0F && backend_->held_target(held)) {
+      std::array<float, kJointCount> blended{};
+      std::array<float, kJointCount> applied_action{};
+      const auto& defaults = tracker_.default_joint_position();
+      for (std::size_t index = 0; index < kJointCount; ++index) {
+        blended[index] = held[index] * (1.0F - weight) +
+                         result.joint_target[index] * weight;
+        applied_action[index] = result.action[index] * weight;
+      }
+      backend_->write_target(blended);
+      static_cast<void>(defaults);
+      tracker_.set_last_action(applied_action);
+    } else {
+      backend_->write_target(result.joint_target);
+    }
     control_ticks_.fetch_add(1, std::memory_order_relaxed);
     if (controller_paced_command && steps_remaining_ > 0) {
       --steps_remaining_;
@@ -939,6 +969,15 @@ NativeRuntimeStats NativeFakeRuntime::stats() const noexcept {
       .planner_responses = planner_responses_.load(),
       .encoder_inferences = encoder_inferences_.load(),
       .response_overruns = response_overruns_.load(),
+
+      .stale_responses = stale_responses_.load(),
+
+
+      .reference_ticks = reference_tick_,
+
+
+
+      .command_age_ms = command_recv_stamp_ > 0.0 ? (monotonic_now() - command_recv_stamp_) * 1000.0 : -1.0,
       .plan_slot_advances = plan_slot_advances_.load(),
       .plan_late_starts = plan_late_starts_.load(),
       .scheduler_deadlines_missed = scheduler_deadlines_missed_.load(),

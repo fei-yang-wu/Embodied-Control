@@ -593,24 +593,130 @@ def _cmd_lowlevel_check_unitree(args) -> int:
     return 0 if report["status"] == "pass" else 1
 
 
+def _unitree_write_gate_error(
+    *, enable_writes: bool, allow_non_realtime: bool, confirm: str
+) -> str | None:
+    if not enable_writes:
+        return None
+    required = (
+        "ENABLE_G1_LOWLEVEL_NON_REALTIME"
+        if allow_non_realtime
+        else "ENABLE_G1_LOWLEVEL"
+    )
+    if confirm != required:
+        return f"--enable-writes requires --confirm {required}"
+    return None
+
+
+def _unitree_stationary_anchor(
+    bundle, reference_root: str, motion: str, start_frame: int,
+    max_displacement: float,
+):
+    import numpy as np
+
+    from embodied_control.lowlevel.reference import ReferenceArrays
+
+    if max_displacement <= 0:
+        raise ValueError("fixed-anchor maximum displacement must be positive")
+    reference = ReferenceArrays(reference_root)
+    if reference.joint_names != list(bundle.manifest.action.isaac_joint_names):
+        raise ValueError("reference and bundle Isaac joint orders differ")
+    selected = reference.motion(motion)
+    if start_frame < 0 or start_frame >= selected.length:
+        raise ValueError(
+            f"start frame {start_frame} is outside motion length {selected.length}"
+        )
+    positions = np.asarray(selected.anchor_pos_w[start_frame:], dtype=np.float64)
+    displacement = np.linalg.norm(positions - positions[0], axis=1)
+    maximum = float(displacement.max(initial=0.0))
+    if maximum > max_displacement:
+        raise ValueError(
+            f"motion anchor displacement {maximum:.4f} m exceeds the "
+            f"fixed-anchor limit {max_displacement:.4f} m"
+        )
+    anchor = FixedAnchor(
+        position=positions[0].astype(np.float32),
+        quaternion_xyzw=np.asarray(
+            selected.anchor_quat_w[start_frame], dtype=np.float32
+        ),
+    )
+    return anchor, maximum, selected.length - start_frame - 1
+
+
+class FixedAnchor:
+    """Reference start-frame anchor pose: the encoder's frame for the episode."""
+
+    def __init__(self, position, quaternion_xyzw) -> None:
+        self.position = position
+        self.quaternion_xyzw = quaternion_xyzw
+
+
 def _cmd_lowlevel_unitree(args) -> int:
     from embodied_control.lowlevel.bundle import PolicyBundle
     from embodied_control.lowlevel.native_core import NativeUnitreeLoop
 
-    if args.enable_writes and args.confirm != "ENABLE_G1_LOWLEVEL":
-        print("FAIL: --enable-writes requires --confirm ENABLE_G1_LOWLEVEL")
+    gate_error = _unitree_write_gate_error(
+        enable_writes=args.enable_writes,
+        allow_non_realtime=args.allow_non_realtime,
+        confirm=args.confirm,
+    )
+    if gate_error is not None:
+        print(f"FAIL: {gate_error}")
         return 2
     if args.enable_writes and args.allow_non_realtime:
-        print("FAIL: hardware writes require strict real-time setup")
+        print(
+            "WARNING: G1 writes use best-effort timing; SCHED_FIFO setup "
+            "failures will not block control"
+        )
+    bundle = PolicyBundle.load(args.bundle)
+    fixed_anchor = None
+    if args.command_source == "oracle":
+        if not args.fixed_initial_anchor:
+            print("FAIL: Unitree oracle control requires --fixed-initial-anchor")
+            return 2
+        if not args.reference_root or not args.motion or not args.request_slot:
+            print(
+                "FAIL: Unitree oracle control requires --reference-root, "
+                "--motion, and --request-slot"
+            )
+            return 2
+        try:
+            fixed_anchor, displacement, available_ticks = _unitree_stationary_anchor(
+                bundle,
+                args.reference_root,
+                args.motion,
+                args.start_frame,
+                args.fixed_anchor_max_displacement,
+            )
+        except (FileNotFoundError, KeyError, ValueError) as exc:
+            print(f"FAIL: {exc}")
+            return 2
+        if args.ticks > available_ticks:
+            print(
+                f"FAIL: --ticks {args.ticks} exceeds the remaining "
+                f"{available_ticks} motion ticks"
+            )
+            return 2
+        print(
+            "Fixed initial anchor enabled: "
+            f"max reference displacement {displacement:.4f} m"
+        )
+    elif args.fixed_initial_anchor:
+        print("FAIL: --fixed-initial-anchor requires --command-source oracle")
         return 2
     runtime = NativeUnitreeLoop(
-        PolicyBundle.load(args.bundle),
+        bundle,
         args.network,
         response_slot=args.response_slot,
         request_slot=args.request_slot,
         writes_enabled=args.enable_writes,
         create_slots=not args.connect_slots,
         lead_ticks=args.lead_ticks,
+        command_source=args.command_source,
+        fixed_anchor_position=None if fixed_anchor is None else fixed_anchor.position,
+        fixed_anchor_quaternion=(
+            None if fixed_anchor is None else fixed_anchor.quaternion_xyzw
+        ),
         control_cpu=args.control_cpu,
         writer_cpu=args.writer_cpu,
         control_fifo_priority=args.control_priority,
@@ -634,21 +740,24 @@ def _cmd_lowlevel_unitree(args) -> int:
             print("FAIL: G1 did not reach the WAIT state after initialization")
             return 1
 
+    if args.console:
+        return _run_tracker_console(runtime, args, bundle)
+
     runtime.start(args.ticks, paced=True)
-    armed = not args.enable_writes
+    engaged = not args.enable_writes
     failed = False
     interrupted = False
     command_deadline = time.monotonic() + args.command_timeout
     try:
         while runtime.running:
-            if args.enable_writes and not armed:
+            if args.enable_writes and not engaged:
                 if int(runtime.stats()["control_ticks"]) > 0:
-                    runtime.arm_control()
-                    armed = True
-                    print("G1 native control armed")
+                    runtime.engage_control()
+                    engaged = True
+                    print("G1 native control engaged")
                 elif time.monotonic() >= command_deadline:
                     raise RuntimeError(
-                        "no valid planner command arrived before arm timeout"
+                        "no valid planner command arrived before engage timeout"
                     )
             time.sleep(0.02)
     except KeyboardInterrupt:
@@ -673,6 +782,512 @@ def _cmd_lowlevel_unitree(args) -> int:
     return (
         0 if not failed and not interrupted and report["control"]["fault"] == 0 else 1
     )
+
+
+def _run_tracker_console(runtime, args, bundle) -> int:
+    import numpy as np
+
+    from embodied_control.console import KeyConsole
+    from embodied_control.lowlevel.tracker_shell import (
+        Pose,
+        TrackerConsoleState,
+        build_tracker_bindings,
+        tracker_status,
+    )
+
+    poses = [Pose("default-stance"), Pose("hold-current", hold_current=True)]
+    if args.reference_root and args.motion:
+        try:
+            from embodied_control.lowlevel.reference import ReferenceArrays
+
+            reference = ReferenceArrays(args.reference_root)
+            selected = reference.motion(args.motion)
+            frame = np.asarray(
+                selected.joint_qpos[args.start_frame], dtype=np.float32
+            )
+            poses.append(
+                Pose(f"{args.motion}@{args.start_frame}", target=frame.tolist())
+            )
+        except (FileNotFoundError, KeyError, ValueError, AttributeError) as exc:
+            print(f"WARNING: reference pose unavailable: {exc}")
+
+    state = TrackerConsoleState(
+        poses=poses, ticks=args.ticks, init_seconds=args.init_seconds
+    )
+    console = KeyConsole(
+        build_tracker_bindings(
+            runtime, state, on_note=lambda msg: print(f"  -- {msg}")
+        ),
+        status=lambda: tracker_status(runtime, state),
+    )
+    print("tracker console (owns rt/lowcmd)")
+    if not args.enable_writes:
+        print("READ-ONLY: pass --enable-writes --confirm to command the robot")
+    try:
+        console.run()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        runtime.force_damp()
+        runtime.stop()
+        runtime.wait()
+    print(json.dumps({"control": runtime.stats(), "writer": runtime.writer_stats()}, indent=2))
+    return 0
+
+
+def _lifecycle_reference_pose(job, *, motion=None, start_frame=None):
+    """Start-pose joints (Isaac order) and start-frame projected gravity."""
+    import numpy as np
+
+    from embodied_control.lowlevel.reference import ReferenceArrays
+    from embodied_control.robot.gates import gravity_from_quaternion_xyzw
+
+    motion = motion or job.motion
+    start_frame = job.start_frame if start_frame is None else int(start_frame)
+    reference = ReferenceArrays(job.reference_root)
+    selected = reference.motion(motion)
+    if start_frame >= selected.length:
+        raise ValueError(
+            f"start frame {start_frame} is outside motion length {selected.length}"
+        )
+    joints = np.asarray(selected.joint_qpos[start_frame], dtype=np.float64)
+    quaternion = np.asarray(
+        selected.anchor_quat_w[start_frame], dtype=np.float64
+    )
+    return [float(v) for v in joints], gravity_from_quaternion_xyzw(
+        [float(v) for v in quaternion]
+    )
+
+
+# Measured on the plant with the SONIC bundle's own PD gains, robot lowered
+# onto its feet: legs hold within 0.06 rad; the 28 N m/rad waist pitch sags
+# 0.42 rad and the 14 N m/rad shoulders 0.16 rad under gravity. The gate is
+# for gross mismatches (wrong frame, joint order, tilt), not for sag the
+# policy was trained against, so the gain-limited groups are loose.
+# Ankles carry the stance under 85 N m/rad (3x hold): 0.17 rad off on a
+# flexed start frame, so they get their own bound.
+POSE_TOLERANCE_BY_GROUP = (("hip", 0.1), ("knee", 0.1), ("ankle", 0.2), ("waist", 0.5))
+POSE_TOLERANCE_ARM = 0.5
+
+
+def _pose_tolerances(bundle, spec):
+    """Per-joint pose-match tolerances (Isaac order)."""
+    if isinstance(spec, list):
+        return [float(v) for v in spec]
+    if spec is not None:
+        return [float(spec)] * 29
+    out = []
+    for name in bundle.manifest.action.isaac_joint_names:
+        tolerance = POSE_TOLERANCE_ARM
+        for key, value in POSE_TOLERANCE_BY_GROUP:
+            if key in name:
+                tolerance = value
+                break
+        out.append(tolerance)
+    return out
+
+
+def _lifecycle_selection(job):
+    from embodied_control.robot.session import Selection
+
+    return Selection(
+        mode=job.command_source, motion=job.motion, start_frame=int(job.start_frame)
+    )
+
+
+def _tracker_for(job, args, bundle, selection):
+    """Runtime plus the start pose and reference gravity for one selection."""
+    from embodied_control.lowlevel.native_core import NativeUnitreeLoop
+
+    network = args.network or job.network
+    fixed_anchor = None
+    if selection.mode == "oracle":
+        fixed_anchor, displacement, available = _unitree_stationary_anchor(
+            bundle,
+            job.reference_root,
+            selection.motion,
+            selection.start_frame,
+            job.fixed_anchor_max_displacement,
+        )
+        # A later start frame leaves fewer frames; the episode budget follows.
+        ticks = min(int(job.ticks), int(available))
+        print(f"Fixed initial anchor: max reference displacement {displacement:.4f} m; budget {ticks} ticks")
+    else:
+        ticks = int(job.ticks)
+    start_pose = None
+    reference_gravity = None
+    if job.start_pose == "motion" or (selection.mode == "oracle" and job.start_pose != "default" and not isinstance(job.start_pose, list)):
+        start_pose, reference_gravity = _lifecycle_reference_pose(
+            job, motion=selection.motion, start_frame=selection.start_frame
+        )
+    elif job.start_pose == "default":
+        start_pose = [float(v) for v in bundle.manifest.action.default_joint_pos]
+    else:
+        start_pose = [float(v) for v in job.start_pose]
+    runtime = NativeUnitreeLoop(
+        bundle,
+        network,
+        response_slot=job.response_slot,
+        request_slot=job.request_slot,
+        writes_enabled=args.enable_writes,
+        create_slots=not job.connect_slots,
+        lead_ticks=job.lead_ticks,
+        command_source=selection.mode,
+        fixed_anchor_position=None if fixed_anchor is None else fixed_anchor.position,
+        fixed_anchor_quaternion=(
+            None if fixed_anchor is None else fixed_anchor.quaternion_xyzw
+        ),
+        command_stale_ms=job.command_stale_ms,
+        state_absent_ms=job.state_absent_ms,
+        control_cpu=job.realtime.control_cpu,
+        writer_cpu=job.realtime.writer_cpu,
+        control_fifo_priority=job.realtime.control_priority,
+        writer_fifo_priority=job.realtime.writer_priority,
+        lock_memory=job.realtime.lock_memory,
+        require_realtime=not args.allow_non_realtime,
+        policy_threads=job.realtime.policy_threads,
+        dds_domain=job.dds_domain,
+        plan_slots=job.planner.vla_plan_slots if selection.mode == "vla" else 1,
+        latent_plan=selection.mode == "vla" and job.planner.vla_reply == "latent_plan",
+    )
+    return runtime, start_pose, reference_gravity, ticks
+
+
+def _lifecycle_config(job, args, bundle, start_pose, reference_gravity, ticks=None):
+    from embodied_control.robot.lifecycle import LifecycleConfig
+
+    thresholds = job.thresholds
+    return LifecycleConfig(
+        start_pose=start_pose,
+        reference_gravity=reference_gravity,
+        ramp_seconds=job.ramp_seconds,
+        ticks=int(job.ticks if ticks is None else ticks),
+        blend_ticks=job.blend_ticks,
+        end_state=job.end_state,
+        vendor_name=job.vendor_name,
+        require_vendor=job.require_vendor,
+        allow_non_realtime=args.allow_non_realtime,
+        damp_publish_frames=thresholds.damp_publish_frames,
+        settle_seconds=thresholds.settle_seconds,
+        settle_timeout_seconds=thresholds.settle_timeout_seconds,
+        drift_rad=thresholds.drift_rad,
+        settle_position_rad=thresholds.settle_position_rad,
+        ramp_fault_rad=thresholds.ramp_fault_rad,
+        ramp_fault_ms=thresholds.ramp_fault_ms,
+        hold_gain_scale=thresholds.hold_gain_scale,
+        slack_on_run=job.slack_on_run,
+        pin_reference=job.pin_reference,
+        hoist_release_seconds=thresholds.hoist_release_seconds,
+        pose_tolerance_rad=_pose_tolerances(bundle, thresholds.pose_tolerance_rad),
+        tilt_tolerance_degrees=thresholds.tilt_tolerance_degrees,
+        first_action_rad=thresholds.first_action_rad,
+        first_action_torque_ratio=thresholds.first_action_torque_ratio,
+        stiffness=[float(v) for v in bundle.manifest.action.stiffness],
+        effort_limit=(
+            [float(v) for v in bundle.manifest.action.effort_limit]
+            if bundle.manifest.action.effort_limit
+            else None
+        ),
+        command_timeout_seconds=thresholds.command_timeout_seconds,
+        vendor_timeout_seconds=thresholds.vendor_timeout_seconds,
+    )
+
+
+def _lifecycle_peers(job, args):
+    """The vendor runtime and the sim hoist client, shared across rebuilds."""
+    from embodied_control.lowlevel.native_core import NativePlantClient
+    from embodied_control.robot import open_robot
+
+    network = args.network or job.network
+    vendor = None
+    if job.require_vendor or job.vendor_name:
+        vendor = open_robot(
+            "g1",
+            network_interface=network,
+            writes_enabled=args.enable_writes,
+            dds_domain=job.dds_domain,
+            timeout_seconds=job.vendor_rpc_timeout_seconds,
+        )
+    hoist = NativePlantClient(network, dds_domain=job.dds_domain) if job.sim_hoist else None
+    return vendor, hoist
+
+
+def _load_lifecycle_job(args):
+    from embodied_control.lowlevel.bundle import PolicyBundle
+    from embodied_control.robot.lifecycle_job import load_lifecycle_job
+
+    job = load_lifecycle_job(args.job)
+    gate_error = _unitree_write_gate_error(
+        enable_writes=args.enable_writes,
+        allow_non_realtime=args.allow_non_realtime,
+        confirm=args.confirm,
+    )
+    if gate_error is not None:
+        raise ValueError(gate_error)
+    return job, PolicyBundle.load(job.bundle)
+
+
+def _build_lifecycle(args):
+    """Job -> (job, lifecycle, runtime, vendor) for the scripted `run`."""
+    from embodied_control.robot.lifecycle import Lifecycle, LifecycleLog
+
+    job, bundle = _load_lifecycle_job(args)
+    selection = _lifecycle_selection(job)
+    runtime, start_pose, reference_gravity, ticks = _tracker_for(job, args, bundle, selection)
+    vendor, hoist = _lifecycle_peers(job, args)
+    config = _lifecycle_config(job, args, bundle, start_pose, reference_gravity, ticks)
+    artifacts = args.artifacts or job.artifacts_dir or None
+    lifecycle = Lifecycle(
+        runtime,
+        vendor,
+        config,
+        hoist=hoist,
+        auto_ack=bool(job.sim_hoist or args.auto_ack),
+        log=LifecycleLog(artifacts),
+        note=lambda msg: print(f"  -- {msg}", flush=True),
+    )
+    return job, lifecycle, runtime, vendor
+
+
+def _episode_mpjpe(job, bundle):
+    """In-line MPJPE from an episode's telemetry, when MuJoCo and an MJCF exist."""
+    if not job.mjcf or not job.reference_root:
+        return None
+
+    def grade(directory, selection):
+        import numpy as np
+
+        from embodied_control.lowlevel.eval_mpjpe import _align_reference
+        from embodied_control.lowlevel.metrics import compute_mpjpe, fk_body_positions
+        from embodied_control.lowlevel.reference import ReferenceArrays
+
+        if selection.mode != "oracle":
+            return None
+        telemetry = np.load(directory / "telemetry.npz")
+        joint = telemetry["joint_position_log"]
+        anchor = telemetry["anchor_pose_log"]
+        frames = telemetry["reference_frames"]
+        valid = np.isfinite(joint).all(axis=1) & np.isfinite(anchor).all(axis=1) & (frames >= 0)
+        if valid.sum() < 2:
+            return None
+        joint, anchor, frames = joint[valid], anchor[valid], frames[valid]
+        arrays = ReferenceArrays(job.reference_root)
+        motion = arrays.motion(selection.motion)
+        if motion.body_pos_w is None or not arrays.body_names:
+            return None
+        robot_body = fk_body_positions(job.mjcf, bundle.manifest.action, joint, anchor, arrays.body_names)
+        reference_body = motion.body_pos_w[frames]
+        aligned_body = _align_reference(
+            anchor[0], motion.anchor_pos_w[frames[0]], motion.anchor_quat_w[frames[0]],
+            reference_body.reshape(-1, 3),
+        ).reshape(reference_body.shape)
+        aligned_root = _align_reference(
+            anchor[0], motion.anchor_pos_w[frames[0]], motion.anchor_quat_w[frames[0]],
+            motion.anchor_pos_w[frames],
+        )
+        record = compute_mpjpe(robot_body, anchor[:, 0:3], aligned_body, aligned_root)
+        return {k: v for k, v in record.items() if isinstance(v, (int, float))}
+
+    return grade
+
+
+def _build_session(args):
+    """Job -> ExperimentSession: the command center behind the console."""
+    from embodied_control.lowlevel.reference import ReferenceArrays
+    from embodied_control.robot.lifecycle import Lifecycle, LifecycleLog
+    from embodied_control.robot.session import (
+        ExperimentSession,
+        SessionConfig,
+        SubprocessPlanner,
+        oracle_worker_argv,
+        planner_worker_argv,
+    )
+
+    job, bundle = _load_lifecycle_job(args)
+    catalog: list[str] = []
+    lengths: dict[str, int] = {}
+    if job.reference_root:
+        arrays = ReferenceArrays(job.reference_root)
+        catalog = list(arrays.motion_names)
+        lengths = {name: int(arrays.motion(name).length) for name in catalog}
+    artifacts = args.artifacts or job.artifacts_dir or None
+    artifacts_path = Path(artifacts) if artifacts else None
+    if artifacts_path is not None:
+        artifacts_path.mkdir(parents=True, exist_ok=True)
+    vendor, hoist = _lifecycle_peers(job, args)
+    log = LifecycleLog(artifacts)
+    notes: list = []
+
+    def note(message: str) -> None:
+        for sink in notes:
+            sink(message)
+
+    def planner_factory(selection):
+        report = str(artifacts_path / f"planner_{selection.mode}.json") if artifacts_path else ""
+        planner_log = artifacts_path / "planner.log" if artifacts_path else None
+        if selection.mode == "oracle":
+            argv = oracle_worker_argv(
+                job.bundle, job.reference_root, selection.motion, selection.start_frame,
+                job.request_slot, job.response_slot,
+                horizon=job.planner.oracle_horizon, report=report,
+            )
+        else:
+            if not job.planner.vla_service_command:
+                raise ValueError("job.planner.vla_service_command is empty")
+            argv = planner_worker_argv(
+                job.planner.vla_service_command, job.request_slot, job.response_slot,
+                reply=job.planner.vla_reply, z_dim=job.planner.vla_z_dim,
+                plan_slots=job.planner.vla_plan_slots, hold_steps=job.planner.vla_hold_steps,
+                lead_ticks=job.lead_ticks, report=report,
+            )
+        return SubprocessPlanner(argv, planner_log)
+
+    pending: dict = {}
+
+    def tracker_factory(selection):
+        runtime, start_pose, reference_gravity, ticks = _tracker_for(job, args, bundle, selection)
+        pending["config"] = _lifecycle_config(job, args, bundle, start_pose, reference_gravity, ticks)
+        return runtime
+
+    def lifecycle_factory(tracker, selection, session):
+        return Lifecycle(
+            tracker,
+            vendor,
+            pending["config"],
+            hoist=hoist,
+            auto_ack=bool(job.sim_hoist or args.auto_ack),
+            log=log,
+            note=note,
+        )
+
+    session = ExperimentSession(
+        SessionConfig(
+            catalog=catalog,
+            motion_lengths=lengths,
+            artifacts_dir=artifacts,
+        ),
+        _lifecycle_selection(job),
+        planner_factory=planner_factory,
+        tracker_factory=tracker_factory,
+        lifecycle_factory=lifecycle_factory,
+        slot_names=[job.request_slot, job.response_slot] if job.connect_slots else [],
+        note=note,
+        mpjpe=_episode_mpjpe(job, bundle),
+    )
+    session.note_sinks = notes
+    return job, session, vendor
+
+
+def _cmd_lifecycle_console(args) -> int:
+    import threading
+
+    from embodied_control.console import KeyConsole
+    from embodied_control.robot.shell import build_session_bindings
+
+    try:
+        job, session, vendor = _build_session(args)
+    except (ImportError, RuntimeError, ValueError, FileNotFoundError, KeyError) as exc:
+        print(f"FAIL: {exc}")
+        return 2
+    stop = threading.Event()
+
+    def watch() -> None:
+        while not stop.is_set():
+            try:
+                session.poll()
+            except Exception as exc:  # the watcher must outlive any one fault
+                print(f"  !! poll: {exc}", flush=True)
+            stop.wait(0.01)
+
+    watcher = threading.Thread(target=watch, daemon=True)
+    watcher.start()
+    bindings = build_session_bindings(session)
+    use_tui = not args.plain and sys.stdin.isatty() and sys.stdout.isatty()
+    try:
+        if use_tui:
+            from embodied_control.robot.tui import LifecycleTui
+
+            tui = LifecycleTui(session, bindings)
+            session.note_sinks.append(tui.note)
+            if not args.enable_writes:
+                tui.note("READ-ONLY: pass --enable-writes --confirm to command the robot")
+            tui.note(f"job {args.job}: {session.selection.label()}; press r to build, p for the planner")
+            tui.run()
+        else:
+            session.note_sinks.append(lambda msg: print(f"  -- {msg}", flush=True))
+            console = KeyConsole(bindings, status=lambda: session.snapshot()["state"])
+            print(f"lifecycle console  bundle={job.bundle}  network={args.network or job.network}")
+            if not args.enable_writes:
+                print("READ-ONLY: pass --enable-writes --confirm to command the robot")
+            console.run()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stop.set()
+        session.close()
+        if vendor is not None:
+            vendor.close(damp=False)
+    print(json.dumps({"episodes": session.episodes, "selection": session.selection.label()}, indent=2))
+    return 0
+
+
+def _cmd_lifecycle_run(args) -> int:
+    from embodied_control.robot.lifecycle import LifecycleState
+
+    try:
+        until = LifecycleState(args.until)
+    except ValueError:
+        print(f"FAIL: unknown state {args.until}")
+        return 2
+    try:
+        job, lifecycle, runtime, vendor = _build_lifecycle(args)
+    except (ImportError, RuntimeError, ValueError, FileNotFoundError, KeyError) as exc:
+        print(f"FAIL: {exc}")
+        return 2
+    failed = False
+    try:
+        result = lifecycle.auto(until)
+        if not result.ok:
+            failed = True
+            print(f"FAIL at {lifecycle.state}: {result.detail}")
+        elif args.go and lifecycle.state is LifecycleState.PRIMED:
+            result = lifecycle.go()
+            if not result.ok:
+                failed = True
+                print(f"FAIL at {lifecycle.state}: {result.detail}")
+            while runtime.running and lifecycle.state is LifecycleState.RUNNING:
+                lifecycle.poll()
+                time.sleep(0.01)
+            lifecycle.poll()
+            if lifecycle.state is LifecycleState.FAULT:
+                failed = True
+                print(f"FAULT: {lifecycle.fault_reason}")
+        if args.recover and lifecycle.state in {
+            LifecycleState.HOLD, LifecycleState.DAMP, LifecycleState.FAULT,
+        }:
+            result = lifecycle.recover()
+            if not result.ok:
+                failed = True
+                print(f"FAIL recovering at {lifecycle.state}: {result.detail}")
+    except KeyboardInterrupt:
+        failed = True
+        lifecycle.damp()
+    finally:
+        if not args.recover:
+            lifecycle.shutdown()
+        else:
+            lifecycle.log.finish(lifecycle.summary())
+        runtime.force_damp()
+        if runtime.running:
+            runtime.stop()
+            runtime.wait()
+        if vendor is not None:
+            vendor.close(damp=False)
+    summary = lifecycle.summary()
+    summary["control"] = runtime.stats()
+    summary["writer"] = runtime.writer_stats()
+    print(json.dumps(summary, indent=2))
+    return 1 if failed or lifecycle.state is LifecycleState.FAULT else 0
 
 
 def _cmd_lowlevel_plant(args) -> int:
@@ -700,6 +1315,9 @@ def _cmd_lowlevel_plant(args) -> int:
         noise_seed=args.noise_seed,
         dds_domain=args.dds_domain,
         freeze_until_command=args.freeze_until_command,
+        vendor=args.vendor,
+        vendor_name=args.vendor_name,
+        hoist=args.hoist,
         # One row per publish; the plant serves at 1 / timestep.
         state_log_capacity=(
             int(args.seconds / args.timestep) + 1024 if args.states else 0
@@ -935,6 +1553,16 @@ def build_parser() -> argparse.ArgumentParser:
     lunitree.add_argument("--connect-slots", action="store_true")
     lunitree.add_argument("--ticks", type=int, default=500)
     lunitree.add_argument("--lead-ticks", type=int, default=4)
+    lunitree.add_argument(
+        "--command-source", choices=["vla", "oracle"], default="vla"
+    )
+    lunitree.add_argument("--fixed-initial-anchor", action="store_true")
+    lunitree.add_argument("--reference-root", default="")
+    lunitree.add_argument("--motion", default="")
+    lunitree.add_argument("--start-frame", type=int, default=0)
+    lunitree.add_argument(
+        "--fixed-anchor-max-displacement", type=float, default=0.05
+    )
     lunitree.add_argument("--policy-threads", type=int, default=1)
     lunitree.add_argument("--control-cpu", type=int, default=2)
     lunitree.add_argument("--writer-cpu", type=int, default=3)
@@ -947,6 +1575,11 @@ def build_parser() -> argparse.ArgumentParser:
     lunitree.add_argument("--allow-non-realtime", action="store_true")
     lunitree.add_argument("--enable-writes", action="store_true")
     lunitree.add_argument("--confirm", default="")
+    lunitree.add_argument(
+        "--console",
+        action="store_true",
+        help="drive the tracker from a single-keypress operator console",
+    )
     lunitree.set_defaults(func=_cmd_lowlevel_unitree)
     lplant = lows.add_parser(
         "plant", help="serve MuJoCo physics on the G1 hardware DDS protocol"
@@ -996,6 +1629,20 @@ def build_parser() -> argparse.ArgumentParser:
             "falls over long before a controller finishes booting"
         ),
     )
+    lplant.add_argument(
+        "--vendor",
+        action="store_true",
+        help=(
+            "serve the G1's sport and motion_switcher RPC services and own "
+            "the joints until ReleaseMode, rejecting rt/lowcmd until then"
+        ),
+    )
+    lplant.add_argument("--vendor-name", default="ai")
+    lplant.add_argument(
+        "--hoist",
+        action="store_true",
+        help="hang the pelvis from a virtual gantry until `lower` is requested",
+    )
     lplant.add_argument("--physics-cpu", type=int, default=-1)
     lplant.add_argument("--physics-fifo-priority", type=int, default=0)
     lplant.add_argument("--lock-memory", action="store_true")
@@ -1003,7 +1650,231 @@ def build_parser() -> argparse.ArgumentParser:
     lplant.add_argument("--report", default="")
     lplant.set_defaults(func=_cmd_lowlevel_plant)
 
+    life = sub.add_parser(
+        "lifecycle",
+        help="the gated hoist-to-run lifecycle (docs/design/robot_lifecycle.md)",
+    )
+    lifes = life.add_subparsers(dest="lifecycle_command", required=True)
+    for name, helptext in (
+        ("console", "single-keypress operator console over the lifecycle"),
+        ("run", "scripted: advance to a state, optionally go and recover"),
+    ):
+        parser = lifes.add_parser(name, help=helptext)
+        parser.add_argument("job", help="lifecycle job YAML")
+        parser.add_argument("--network", default="", help="overrides the job")
+        parser.add_argument("--artifacts", default="", help="overrides the job")
+        parser.add_argument("--allow-non-realtime", action="store_true")
+        parser.add_argument("--enable-writes", action="store_true")
+        parser.add_argument("--confirm", default="")
+        parser.add_argument(
+            "--auto-ack",
+            action="store_true",
+            help="acknowledge hoist/lower steps without an operator",
+        )
+        if name == "console":
+            parser.add_argument(
+                "--plain",
+                action="store_true",
+                help="line-mode console instead of the full-screen display",
+            )
+            parser.set_defaults(func=_cmd_lifecycle_console)
+        else:
+            parser.add_argument("--until", default="PRIMED")
+            parser.add_argument("--go", action="store_true")
+            parser.add_argument("--recover", action="store_true")
+            parser.set_defaults(func=_cmd_lifecycle_run)
+
+    rob = sub.add_parser(
+        "robot", help="high-level robot lifecycle commands (start, damp, ...)"
+    )
+    rob.add_argument(
+        "verb",
+        choices=[
+            "status",
+            "damp",
+            "zero-torque",
+            "ready",
+            "sit",
+            "squat",
+            "stand",
+            "move",
+            "stop",
+            "wave-hand",
+            "shake-hand",
+        ],
+    )
+    rob.add_argument("--robot", default="g1", choices=["g1", "fake"])
+    rob.add_argument("--network", default="")
+    rob.add_argument("--dds-domain", type=int, default=0)
+    rob.add_argument("--timeout", type=float, default=5.0)
+    rob.add_argument("--height", type=float, default=-1.0)
+    rob.add_argument("--vx", type=float, default=0.0)
+    rob.add_argument("--vy", type=float, default=0.0)
+    rob.add_argument("--vyaw", type=float, default=0.0)
+    rob.add_argument("--continuous", action="store_true")
+    rob.add_argument("--enable-writes", action="store_true")
+    rob.add_argument("--confirm", default="")
+    rob.set_defaults(func=_cmd_robot)
+
+    robsh = sub.add_parser(
+        "robot-shell",
+        help="single-keypress operator console for the high-level robot layer",
+    )
+    robsh.add_argument("--robot", default="g1", choices=["g1", "fake"])
+    robsh.add_argument("--network", default="")
+    robsh.add_argument("--dds-domain", type=int, default=0)
+    robsh.add_argument("--timeout", type=float, default=5.0)
+    robsh.add_argument("--vx-step", type=float, default=0.2)
+    robsh.add_argument("--vy-step", type=float, default=0.2)
+    robsh.add_argument("--vyaw-step", type=float, default=0.3)
+    robsh.add_argument("--enable-writes", action="store_true")
+    robsh.add_argument("--confirm", default="")
+    robsh.set_defaults(func=_cmd_robot_shell)
+
     return p
+
+
+def _cmd_robot_shell(args) -> int:
+    from embodied_control.robot import open_robot
+    from embodied_control.console import KeyConsole
+    from embodied_control.robot.shell import build_robot_bindings, robot_status
+
+    gate_error = _unitree_write_gate_error(
+        enable_writes=args.enable_writes,
+        allow_non_realtime=False,
+        confirm=args.confirm,
+    )
+    if gate_error is not None:
+        print(f"FAIL: {gate_error}")
+        return 2
+    try:
+        runtime = open_robot(
+            args.robot,
+            network_interface=args.network,
+            writes_enabled=args.enable_writes,
+            dds_domain=args.dds_domain,
+            timeout_seconds=args.timeout,
+        )
+    except (ImportError, RuntimeError, ValueError) as exc:
+        print(f"FAIL: {exc}")
+        return 2
+
+    info = runtime.info()
+    print(f"{info.robot_id} operator console  ({info.transport})")
+    if not args.enable_writes:
+        print("READ-ONLY: pass --enable-writes --confirm to command the robot")
+    bindings = build_robot_bindings(
+        runtime,
+        vx_step=args.vx_step,
+        vy_step=args.vy_step,
+        vyaw_step=args.vyaw_step,
+    )
+    console = KeyConsole(bindings, status=lambda: robot_status(runtime))
+    try:
+        return console.run()
+    except KeyboardInterrupt:
+        return 0
+    finally:
+        runtime.close()
+        print("\nconsole closed (robot damped)" if args.enable_writes else "")
+
+
+def _cmd_robot(args) -> int:
+    from embodied_control.robot import (
+        Capability,
+        GestureControl,
+        PostureControl,
+        RobotError,
+        VelocityControl,
+        open_robot,
+    )
+
+    mutating = args.verb not in {"status"}
+    if mutating:
+        gate_error = _unitree_write_gate_error(
+            enable_writes=args.enable_writes,
+            allow_non_realtime=False,
+            confirm=args.confirm,
+        )
+        if gate_error is not None:
+            print(f"FAIL: {gate_error}")
+            return 2
+        if not args.enable_writes:
+            print(f"FAIL: {args.verb} changes robot state; pass --enable-writes")
+            return 2
+    try:
+        runtime = open_robot(
+            args.robot,
+            network_interface=args.network,
+            writes_enabled=args.enable_writes,
+            dds_domain=args.dds_domain,
+            timeout_seconds=args.timeout,
+        )
+    except (ImportError, RuntimeError, ValueError) as exc:
+        print(f"FAIL: {exc}")
+        return 2
+    try:
+        if args.verb == "status":
+            info = runtime.info()
+            health = runtime.health()
+            print(f"robot: {info.robot_id}")
+            print(f"transport: {info.transport}")
+            print(
+                "capabilities: "
+                + (", ".join(sorted(info.capabilities)) or "none")
+            )
+            print(f"reachable: {health.reachable}")
+            print(f"mode: {health.mode}")
+            if health.detail:
+                print(f"detail: {health.detail}")
+            return 0 if health.reachable else 1
+        if args.verb == "damp":
+            runtime.damp()
+        elif args.verb == "zero-torque":
+            runtime.zero_torque()
+        elif args.verb == "ready":
+            runtime.ready()
+        elif args.verb in {"sit", "squat", "stand"}:
+            if not isinstance(runtime, PostureControl):
+                print(f"FAIL: {args.robot} has no posture control")
+                return 2
+            if args.verb == "sit":
+                runtime.sit()
+            elif args.verb == "squat":
+                runtime.squat()
+            else:
+                runtime.stand(args.height if args.height >= 0 else None)
+        elif args.verb in {"move", "stop"}:
+            if not isinstance(runtime, VelocityControl):
+                print(f"FAIL: {args.robot} has no velocity control")
+                return 2
+            if args.verb == "move":
+                runtime.move(
+                    args.vx, args.vy, args.vyaw, continuous=args.continuous
+                )
+            else:
+                runtime.stop()
+        elif args.verb in {"wave-hand", "shake-hand"}:
+            if not isinstance(runtime, GestureControl):
+                print(f"FAIL: {args.robot} has no gesture control")
+                return 2
+            if args.verb == "wave-hand":
+                runtime.wave_hand()
+            else:
+                runtime.shake_hand()
+        else:
+            print(f"FAIL: unknown verb {args.verb}")
+            return 2
+    except RobotError as exc:
+        print(f"FAIL: {exc}")
+        return 1
+    finally:
+        # A one-shot verb leaves the robot in the mode it asked for. Damping on
+        # exit here would stand the robot up and drop it in the same command;
+        # only the interactive shell damps when it closes.
+        runtime.close(damp=False)
+    print(f"{args.verb}: ok (mode {runtime.mode()})")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -1,0 +1,230 @@
+"""The experiment session on fakes: selection rules, planner, rebuilds, episodes."""
+
+from __future__ import annotations
+
+import json
+
+from embodied_control.robot import FakeRobotRuntime, RobotMode
+from embodied_control.robot.lifecycle import (
+    Lifecycle,
+    LifecycleConfig,
+    LifecycleLog,
+    LifecycleState as S,
+)
+from embodied_control.robot.session import (
+    ExperimentSession,
+    Selection,
+    SessionConfig,
+    episode_summary,
+    oracle_worker_argv,
+    planner_worker_argv,
+)
+from embodied_control.robot.shell import build_session_bindings
+from embodied_control.robot.tui import render
+from test_lifecycle import POSE, FakeClock, FakeHoist, StubTracker
+
+CATALOG = ["hurry_idle_001_A277", "walk_arc_cw_001", "wave_002"]
+LENGTHS = {"hurry_idle_001_A277": 505, "walk_arc_cw_001": 467, "wave_002": 120}
+
+
+class FakePlanner:
+    started: list["FakePlanner"] = []
+
+    def __init__(self, selection: Selection) -> None:
+        self.selection = selection
+        self._alive = True
+        FakePlanner.started.append(self)
+
+    def alive(self) -> bool:
+        return self._alive
+
+    def stop(self) -> None:
+        self._alive = False
+
+    def describe(self) -> str:
+        return f"fake-{self.selection.mode} {'running' if self._alive else 'stopped'}"
+
+
+class RecordingTracker(StubTracker):
+    def __init__(self, clock, selection):
+        super().__init__(clock)
+        self.selection = selection
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+    def joint_position_log(self):
+        return [[0.1] * 29 for _ in range(self.control_ticks)]
+
+    def reference_frames(self):
+        # Relative to the worker's start frame, like the native runtime.
+        return list(range(self.control_ticks))
+
+    def reference_joint_mae(self):
+        return [0.05 + 0.001 * i for i in range(self.control_ticks)]
+
+    def anchor_pose_log(self):
+        return [[0.0] * 7 for _ in range(self.control_ticks)]
+
+    def tick_durations_ns(self):
+        return [1000] * self.control_ticks
+
+
+def _session(tmp_path=None, *, wait_ok=True):
+    clock = FakeClock()
+    FakePlanner.started = []
+    built: list[RecordingTracker] = []
+
+    def tracker_factory(selection):
+        tracker = RecordingTracker(clock, selection)
+        built.append(tracker)
+        return tracker
+
+    log = LifecycleLog(tmp_path)
+
+    def lifecycle_factory(tracker, selection, session):
+        return Lifecycle(
+            tracker,
+            FakeRobotRuntime(writes_enabled=True, mode=RobotMode.READY),
+            LifecycleConfig(start_pose=list(POSE), ticks=100, blend_ticks=50),
+            hoist=FakeHoist(),
+            auto_ack=True,
+            log=log,
+            now=clock.now,
+            sleep=clock.sleep,
+        )
+
+    session = ExperimentSession(
+        SessionConfig(catalog=list(CATALOG), motion_lengths=dict(LENGTHS), artifacts_dir=str(tmp_path) if tmp_path else None),
+        Selection(mode="oracle", motion=CATALOG[0], start_frame=0),
+        planner_factory=FakePlanner,
+        tracker_factory=tracker_factory,
+        lifecycle_factory=lifecycle_factory,
+        slot_names=["/ec_req", "/ec_res"],
+        wait_slots=lambda names, timeout: wait_ok,
+        unlink_slots=lambda names: None,
+    )
+    return session, built, clock
+
+
+def _run_episode(session, clock):
+    assert session.auto().ok, session.lifecycle.last_result
+    assert session.go().ok
+    while session.tracker.running:
+        clock.sleep(0.1)
+        session.poll()
+    session.poll()
+    assert session.lifecycle.state is S.HOLD
+
+
+def test_selection_keys_cycle_motions_and_clamp_frames():
+    session, built, clock = _session()
+    assert session.step_motion(1).ok and session.selection.motion == CATALOG[1]
+    assert session.step_motion(-2).ok and session.selection.motion == CATALOG[2]
+    assert session.step_frame(500).ok and session.selection.start_frame == LENGTHS[CATALOG[2]] - 1
+    assert session.step_frame(-1000).ok and session.selection.start_frame == 0
+    assert session.toggle_mode().ok and session.selection.mode == "vla"
+    assert session.toggle_mode().ok and session.selection.mode == "oracle"
+    assert not session.select_mode("teleop").ok
+
+
+def test_rebuild_starts_planner_and_tracker_and_marks_stale_selection():
+    session, built, clock = _session()
+    assert session.rebuild().ok
+    assert session.planner is not None and session.planner.alive()
+    assert len(built) == 1 and session.built_for == session.selection
+    snapshot = session.snapshot()
+    assert snapshot["session"]["built"] is True
+
+    assert session.step_motion(1).ok
+    assert session.snapshot()["session"]["built"] is False
+    # Any lifecycle verb rebuilds for the new selection first, planner too:
+    # a new tracker numbers requests from 1 and the worker serves one frame.
+    assert session.advance().ok
+    assert len(built) == 2 and built[0].closed is True
+    assert built[1].selection.motion == CATALOG[1]
+    assert len(FakePlanner.started) == 2
+    assert not FakePlanner.started[0].alive() and FakePlanner.started[1].alive()
+    assert FakePlanner.started[1].selection.motion == CATALOG[1]
+
+
+def test_selection_is_refused_while_the_tracker_owns_the_joints():
+    session, built, clock = _session()
+    assert session.auto(S.POSE_SETTLED).ok
+    assert not session.step_motion(1).ok
+    assert not session.toggle_mode().ok
+    assert not session.stop_planner().ok
+    assert not session.rebuild().ok
+    assert session.selection.motion == CATALOG[0]
+    assert session.abort().ok
+    assert session.step_motion(1).ok
+
+
+def test_planner_that_never_creates_slots_is_stopped():
+    session, built, clock = _session(wait_ok=False)
+    result = session.start_planner()
+    assert not result.ok and "slots" in result.detail
+    assert FakePlanner.started and not FakePlanner.started[0].alive()
+
+
+def test_episode_telemetry_is_recorded_at_hold(tmp_path):
+    session, built, clock = _session(tmp_path)
+    _run_episode(session, clock)
+    assert len(session.episodes) == 1
+    summary = session.episodes[0]
+    assert summary["motion"] == CATALOG[0]
+    assert summary["ticks"] == summary["frames_tracked"] >= 100
+    assert summary["first_frame"] == 0
+    assert 0.05 <= summary["joint_mae_mean_rad"] <= 0.2
+    directory = tmp_path / "episodes"
+    written = list(directory.glob("ep001_oracle_*/summary.json"))
+    assert len(written) == 1
+    assert json.loads(written[0].read_text())["episode"] == 1
+
+    # Second take on another motion and frame.
+    assert session.recover().ok
+    assert session.step_motion(1).ok and session.step_frame(25).ok
+    _run_episode(session, clock)
+    assert session.episodes[-1]["motion"] == CATALOG[1]
+    assert session.episodes[-1]["start_frame"] == 25
+    assert session.episodes[-1]["first_frame"] == 25
+    assert session.episodes[-1]["episode"] == 2
+    assert len(list((tmp_path / "episodes").glob("ep002_*/summary.json"))) == 1
+
+
+def test_session_render_shows_selection_progress_and_comm():
+    session, built, clock = _session()
+    assert session.rebuild().ok
+    assert session.auto().ok
+    assert session.go().ok
+    clock.sleep(1.0)
+    snapshot = session.snapshot()
+    rows = render(snapshot, build_session_bindings(session), [], width=140, rates={"state_hz": 500.0, "publish_hz": 500.0, "planner_hz": 5.0})
+    text = "\n".join(rows)
+    assert "MODE oracle" in text and CATALOG[0] in text
+    assert "REFERENCE  [" in text and "%" in text
+    assert "lowstate   500 Hz" in text and "planner  5.0 Hz" in text
+    assert "o mode" in text and "p planner" in text
+
+
+def test_worker_argv_builders():
+    oracle = oracle_worker_argv("/b", "/ref", "m1", 25, "/req", "/res")
+    assert "oracle-worker" in oracle and "--create-slots" in oracle
+    assert oracle[oracle.index("--start-frame") + 1] == "25"
+    vla = planner_worker_argv(["python", "svc.py"], "/req", "/res", reply="chunk")
+    assert vla[-2:] == ["python", "svc.py"] and "chunk" in vla
+
+
+def test_rows_of_accepts_flat_and_nested_logs():
+    from embodied_control.robot.session import rows_of
+
+    assert rows_of([1.0, 2.0, 3.0, 4.0], 2) == [[1.0, 2.0], [3.0, 4.0]]
+    assert rows_of([[1, 2], [3, 4]], 2) == [[1.0, 2.0], [3.0, 4.0]]
+    assert rows_of([], 2) == []
+
+
+def test_episode_summary_handles_empty_logs():
+    summary = episode_summary([], [], [], {}, {}, Selection(), 3)
+    assert summary["episode"] == 3 and summary["frames_tracked"] == 0
+    assert summary["first_frame"] is None

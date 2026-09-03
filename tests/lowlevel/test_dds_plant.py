@@ -219,17 +219,17 @@ def test_dds_loopback_end_to_end(tmp_path, latent_manifest):
         feeder.start()
 
         runtime.start(150, paced=True)
-        armed = False
-        arm_deadline = time.monotonic() + 10.0
+        engaged = False
+        engage_deadline = time.monotonic() + 10.0
         while runtime.running:
-            if not armed and int(runtime.stats()["control_ticks"]) > 0:
-                runtime.arm_control()
-                armed = True
-            if not armed and time.monotonic() > arm_deadline:
+            if not engaged and int(runtime.stats()["control_ticks"]) > 0:
+                runtime.engage_control()
+                engaged = True
+            if not engaged and time.monotonic() > engage_deadline:
                 raise AssertionError("the controller never computed a control tick")
             time.sleep(0.02)
         runtime.wait()
-        assert armed
+        assert engaged
 
         stats = runtime.stats()
         writer = runtime.writer_stats()
@@ -263,7 +263,7 @@ def test_dds_loopback_end_to_end(tmp_path, latent_manifest):
     # This test covers the wire path, not stability: the bundle's toy policy
     # (0.5 x the first observation terms) is not a balancing controller, and
     # whether it stays upright for three seconds depends on the tick the
-    # controller happens to arm at. Assert only that physics stayed sane and
+    # controller happens to engage at. Assert only that physics stayed sane and
     # the robot did not sink through the floor.
     assert report["min_base_height"] > 0.05
 

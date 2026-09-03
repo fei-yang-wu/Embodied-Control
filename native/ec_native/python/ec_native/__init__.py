@@ -32,7 +32,17 @@ __all__ = [
 ]
 
 if WITH_UNITREE:
+    G1LocoClient = _ec_native.G1LocoClient
     MujocoDdsPlant = _ec_native.MujocoDdsPlant
+    PlantClient = _ec_native.PlantClient
     NativeUnitreeRuntime = _ec_native.NativeUnitreeRuntime
     UnitreeStateProbe = _ec_native.UnitreeStateProbe
-    __all__.extend(["MujocoDdsPlant", "NativeUnitreeRuntime", "UnitreeStateProbe"])
+    __all__.extend(
+        [
+            "G1LocoClient",
+            "MujocoDdsPlant",
+            "PlantClient",
+            "NativeUnitreeRuntime",
+            "UnitreeStateProbe",
+        ]
+    )

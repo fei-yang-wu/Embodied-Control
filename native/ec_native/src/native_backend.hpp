@@ -50,6 +50,14 @@ class NativeRobotBackend {
     return true;
   }
   virtual NativeBackendTimingStats timing_stats() const noexcept { return {}; }
+  // Blend-in progress, 0 (all held pose) to 1 (all policy). The control
+  // thread blends the target it writes and reports the blended action as
+  // last_action, so the policy's history stays honest about what ran.
+  virtual float blend_weight() const noexcept { return 1.0F; }
+  virtual bool held_target(std::span<float> out) const noexcept {
+    static_cast<void>(out);
+    return false;
+  }
 };
 
 class NativeFakeBackend final : public NativeRobotBackend {

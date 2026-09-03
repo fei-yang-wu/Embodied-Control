@@ -89,7 +89,7 @@ def test_probe_report_fails_short_slow_or_stalled_stream():
 
 
 def test_probe_fails_when_no_lowstate_arrives(monkeypatch):
-    import ec_native
+    ec_native = pytest.importorskip("ec_native")
 
     class NoMessages:
         def __init__(self, network, dds_domain):

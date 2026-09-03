@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "native_tracker_core.hpp"
+#include "plant_vendor.hpp"
 
 namespace ec_native {
 
@@ -19,10 +20,17 @@ struct PlantStats {
   std::uint64_t publishes = 0;
   std::uint64_t publish_failures = 0;
   std::uint64_t commands_received = 0;
+  std::uint64_t rejected_commands = 0;
+  std::uint64_t mode_machine_rejections = 0;
   std::uint64_t crc_errors = 0;
   std::uint64_t wake_late_ns_max = 0;
   std::uint64_t deadline_misses = 0;
   bool holding = true;
+  bool vendor_owned = false;
+  int vendor_fsm_id = -1;
+  bool hoisted = false;
+  int hoist_mode = 0;
+  double hoist_gain = 0.0;
   bool physics_fault = false;
   bool realtime_configured = false;
   double last_command_age_ms = -1.0;
@@ -78,7 +86,10 @@ class MujocoDdsPlant {
                  bool require_realtime = false,
                  const PlantSensorNoise& sensor_noise = {},
                  std::size_t state_log_capacity = 0, int dds_domain = 0,
-                 bool freeze_until_command = false);
+                 bool freeze_until_command = false,
+                 bool vendor_enabled = false,
+                 const std::string& vendor_name = "ai",
+                 bool hoist_enabled = false);
   ~MujocoDdsPlant();
 
   MujocoDdsPlant(const MujocoDdsPlant&) = delete;
@@ -97,6 +108,11 @@ class MujocoDdsPlant {
   void wait_for_stop() noexcept;
   bool running() const noexcept { return running_.load(); }
   PlantStats stats() const noexcept;
+  // In-process hoist controls; the "ec_plant" RPC service does the same from
+  // another process.
+  void hoist() noexcept;
+  void lower() noexcept;
+  void slack() noexcept;
 
  private:
   struct Impl;
@@ -110,6 +126,8 @@ class MujocoDdsPlant {
   void physics_loop() noexcept;
   bool configure_physics_thread() noexcept;
   void publish_low_state() noexcept;
+  void apply_vendor_drive() noexcept;
+  void apply_hoist() noexcept;
 
   std::unique_ptr<Impl> impl_;
   std::unique_ptr<CommandSlot> command_slot_;
@@ -143,6 +161,22 @@ class MujocoDdsPlant {
   // Frozen, the plant still serves state on the wire; it just does not
   // integrate physics until the first command arrives.
   bool freeze_until_command_ = false;
+  // The simulated vendor: sport + motion-switcher RPC services and the
+  // ownership gate on rt/lowcmd. Null when the plant runs bare.
+  std::unique_ptr<PlantVendor> vendor_;
+  bool previous_owned_ = false;
+  // A 6-DoF spring-damper on the pelvis standing in for the gantry. Released
+  // over hoist_release_seconds_ so the feet take the load gradually, the way
+  // an operator pays out a strap.
+  bool hoist_enabled_ = false;
+  double hoist_gain_ = 0.0;
+  double hoist_release_seconds_ = 3.0;
+  std::uint64_t hoist_generation_seen_ = 0;
+  std::array<double, 3> hoist_target_position_{};
+  std::array<double, 4> hoist_target_quaternion_wxyz_{1.0, 0.0, 0.0, 0.0};
+  std::atomic<float> hoist_gain_reported_{0.0F};
+  std::array<float, kJointCount> zero_gains_{};
+  std::array<float, kJointCount> vendor_damp_kd_{};
   // TRUE simulator state, sampled at the publish rate: the only ground truth
   // in the rig, because the hardware wire protocol carries no root pose.
   // Rows are [pos 3 | quat XYZW 4 | joint q 29] in SDK motor order.
@@ -157,6 +191,8 @@ class MujocoDdsPlant {
   std::atomic<std::uint64_t> publishes_{0};
   std::atomic<std::uint64_t> publish_failures_{0};
   std::atomic<std::uint64_t> commands_received_{0};
+  std::atomic<std::uint64_t> rejected_commands_{0};
+  std::atomic<std::uint64_t> mode_machine_rejections_{0};
   std::atomic<std::uint64_t> crc_errors_{0};
   std::atomic<std::uint64_t> wake_late_ns_max_{0};
   std::atomic<std::uint64_t> deadline_misses_{0};

@@ -510,6 +510,19 @@ const StepResult& NativeTrackerCore::step(const RobotState& state,
   return result_;
 }
 
+void NativeTrackerCore::set_last_action(std::span<const float> action) noexcept {
+  if (action.size() != kJointCount) {
+    return;
+  }
+  for (std::size_t index = 0; index < kJointCount; ++index) {
+    const float value = std::isfinite(action[index]) ? action[index] : 0.0F;
+    last_action_[index] =
+        raw_action_clip_ > 0.0F
+            ? std::clamp(value, -raw_action_clip_, raw_action_clip_)
+            : value;
+  }
+}
+
 void NativeTrackerCore::warmup(std::size_t iterations) {
   engine_.warmup(iterations);
 }

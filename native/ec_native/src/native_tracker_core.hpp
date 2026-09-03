@@ -119,6 +119,10 @@ class NativeTrackerCore {
   const std::array<float, kJointCount>& last_action() const noexcept {
     return last_action_;
   }
+  // Overwrite the action the next observation reports as "last": what the
+  // writer actually applied, when that differs from what the policy asked
+  // (the blend-in). Isaac's last_action is the executed action; so is this.
+  void set_last_action(std::span<const float> action) noexcept;
 
  private:
   static TermKind parse_term(const std::string& name);

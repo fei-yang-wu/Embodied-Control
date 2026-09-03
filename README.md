@@ -139,8 +139,13 @@ pixi run -e native ec lowlevel mujoco-native /absolute/path/to/bundle \
 
 Native oracle encoding is fixed to a robot-anchored `root_qpos` window of ten
 38-value frames at stride 1. The runtime refuses another encoder contract.
-The Unitree path also refuses this mode until it has a valid live pelvis world
-position estimate.
+The Unitree path can opt into `--fixed-initial-anchor` for a stationary
+reference. It uses reference frame 0's anchor pose (position and
+orientation) for the whole episode, so the robot's start heading is free:
+the policy's own observations carry no yaw, and the encoder sees the
+reference exactly as the sim does at frame 0. The CLI rejects a motion whose root moves
+more than `--fixed-anchor-max-displacement` (default 0.05 m); moving references
+still require external localization.
 
 MuJoCo deployment evaluation is always wall-clock paced. Use `--cpu` and
 `--physics-cpu` to place the two schedules on different cores. Their wake
@@ -198,6 +203,69 @@ both `--enable-writes` and `--confirm ENABLE_G1_LOWLEVEL`. This build must
 still pass target-host jitter tests and supervised DAMP drills before a
 standing test. Hardware defaults to one ONNX Runtime inference thread so the
 FIFO control thread does not wait on normal-priority worker threads.
+
+On a host that cannot grant `SCHED_FIFO`, `--allow-non-realtime` keeps CPU
+affinity, memory locking, absolute-time sleeps, stale-state/command watchdogs,
+and DAMP behavior, but makes real-time setup failure non-fatal. Best-effort
+hardware writes require the distinct acknowledgement
+`--confirm ENABLE_G1_LOWLEVEL_NON_REALTIME`; strict real-time remains the
+default.
+
+For a validated stationary oracle motion, start the oracle worker as above,
+then connect the hardware runtime to the same slots:
+
+```bash
+pixi run -e native ec lowlevel unitree /absolute/path/to/bundle \
+  --network <robot-interface> \
+  --request-slot /ec_g1_request --response-slot /ec_g1_response \
+  --connect-slots --command-source oracle --fixed-initial-anchor \
+  --reference-root /absolute/path/to/reference_arrays/root_qpos_v1 \
+  --motion hurry_idle_001_A277 --ticks 504 \
+  --allow-non-realtime --enable-writes \
+  --confirm ENABLE_G1_LOWLEVEL_NON_REALTIME
+```
+
+### Lifecycle: hoist to run from the control PC
+
+`ec lifecycle` drives the whole hardware session as a gated state machine
+(`docs/design/robot_lifecycle.md`): vendor damp, our damp frames on the wire,
+`ReleaseMode`, ramp to the start pose, settle, lower, pose match against the
+sim start frame, planner fresh, engage, blend in, run, hold, and back to the
+vendor standing still. The same object runs against the MuJoCo plant when
+the plant serves the vendor (`--vendor`) and a virtual gantry (`--hoist`):
+
+```bash
+# T0: the plant, owning the joints until ReleaseMode and hanging the robot
+pixi run -e native ec lowlevel plant assets/latent_playkit/bundles/fsq64_sonic_4500m \
+  --model assets/latent_playkit/model/g1_29dof_rev_1_0.xml --network lo \
+  --vendor --hoist --dds-domain 51
+# T1: the planner (stays up across episodes, owns the slots)
+pixi run -e native ec lowlevel oracle-worker assets/latent_playkit/bundles/fsq64_sonic_4500m \
+  --reference-root assets/latent_playkit/reference/root_qpos_v1 \
+  --motion hurry_idle_001_A277 --request-slot /ec_g1_request \
+  --response-slot /ec_g1_response --create-slots
+# T2: the lifecycle, scripted (or `console` for the single-key operator shell)
+pixi run -e native ec lifecycle run examples/lifecycle_sim_hurry_idle.yaml \
+  --enable-writes --confirm ENABLE_G1_LOWLEVEL_NON_REALTIME \
+  --allow-non-realtime --go --recover
+```
+
+`ec lifecycle console` is the experiment command center: a full-screen
+display on a terminal (`--plain` for line mode) that owns the planner process
+too. Pick the command source (`o` oracle / vla), the motion (`m`/`M`) and the
+start frame (`f`/`F`), start or stop the planner (`p`), and build the tracker
+for that choice (`r`, or any lifecycle key does it). The display shows the
+ladder, the writer's live numbers, link health (lowstate and lowcmd rates,
+state gaps, planner reply age), a progress bar over the reference trajectory
+in oracle mode, and per-episode tracking summaries. Each episode's telemetry
+lands under `episodes/` in the artifacts directory with a `summary.json`
+(joint MAE, and MPJPE when the job names an `mjcf`). Lifecycle keys: `SPACE` damp, `n` next state, `a` auto to PRIMED, `g` go, `h`
+hold, `H`/`l` hoist/lowered acknowledgements, `s` recover to vendor stand,
+`d` to vendor damp, `e` retake from HOLD, `x` abort, `q` quit. Every
+transition lands in `lifecycle.jsonl` with its evidence; the pose check
+writes `pose_match.json`. Against the robot the job changes `network`,
+`dds_domain: 0`, `sim_hoist: false`, and the write gate is
+`--confirm ENABLE_G1_LOWLEVEL` without `--allow-non-realtime`.
 
 ## Run an eval
 
