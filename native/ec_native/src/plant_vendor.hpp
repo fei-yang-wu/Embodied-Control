@@ -37,6 +37,11 @@ class PlantVendor {
   int fsm_id() const noexcept;
   int hoist_mode() const noexcept;
   bool hoisted() const noexcept;
+  // The strap's current gain, 1 taut to 0 fully paid out. The plant writes
+  // it every physics step so `Status` can report it: a lifecycle that waits
+  // for a slack strap needs the measured value, not the release timer.
+  float hoist_gain() const noexcept;
+  void set_hoist_gain(float gain) noexcept;
   // Bumps on every hoist request, so the plant re-captures the hoist target
   // at the robot's current pose rather than the one it started at.
   std::uint64_t hoist_generation() const noexcept;

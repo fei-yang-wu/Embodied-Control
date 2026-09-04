@@ -13,6 +13,7 @@ called from a control thread. `damp()` is the only verb that skips the gates.
 from __future__ import annotations
 
 import json
+import math
 import threading
 import time
 from collections.abc import Callable
@@ -210,7 +211,10 @@ class Hoist(Protocol):
     """The gantry, where one can be commanded: the simulated plant's.
 
     hoist: rigid hold. lower: the feet carry the weight, the strap only
-    catches a drop. slack: strap paid out, the policy is on its own.
+    catches a drop. slack: strap paid out, the policy is on its own. A gantry
+    that can report its strap gain does so through `status()["hoist_gain"]`,
+    1 taut to 0 paid out; the blend-in waits for 0 before it releases the
+    reference clock.
     """
 
     def hoist(self) -> None: ...
@@ -232,8 +236,18 @@ class LifecycleConfig:
     # Measured on the plant: at 1x the waist sagged 0.42 rad off the sim
     # frame and the policy fell on release; the blend-in ramps back to 1x.
     hold_gain_scale: float = 3.0
-    # Pay out the strap when RUNNING begins (sim: the plant's gantry).
+    # Pay out the strap as the policy blends in (sim: the plant's gantry), and
+    # keep the reference clock pinned until the strap is fully slack. A
+    # translating motion cannot be tracked against a 20 kN/m lateral spring:
+    # the injured-leg turning walk faulted at 2.4 s with the pelvis pinned to
+    # its start, before the old 3 s release that began at RUNNING had ended.
     slack_on_run: bool = True
+    slack_timeout_seconds: float = 10.0
+    # The tracker's tick budget starts at go(), and the strap wait sits inside
+    # it. `ticks` is the number of reference frames the operator asked for,
+    # so the budget grows by the strap's release window: with a 3 s release
+    # and a 350-tick job the reference played 198 frames before the fix.
+    control_hz: float = 50.0
     # Hold the reference at frame 0 through the probe and the blend-in, so
     # the motion starts the tick the policy fully owns the joints.
     pin_reference: bool = True
@@ -1196,9 +1210,17 @@ class Lifecycle:
             return GateResult(False, f"runtime fault {st.get('fault')}", self._writer_snapshot())
         return GateResult(True, "verified; waiting for go", {"control_ticks": int(st.get("control_ticks", 0))})
 
+    def _strap_allowance_ticks(self) -> int:
+        """Control ticks the strap release will take out of the run."""
+        if self.hoist is None or not self.auto_ack or not self.config.slack_on_run:
+            return 0
+        if getattr(self.hoist, "status", None) is None:
+            return 0
+        return int(math.ceil(self.config.hoist_release_seconds * self.config.control_hz))
+
     def _enter_blend_in(self) -> GateResult:
         self._pin_reference(True)
-        self.tracker.start(self.config.ticks, paced=True)
+        self.tracker.start(self.config.ticks + self._strap_allowance_ticks(), paced=True)
         fresh = self._wait_until(
             lambda: int(self.tracker.stats().get("control_ticks", 0)) > 0
             or int(self.tracker.stats().get("fault", 0)) != 0,
@@ -1212,6 +1234,10 @@ class Lifecycle:
             self.tracker.wait()
             self._fault(f"policy did not produce a fresh command at go (fault {st.get('fault')})")
             raise LifecycleError("no fresh command at go")
+        # The policy is taking the joints now: let the strap go so that by the
+        # time the reference starts moving nothing else holds the pelvis.
+        if self.hoist is not None and self.auto_ack and self.config.slack_on_run:
+            self.hoist.slack()
         self.tracker.engage_control(self.config.blend_ticks)
         ok = self._wait_until(
             lambda: int(self.tracker.writer_stats().get("blend_ticks_remaining", 0)) == 0
@@ -1225,16 +1251,61 @@ class Lifecycle:
             raise LifecycleError("blend-in interrupted")
         if not ok:
             return GateResult(False, "blend did not complete", self._writer_snapshot())
+        strap = self._wait_for_slack_strap()
+        if not strap.ok:
+            return strap
         self._pin_reference(False)
-        return GateResult(True, f"blended in over {self.config.blend_ticks} ticks; reference released", self._writer_snapshot())
+        values = {**self._writer_snapshot(), **strap.values}
+        return GateResult(
+            True,
+            f"blended in over {self.config.blend_ticks} ticks; {strap.detail}; "
+            "reference released",
+            values,
+        )
+
+    def _wait_for_slack_strap(self) -> GateResult:
+        """Hold frame 0 until the gantry reports its strap fully paid out.
+
+        Measured, not timed: the plant decays the gain over its own release
+        window, and a lifecycle that assumed the window would release the
+        reference against a strap that is still taut on a slow plant. A
+        gantry without a status (hardware, or a stub) has nothing to wait for.
+        """
+        if self.hoist is None or not self.auto_ack or not self.config.slack_on_run:
+            return GateResult(True, "strap kept")
+        status = getattr(self.hoist, "status", None)
+        if status is None:
+            return GateResult(True, "strap slack requested")
+        started = self._now()
+        last = None
+        while True:
+            try:
+                last = float(status().get("hoist_gain", 0.0))
+            except Exception as exc:
+                return GateResult(False, f"gantry status unavailable: {exc}")
+            if last <= 0.0:
+                return GateResult(
+                    True,
+                    f"strap slack after {self._now() - started:.1f}s",
+                    {"hoist_gain": last, "slack_seconds": self._now() - started},
+                )
+            if int(self.tracker.unitree_mode) != WRITER_CONTROL:
+                return GateResult(False, "writer left CONTROL while the strap paid out",
+                                  self._writer_snapshot())
+            if self._now() - started >= self.config.slack_timeout_seconds:
+                return GateResult(
+                    False,
+                    f"strap still at gain {last:.2f} after "
+                    f"{self.config.slack_timeout_seconds:.0f}s",
+                    {"hoist_gain": last},
+                )
+            self._sleep(self.config.poll_seconds)
 
     def _enter_running(self) -> GateResult:
         if int(self.tracker.unitree_mode) != WRITER_CONTROL:
             return GateResult(False, "writer is not in CONTROL", self._writer_snapshot())
-        # The policy is balancing now: pay out the strap. On hardware this is
-        # the operator's hand; in sim it is the plant's gantry.
-        if self.hoist is not None and self.auto_ack and self.config.slack_on_run:
-            self.hoist.slack()
+        # The strap was paid out during the blend-in and the reference clock
+        # waited for it, so the motion starts on a free robot.
         return GateResult(True, f"policy driving, budget {self.config.ticks} ticks"
                           + ("; strap slack" if self.config.slack_on_run else "; strap kept"))
 

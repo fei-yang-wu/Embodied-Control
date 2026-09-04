@@ -1143,6 +1143,7 @@ def _lifecycle_config(job, args, bundle, start_pose, reference_gravity, ticks=No
         slack_on_run=job.slack_on_run,
         pin_reference=job.pin_reference,
         hoist_release_seconds=thresholds.hoist_release_seconds,
+        control_hz=float(bundle.manifest.rates.control_hz),
         pose_tolerance_rad=_pose_tolerances(bundle, thresholds.pose_tolerance_rad),
         tilt_tolerance_degrees=thresholds.tilt_tolerance_degrees,
         first_action_rad=thresholds.first_action_rad,

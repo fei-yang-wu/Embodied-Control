@@ -567,8 +567,21 @@ would have reached hardware otherwise.
   2.5 rad bound. The ramp guard is 0.5 rad for 100 ms, configurable.
 - **The strap has three states.** Hoisted (rigid), lowered (the feet carry
   the weight, the rope only catches a 5 cm drop and steadies the tilt at half
-  gain), slack (paid out over 3 s when RUNNING begins). Lowering with the
-  strap fully released toppled the held robot.
+  gain), slack (paid out over 3 s). Lowering with the strap fully released
+  toppled the held robot.
+- **The reference waits for the strap, too (2026-09-03).** Slack used to
+  begin at RUNNING, the same tick the reference clock started. The lateral
+  spring is 20 kN/m, so for the first three seconds of every episode the
+  pelvis was tied to its start: the stationary `hurry_idle` never noticed,
+  and `injured_R_leg_turn_walk_360_001_A069` faulted at 2.4 s on an ankle
+  roll with root xy never having moved. The strap is now paid out as the
+  policy blends in, and `BLEND_IN` holds frame 0 until the plant's status
+  reports `hoist_gain` 0, measured rather than timed, before it releases the
+  reference. The wait is recorded in `lifecycle.jsonl`; on hardware there is
+  no status and nothing to wait for. The tracker's tick budget grows by the
+  release window (`hoist_release_seconds * control_hz`), so `ticks` in a job
+  stays the number of reference frames the operator asked for: before that,
+  a 350-tick job played 198 frames.
 - **Probe, then restart.** A policy whose actions the writer does not apply
   integrates open loop; POLICY_COMMAND_FRESH probes the planner and stops the
   control thread, and `go()` starts it again and engages on the first tick.

@@ -473,6 +473,10 @@ def test_the_robot_may_boot_facing_any_direction(tmp_path, latent_manifest):
             if runtime.running:
                 runtime.stop()
                 runtime.wait()
+            # A damped writer with its gate open keeps publishing rt/lowcmd
+            # for the rest of the pytest process and poisons every plant test
+            # after this one; close it.
+            runtime.close()
         if process.poll() is None:
             process.kill()
             process.communicate()

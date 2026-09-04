@@ -734,6 +734,9 @@ void MujocoDdsPlant::apply_hoist() noexcept {
   }
   hoist_gain_reported_.store(static_cast<float>(hoist_gain_),
                              std::memory_order_relaxed);
+  if (vendor_) {
+    vendor_->set_hoist_gain(static_cast<float>(hoist_gain_));
+  }
   if (hoist_gain_ <= 0.0) {
     for (std::size_t index = 0; index < 6; ++index) {
       wrench[index] = 0.0;

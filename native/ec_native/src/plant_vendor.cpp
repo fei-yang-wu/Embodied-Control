@@ -37,6 +37,7 @@ struct SharedState {
   std::atomic<bool> owned{true};
   std::atomic<int> fsm_id{1};
   std::atomic<int> hoist_mode{PlantVendor::kHoistHoisted};
+  std::atomic<float> hoist_gain{1.0F};
   std::atomic<std::uint64_t> hoist_generation{1};
   std::atomic<std::uint64_t> reset_generation{0};
   std::atomic<std::uint64_t> reset_applied_generation{0};
@@ -243,6 +244,7 @@ class PlantServer : public unitree::robot::Server {
            ",\"hoisted\":" +
            std::string(mode == PlantVendor::kHoistHoisted ? "true" : "false") +
            ",\"hoist_mode\":" + std::to_string(mode) +
+           ",\"hoist_gain\":" + std::to_string(state_->hoist_gain.load()) +
            ",\"reset_pending\":" +
            std::string(state_->reset_generation.load() !=
                                state_->reset_applied_generation.load()
@@ -341,6 +343,14 @@ PlantVendor::~PlantVendor() = default;
 bool PlantVendor::owned() const noexcept { return impl_->state->owned.load(); }
 
 int PlantVendor::fsm_id() const noexcept { return impl_->state->fsm_id.load(); }
+
+float PlantVendor::hoist_gain() const noexcept {
+  return impl_->state->hoist_gain.load(std::memory_order_relaxed);
+}
+
+void PlantVendor::set_hoist_gain(float gain) noexcept {
+  impl_->state->hoist_gain.store(gain, std::memory_order_relaxed);
+}
 
 int PlantVendor::hoist_mode() const noexcept {
   return impl_->state->hoist_mode.load();

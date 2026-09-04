@@ -239,27 +239,41 @@ class StubTracker:
 
 
 class FakeHoist:
-    def __init__(self) -> None:
+    """A gantry whose strap pays out over `release_seconds` once slack."""
+
+    def __init__(self, clock=None, release_seconds: float = 0.0) -> None:
         self.calls: list[str] = []
+        self._clock = clock
+        self._release = release_seconds
+        self._slack_at: float | None = None
 
     def hoist(self) -> None:
         self.calls.append("hoist")
+        self._slack_at = None
 
     def lower(self) -> None:
         self.calls.append("lower")
 
     def slack(self) -> None:
         self.calls.append("slack")
+        self._slack_at = self._clock.now() if self._clock else 0.0
 
     def reset(self) -> None:
         self.calls.append("reset")
+
+    def status(self) -> dict:
+        if self._slack_at is None or self._clock is None:
+            return {"hoist_gain": 0.0 if self._slack_at is not None else 1.0}
+        elapsed = self._clock.now() - self._slack_at
+        gain = 0.0 if self._release <= 0 else max(0.0, 1.0 - elapsed / self._release)
+        return {"hoist_gain": gain}
 
 
 def _lifecycle(tmp_path=None, *, auto_ack=True, tracker_kwargs=None, **config):
     clock = FakeClock()
     tracker = StubTracker(clock, **(tracker_kwargs or {}))
     vendor = FakeRobotRuntime(writes_enabled=True, mode=RobotMode.READY)
-    hoist = FakeHoist()
+    hoist = FakeHoist(clock, release_seconds=config.pop("strap_release_seconds", 0.0))
     cfg = LifecycleConfig(start_pose=list(POSE), ticks=100, blend_ticks=50, **config)
     lifecycle = Lifecycle(
         tracker,
@@ -472,9 +486,10 @@ def test_rearm_from_hold_ramps_again_without_the_vendor():
     assert lifecycle.state is S.PRIMED
     assert lifecycle.episode == episode + 1
     # One probe start per POLICY_COMMAND_FRESH and one real start per go().
-    assert tracker.calls.count("start(100)") == 3
+    starts = lambda: [c for c in tracker.calls if c.startswith("start(")]  # noqa: E731
+    assert len(starts()) == 3
     assert lifecycle.go().ok
-    assert tracker.calls.count("start(100)") == 4
+    assert len(starts()) == 4
 
 
 def test_abort_before_arming_hands_back_to_the_vendor():
@@ -671,3 +686,56 @@ def test_a_plant_run_does_not_gate_on_its_own_rehearsal():
     # rehearsal: neither has anything to check.
     lifecycle, tracker, vendor, hoist, clock = _lifecycle()
     assert lifecycle.advance().ok
+
+
+def test_the_strap_pays_out_during_the_blend_and_the_reference_waits(tmp_path):
+    """A translating motion cannot be tracked against a taut strap, so the
+    reference clock stays on frame 0 until the gantry reports gain 0."""
+    lifecycle, tracker, vendor, hoist, clock = _lifecycle(
+        tmp_path, strap_release_seconds=3.0
+    )
+    assert lifecycle.auto().ok
+
+    assert lifecycle.go().ok, lifecycle.last_result
+
+    # slack was requested at blend-in, not at RUNNING.
+    assert hoist.calls[-1] == "slack"
+    blend = next(
+        json.loads(line)
+        for line in (tmp_path / "lifecycle.jsonl").read_text().splitlines()
+        if json.loads(line)["to_state"] == "BLEND_IN"
+    )
+    assert blend["values"]["hoist_gain"] == 0.0
+    # The strap started paying out before the blend, so the wait after the
+    # blend is the release window less the blend itself.
+    assert blend["values"]["slack_seconds"] >= 2.5
+    # Pinned for the probe, pinned again at go, released once the strap is
+    # slack: never released while the strap still held the pelvis.
+    assert tracker.reference_paused == [True, True, False]
+    assert hoist.status()["hoist_gain"] == 0.0
+
+
+def test_a_strap_that_never_slackens_refuses_to_start_the_motion():
+    lifecycle, tracker, vendor, hoist, clock = _lifecycle(
+        strap_release_seconds=60.0, slack_timeout_seconds=5.0
+    )
+    assert lifecycle.auto().ok
+
+    result = lifecycle.go()
+
+    assert not result.ok and "strap still at gain" in result.detail
+    assert lifecycle.state is S.PRIMED
+    # The reference was never released against a taut strap.
+    assert tracker.reference_paused[-1] is True
+
+
+def test_the_tick_budget_grows_by_the_strap_release():
+    """`ticks` is reference frames the operator asked for; the strap wait
+    must not be paid out of it."""
+    lifecycle, tracker, vendor, hoist, clock = _lifecycle(
+        strap_release_seconds=3.0, hoist_release_seconds=3.0, control_hz=50.0
+    )
+    assert lifecycle.auto().ok
+    assert lifecycle.go().ok, lifecycle.last_result
+    # 100 asked for, plus ceil(3.0 s * 50 Hz) for the strap.
+    assert "start(250)" in tracker.calls, tracker.calls[-6:]
