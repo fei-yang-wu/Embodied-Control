@@ -439,3 +439,75 @@ def test_console_threads_are_pinned_once_each():
     tui._quit.set()
     tui._work()
     assert calls == ["pinned"]
+
+
+def test_theme_resolution_reads_the_terminal_then_the_override():
+    from embodied_control.robot.tui import resolve_theme
+
+    # An explicit request wins over anything the terminal says.
+    assert resolve_theme("light", {}) == "light"
+    assert resolve_theme("dark", {"COLORFGBG": "0;15"}) == "dark"
+    # `auto` reads COLORFGBG: the last field is the background.
+    assert resolve_theme("auto", {"COLORFGBG": "0;15"}) == "light"
+    assert resolve_theme("auto", {"COLORFGBG": "0;7"}) == "light"
+    assert resolve_theme("auto", {"COLORFGBG": "15;0"}) == "dark"
+    # Unset, malformed, or a terminal that does not publish it: dark.
+    assert resolve_theme("auto", {}) == "dark"
+    assert resolve_theme("auto", {"COLORFGBG": "default;default"}) == "dark"
+    # The environment override beats the flag, for a terminal that lies.
+    assert resolve_theme("dark", {"EC_TUI_THEME": "light"}) == "light"
+    assert resolve_theme("auto", {"EC_TUI_THEME": "nonsense"}) == "dark"
+
+
+def _xterm_luminance(index: int) -> float:
+    """Relative luminance, 0 black to 1 white, of an xterm-256 colour.
+
+    The index is not a brightness: 16-231 is a 6x6x6 cube and 232-255 is a
+    greyscale ramp, so 238 is nearly black while 44 is a bright cyan. A
+    palette test has to compare the colours, not their numbers.
+    """
+    if index >= 232:
+        level = (8 + (index - 232) * 10) / 255.0
+        return level
+    index -= 16
+    steps = [0, 95, 135, 175, 215, 255]
+    red = steps[index // 36] / 255.0
+    green = steps[(index % 36) // 6] / 255.0
+    blue = steps[index % 6] / 255.0
+    return 0.2126 * red + 0.7152 * green + 0.0722 * blue
+
+
+def test_the_light_palette_inverts_the_contrast_it_needs_to():
+    """`value` is what an operator reads and must carry the most contrast
+    against the paper; reverse-video chips take their colour as a background,
+    so on light they must be dark enough to hold white text."""
+    from embodied_control.robot.tui import (
+        PALETTE_256_DARK,
+        PALETTE_256_LIGHT,
+    )
+
+    dark = {k: _xterm_luminance(v) for k, v in PALETTE_256_DARK.items()}
+    light = {k: _xterm_luminance(v) for k, v in PALETTE_256_LIGHT.items()}
+
+    # Near-white on a dark terminal, near-black on a light one.
+    assert dark["value"] > 0.85
+    assert light["value"] < 0.15
+    # `dim` and `rule` step back from `value`, towards the paper.
+    assert dark["dim"] < dark["value"] and dark["rule"] < dark["dim"]
+    assert light["dim"] > light["value"] and light["rule"] > light["dim"]
+    # `value` and `bad` carry the contrast that matters most: the number and
+    # the failure. WCAG ratio against the paper, (1.05)/(L + 0.05).
+    assert 1.05 / (light["value"] + 0.05) > 4.5
+    assert 1.05 / (light["bad"] + 0.05) > 4.0
+    # Every light-theme hue stays dark: readable as text on white, and dark
+    # enough to be a chip behind white text. Green and amber bottom out around
+    # 3:1 and 2.3:1 in the 6x6x6 cube, which is why they are always bold.
+    for name in ("accent", "ok", "warn", "bad", "section", "key"):
+        assert light[name] < 0.45, (name, light[name])
+        assert 1.05 / (light[name] + 0.05) > 2.2, (name, light[name])
+    # The dark theme's hues are bright for the same reason, reversed.
+    for name in ("accent", "ok", "warn", "bad", "section"):
+        assert dark[name] > 0.35, (name, dark[name])
+    # The three tones stay apart from each other, or a red gauge reads green.
+    for a, b in (("ok", "warn"), ("warn", "bad"), ("ok", "bad")):
+        assert abs(light[a] - light[b]) > 0.05, (a, b)

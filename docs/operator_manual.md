@@ -153,6 +153,10 @@ a passed gate reads green, a damp amber, a failure or refusal red.
 works while the palette is open or the prompt has text. `SPACE` does
 nothing on purpose: it is the key a hand rests on.
 
+On a light terminal, start the console with `--theme light` (or set
+`EC_TUI_THEME=light`); the default reads `COLORFGBG` and falls back
+to the dark palette.
+
 ## When a gate fails
 
 The gate prints what it measured and the state does not move. Nothing

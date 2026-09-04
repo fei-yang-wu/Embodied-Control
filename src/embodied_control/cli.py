@@ -1444,6 +1444,7 @@ def _cmd_lifecycle_console(args) -> int:
                 diagnose=diagnose,
                 agent_label=agent.label if args.diagnostic_agent != "off" else "off",
                 pin=session.pinner.apply,
+                theme=getattr(args, "theme", "auto"),
             )
             watch_note[0] = tui.note
             tui.note(
@@ -2062,6 +2063,13 @@ def build_parser() -> argparse.ArgumentParser:
                 "--plain",
                 action="store_true",
                 help="line-mode console instead of the full-screen display",
+            )
+            parser.add_argument(
+                "--theme",
+                choices=("auto", "light", "dark"),
+                default="auto",
+                help="palette for the full-screen display; auto reads "
+                "COLORFGBG and falls back to dark. EC_TUI_THEME overrides it",
             )
             parser.add_argument(
                 "--diagnostic-agent",

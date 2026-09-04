@@ -1211,6 +1211,7 @@ class LifecycleTui:
         diagnose: Callable[[dict, list[str]], object] | None = None,
         agent_label: str = "off",
         pin: Callable[[], object] | None = None,
+        theme: str = "auto",
     ) -> None:
         self.lifecycle = lifecycle
         self.bindings = {binding.key: binding for binding in bindings}
@@ -1236,6 +1237,7 @@ class LifecycleTui:
         # must not land on a core a SCHED_FIFO robot thread owns.
         self._pin = pin
         self.agent_label = agent_label
+        self.theme = resolve_theme(theme)
         self.assistant: list[str] = []
 
     # -- model ---------------------------------------------------------
@@ -1458,7 +1460,7 @@ class LifecycleTui:
             curses.curs_set(0)
         except curses.error:
             pass
-        styles = build_styles(curses)
+        styles = build_styles(curses, self.theme)
         screen.keypad(True)  # arrows, Home/End and Backspace arrive as codes
         screen.nodelay(True)
         screen.timeout(int(self.refresh_seconds * 1000))
@@ -1555,7 +1557,12 @@ def decode_key(curses, code: int) -> str | None:
 
 # 256 colours first, because a grey that is actually grey is what separates a
 # label from its value; the 8-colour fallback keeps the same meanings.
-PALETTE_256 = {
+# Two palettes, because a colour that reads on black is invisible on white and
+# the reverse. `value` is the number an operator came to read, so it takes the
+# strongest contrast in each theme and `dim` and `rule` step back from it.
+# Reverse-video styles (bar, pill, key) swap fg and bg, so their colour is the
+# chip's background: it has to be dark enough for light text either way.
+PALETTE_256_DARK = {
     "accent": 44,
     "ok": 78,
     "warn": 214,
@@ -1567,7 +1574,19 @@ PALETTE_256 = {
     "diagnosis": 176,
     "key": 250,
 }
-PALETTE_8 = {
+PALETTE_256_LIGHT = {
+    "accent": 24,
+    "ok": 22,
+    "warn": 130,
+    "bad": 124,
+    "dim": 240,
+    "value": 234,
+    "section": 25,
+    "rule": 250,
+    "diagnosis": 90,
+    "key": 238,
+}
+PALETTE_8_DARK = {
     "accent": "CYAN",
     "ok": "GREEN",
     "warn": "YELLOW",
@@ -1579,9 +1598,51 @@ PALETTE_8 = {
     "diagnosis": "MAGENTA",
     "key": "WHITE",
 }
+# Eight-colour yellow is unreadable on white, so `warn` borrows magenta here;
+# a terminal with 256 colours gets the amber it should have.
+PALETTE_8_LIGHT = {
+    "accent": "BLUE",
+    "ok": "GREEN",
+    "warn": "MAGENTA",
+    "bad": "RED",
+    "dim": "BLACK",
+    "value": "BLACK",
+    "section": "BLUE",
+    "rule": "BLACK",
+    "diagnosis": "MAGENTA",
+    "key": "BLACK",
+}
+PALETTE_256 = PALETTE_256_DARK
+PALETTE_8 = PALETTE_8_DARK
+THEMES = ("dark", "light")
 
 
-def build_styles(curses) -> dict[str, int]:
+def resolve_theme(requested: str = "auto", environ: dict | None = None) -> str:
+    """Which palette to paint with.
+
+    `auto` reads COLORFGBG, which terminals that set it publish as
+    `<foreground>;<background>`: a background of 7 or 15 is a light terminal.
+    Nothing else is guessable from inside curses, so anything unset stays
+    dark, and `EC_TUI_THEME` overrides the lot for a terminal that lies.
+    """
+    import os
+
+    environ = os.environ if environ is None else environ
+    override = str(environ.get("EC_TUI_THEME", "")).strip().lower()
+    if override in THEMES:
+        return override
+    wanted = str(requested or "auto").strip().lower()
+    if wanted in THEMES:
+        return wanted
+    colours = str(environ.get("COLORFGBG", "")).strip()
+    if colours:
+        background = colours.split(";")[-1]
+        if background.isdigit() and int(background) in {7, 15}:
+            return "light"
+    return "dark"
+
+
+def build_styles(curses, theme: str = "dark") -> dict[str, int]:
     """Style name to a curses attribute, resolved once per session."""
     plain = {
         "text": curses.A_NORMAL,
@@ -1613,7 +1674,11 @@ def build_styles(curses) -> dict[str, int]:
     except curses.error:
         return plain
     wide = curses.COLORS >= 256
-    source = PALETTE_256 if wide else PALETTE_8
+    light = str(theme).lower() == "light"
+    if wide:
+        source = PALETTE_256_LIGHT if light else PALETTE_256_DARK
+    else:
+        source = PALETTE_8_LIGHT if light else PALETTE_8_DARK
     pairs: dict[str, int] = {}
     for index, (name, colour) in enumerate(source.items(), start=1):
         value = colour if wide else getattr(curses, f"COLOR_{colour}")

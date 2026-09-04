@@ -316,6 +316,13 @@ front of the robot: the ladder, every key, and what to do when a gate fails.
 It is generated from the console's own bindings (`pixi run build-manual`), and
 a test fails when the file drifts from them.
 
+The console paints for a dark terminal by default. `--theme light` switches
+to a palette built for a light one: the numbers go near-black, the rules go
+faint, and every hue darkens so it still reads on paper and still holds white
+text inside a chip. `--theme auto` (the default) reads `COLORFGBG` and falls
+back to dark; `EC_TUI_THEME=light` overrides both, for a terminal that does
+not publish its background.
+
 The full-screen console also has a slash-command palette. Press `/` or `?` to
 open it; every operator key has a named equivalent such as `/next`, `/auto`,
 `/go`, `/hold`, `/stand`, and `/damp`. Slash commands take no arguments.
