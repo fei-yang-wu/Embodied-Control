@@ -37,6 +37,7 @@ class NativeDdsPlant:
         vendor: bool = False,
         vendor_name: str = "ai",
         hoist: bool = False,
+        hoist_clearance: float = 0.10,
     ) -> None:
         try:
             import ec_native
@@ -88,6 +89,7 @@ class NativeDdsPlant:
             bool(vendor),
             str(vendor_name),
             bool(hoist),
+            float(hoist_clearance),
         )
 
     def hoist(self) -> None:

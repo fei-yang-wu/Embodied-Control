@@ -44,11 +44,19 @@ constexpr double kHoistKpPosition = 20000.0;
 constexpr double kHoistKdPosition = 1600.0;
 constexpr double kHoistKpRotation = 600.0;
 constexpr double kHoistKdRotation = 40.0;
-// Lowered: the strap target drops this far so the feet take the weight; the
+// Lowered: the strap target drops past the hang height by this margin, so
+// the feet reach the floor and take the weight whatever the leg pose is; the
 // rope then only catches a fall (one-sided in z) and steadies the tilt at
 // reduced gain, like a harness on a slack gantry.
-constexpr double kHoistLowerMeters = 0.05;
+constexpr double kHoistLowerMarginMeters = 0.05;
 constexpr double kHoistLoweredLateralGain = 0.5;
+// The strap moves at a winch's pace. Dropping the target 15 cm in one step
+// is a free fall onto the ankles at 1.4 m/s; an operator pays it out.
+constexpr double kHoistRateMetersPerSecond = 0.05;
+// Floor clearance is measured this often, and never further than this: a
+// gap the size of a leg is "in the air" by any reading.
+constexpr double kClearanceIntervalSeconds = 0.01;
+constexpr double kClearanceDistMax = 2.0;
 
 std::uint64_t monotonic_ns_plant() noexcept {
   timespec now{};
@@ -132,7 +140,7 @@ MujocoDdsPlant::MujocoDdsPlant(
     int physics_fifo_priority, bool lock_memory, bool require_realtime,
     const PlantSensorNoise& sensor_noise, std::size_t state_log_capacity,
     int dds_domain, bool freeze_until_command, bool vendor_enabled,
-    const std::string& vendor_name, bool hoist_enabled)
+    const std::string& vendor_name, bool hoist_enabled, double hoist_clearance)
     : impl_(std::make_unique<Impl>()),
       command_slot_(std::make_unique<CommandSlot>()),
       timestep_(timestep),
@@ -144,6 +152,8 @@ MujocoDdsPlant::MujocoDdsPlant(
       state_log_capacity_(state_log_capacity),
       freeze_until_command_(freeze_until_command),
       hoist_enabled_(hoist_enabled),
+      hoist_clearance_(hoist_clearance),
+      hoist_rate_(kHoistRateMetersPerSecond),
       require_realtime_(require_realtime) {
   zero_gains_.fill(0.0F);
   vendor_damp_kd_.fill(kVendorDampKd);
@@ -167,7 +177,9 @@ MujocoDdsPlant::MujocoDdsPlant(
                   [](float value) { return value < 0.0F; }) ||
       std::any_of(hold_damping.begin(), hold_damping.end(),
                   [](float value) { return value < 0.0F; }) ||
-      !std::isfinite(timestep_) || timestep_ <= 0.0 || physics_cpu_ < -1 ||
+      !std::isfinite(timestep_) || timestep_ <= 0.0 ||
+      !std::isfinite(hoist_clearance_) || hoist_clearance_ < 0.0 ||
+      physics_cpu_ < -1 ||
       physics_cpu_ >= CPU_SETSIZE || physics_fifo_priority_ < 0 ||
       physics_fifo_priority_ > sched_get_priority_max(SCHED_FIFO)) {
     throw std::runtime_error("invalid MuJoCo DDS plant configuration");
@@ -236,6 +248,21 @@ MujocoDdsPlant::MujocoDdsPlant(
                   [](int value) { return value < 0; })) {
     throw std::runtime_error("sdk_joint_names must cover all 29 actuators");
   }
+  // Floor clearance is measured against every collidable pair, not against a
+  // geom named "floor": a model is free to name its ground anything, and a
+  // robot that lands on a knee is as much "not hoisted" as one on its feet.
+  for (int geom = 0; geom < model->ngeom; ++geom) {
+    if (model->geom_contype[geom] == 0 && model->geom_conaffinity[geom] == 0) {
+      continue;
+    }
+    if (model->geom_bodyid[geom] == 0) {
+      floor_geoms_.push_back(geom);
+    } else {
+      robot_geoms_.push_back(geom);
+    }
+  }
+  clearance_period_steps_ = static_cast<std::uint64_t>(
+      std::max<long long>(1, std::llround(kClearanceIntervalSeconds / timestep_)));
   reset();
 
   // Domain 0 is the robot. A simulated plant may take another domain so two
@@ -355,6 +382,24 @@ void MujocoDdsPlant::reset_data(bool while_running) {
   }
   set_servo_gains(hold_stiffness_, hold_damping_);
   mj_forward(impl_->model, data);
+  // A rehearsal starts the way a session starts on hardware: the robot
+  // already hanging, feet clear of the floor. The nominal crouch and the
+  // reference start poses differ by ~4 cm of leg extension, so a plant that
+  // spawns at a fixed height either stands on the floor or ploughs through
+  // it; hang by the measured gap instead and every start pose clears.
+  if (hoist_enabled_ && hoist_clearance_ > 0.0) {
+    const double gap = measure_floor_gap();
+    if (gap < kClearanceDistMax) {
+      data->qpos[2] += hoist_clearance_ - gap;
+      mj_forward(impl_->model, data);
+    }
+  }
+  floor_gap_ = measure_floor_gap();
+  foot_clearance_.store(static_cast<float>(floor_gap_),
+                        std::memory_order_relaxed);
+  if (vendor_) {
+    vendor_->set_foot_clearance(static_cast<float>(floor_gap_));
+  }
   data->time = 0.0;
   command_slot_->sequence.store(0, std::memory_order_relaxed);
   command_slot_->valid.store(false, std::memory_order_relaxed);
@@ -386,6 +431,9 @@ void MujocoDdsPlant::reset_data(bool while_running) {
   mode_machine_rejections_.store(0, std::memory_order_relaxed);
   hoist_generation_seen_ = 0;
   hoist_gain_ = 0.0;
+  previous_hoist_mode_ = -1;
+  hoist_goal_z_ = data->qpos[2];
+  clearance_countdown_ = 0;
   hoist_gain_reported_.store(0.0F, std::memory_order_relaxed);
   for (std::size_t index = 0; index < 6; ++index) {
     data->xfrc_applied[6 * pelvis_body_id_ + index] = 0.0;
@@ -701,11 +749,40 @@ void MujocoDdsPlant::apply_vendor_drive() noexcept {
   }
 }
 
+double MujocoDdsPlant::measure_floor_gap() noexcept {
+  if (floor_geoms_.empty() || robot_geoms_.empty()) {
+    return kClearanceDistMax;
+  }
+  mjModel* model = impl_->model;
+  mjData* data = impl_->data;
+  // mj_step leaves the geom poses one integration behind the state it just
+  // wrote, and the caller wants the gap the robot is at now.
+  mj_kinematics(model, data);
+  double gap = kClearanceDistMax;
+  for (const int floor : floor_geoms_) {
+    for (const int geom : robot_geoms_) {
+      gap = std::min(gap, mj_geomDistance(model, data, floor, geom,
+                                          kClearanceDistMax, nullptr));
+    }
+  }
+  return gap;
+}
+
 void MujocoDdsPlant::apply_hoist() noexcept {
   mjData* data = impl_->data;
   double* wrench = data->xfrc_applied + 6 * pelvis_body_id_;
   const double* position = data->xpos + 3 * pelvis_body_id_;
   const double* quaternion = data->xquat + 4 * pelvis_body_id_;
+  if (clearance_countdown_ == 0) {
+    floor_gap_ = measure_floor_gap();
+    foot_clearance_.store(static_cast<float>(floor_gap_),
+                          std::memory_order_relaxed);
+    if (vendor_) {
+      vendor_->set_foot_clearance(static_cast<float>(floor_gap_));
+    }
+    clearance_countdown_ = clearance_period_steps_;
+  }
+  --clearance_countdown_;
   const std::uint64_t generation = vendor_ ? vendor_->hoist_generation() : 1;
   if (generation != hoist_generation_seen_) {
     for (std::size_t index = 0; index < 3; ++index) {
@@ -722,8 +799,27 @@ void MujocoDdsPlant::apply_hoist() noexcept {
     hoist_target_quaternion_wxyz_ = {std::cos(0.5 * yaw), 0.0, 0.0, std::sin(0.5 * yaw)};
     hoist_generation_seen_ = generation;
     hoist_gain_ = 1.0;
+    // Hooking the strap onto a robot standing on the floor takes the load
+    // where it stands; the winch then lifts it back to the hang height, so a
+    // retake ramps to the start pose with the feet clear exactly as the
+    // first episode did.
+    hoist_goal_z_ =
+        position[2] + std::max(0.0, hoist_clearance_ - floor_gap_);
+    previous_hoist_mode_ = -1;
   }
   const int mode = vendor_ ? vendor_->hoist_mode() : PlantVendor::kHoistHoisted;
+  if (mode != previous_hoist_mode_) {
+    if (mode == PlantVendor::kHoistLowered) {
+      // Past the hang height by a margin: the feet land, and the one-sided
+      // z term below then hands the weight over instead of pushing down.
+      hoist_goal_z_ = hoist_target_position_[2] -
+                      (hoist_clearance_ + kHoistLowerMarginMeters);
+    }
+    previous_hoist_mode_ = mode;
+  }
+  const double travel = hoist_rate_ * timestep_;
+  hoist_target_position_[2] +=
+      std::clamp(hoist_goal_z_ - hoist_target_position_[2], -travel, travel);
   if (mode == PlantVendor::kHoistSlack) {
     if (hoist_gain_ > 0.0) {
       hoist_gain_ =
@@ -745,6 +841,7 @@ void MujocoDdsPlant::apply_hoist() noexcept {
   }
   const bool lowered = mode == PlantVendor::kHoistLowered;
   const double lateral_gain = lowered ? kHoistLoweredLateralGain : 1.0;
+  const double target_z = hoist_target_position_[2];
   // Linear: spring to the captured pose, damper on the world-frame velocity.
   for (std::size_t index = 0; index < 2; ++index) {
     wrench[index] =
@@ -752,8 +849,6 @@ void MujocoDdsPlant::apply_hoist() noexcept {
         (kHoistKpPosition * (hoist_target_position_[index] - position[index]) -
          kHoistKdPosition * data->qvel[index]);
   }
-  const double target_z =
-      hoist_target_position_[2] - (lowered ? kHoistLowerMeters : 0.0);
   double vertical = kHoistKpPosition * (target_z - position[2]) -
                     kHoistKdPosition * data->qvel[2];
   if (lowered && vertical < 0.0) {
@@ -908,6 +1003,9 @@ PlantStats MujocoDdsPlant::stats() const noexcept {
       .hoist_mode = vendor_ ? vendor_->hoist_mode() : 0,
       .hoist_gain = static_cast<double>(
           hoist_gain_reported_.load(std::memory_order_relaxed)),
+      .hoist_clearance = hoist_enabled_ ? hoist_clearance_ : 0.0,
+      .foot_clearance = static_cast<double>(
+          foot_clearance_.load(std::memory_order_relaxed)),
       .physics_fault = physics_fault_.load(std::memory_order_relaxed),
       .realtime_configured =
           realtime_configured_.load(std::memory_order_relaxed),

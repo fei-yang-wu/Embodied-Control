@@ -170,7 +170,10 @@ try:
     client.reset()
     reset = plant.latest_state().copy()
     status = client.status()
-    assert abs(float(reset[2]) - 0.76) < 0.02
+    # A hoisted plant resets hanging, not standing: the pelvis sits wherever
+    # the configured clearance puts the lowest geom above the floor.
+    assert abs(float(plant.stats()["foot_clearance"]) - 0.10) < 0.005
+    assert float(reset[2]) > 0.80
     assert np.max(np.abs(fallen[7:] - reset[7:])) > 0.05
     assert status["owned"] and status["fsm_id"] == 1
     assert status["hoist_mode"] == 1 and not status["reset_pending"]
@@ -183,6 +186,55 @@ finally:
         capture_output=True,
         text=True,
         timeout=20.0,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_hoisted_plant_hangs_clear_and_lowering_lands_it(tmp_path):
+    """Hoisted means the feet are off the floor, lowered means they are on it.
+
+    The rehearsal ramps to a start pose whose legs are ~4 cm longer than the
+    nominal crouch; without real clearance the ramp drives the feet through
+    the floor and every gate after it grades a loaded robot.
+    """
+    robot_path = _write_plant_config(tmp_path / "robot.yaml")
+    script = r'''
+import sys, time
+from embodied_control.robot.plant import load_plant_config
+from embodied_control.sim.dds_plant import NativeDdsPlant
+from embodied_control.lowlevel.native_core import NativePlantClient
+
+robot = load_plant_config(sys.argv[1])
+plant = NativeDdsPlant(
+    robot, sys.argv[2], "lo", dds_domain=95, vendor=True, hoist=True,
+    hoist_clearance=0.10,
+)
+try:
+    assert abs(plant.stats()["foot_clearance"] - 0.10) < 0.005, plant.stats()
+    plant.start()
+    time.sleep(0.5)
+    hanging = plant.stats()
+    assert hanging["foot_clearance"] > 0.03, hanging
+    client = NativePlantClient("lo", dds_domain=95)
+    client.lower()
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        landed = plant.stats()
+        if landed["foot_clearance"] <= 0.01:
+            break
+        time.sleep(0.1)
+    assert landed["foot_clearance"] <= 0.01, landed
+    assert landed["base_height"] < hanging["base_height"] - 0.05, (hanging, landed)
+    assert client.status()["foot_clearance"] <= 0.01
+finally:
+    plant.stop()
+    plant.wait_for_stop()
+'''
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(robot_path), str(_g1_mjcf_path())],
+        capture_output=True,
+        text=True,
+        timeout=40.0,
     )
     assert result.returncode == 0, result.stdout + result.stderr
 

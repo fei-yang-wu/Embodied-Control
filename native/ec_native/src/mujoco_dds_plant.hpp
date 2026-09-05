@@ -15,6 +15,14 @@
 
 namespace ec_native {
 
+// How far off the floor a hoisted robot hangs, metres. A rehearsal ramps to
+// the start pose with the feet in the air, and the reference start poses
+// stand ~4 cm taller than the plant's nominal crouch, so the strap has to
+// hold more than that clear or the ramp drives the feet through the floor
+// and every gate after it grades a loaded robot. 10 cm is what the operator
+// manual asks for on hardware (docs/design/robot_lifecycle.md §3).
+inline constexpr double kDefaultHoistClearanceMeters = 0.10;
+
 struct PlantStats {
   std::uint64_t steps = 0;
   std::uint64_t publishes = 0;
@@ -31,6 +39,10 @@ struct PlantStats {
   bool hoisted = false;
   int hoist_mode = 0;
   double hoist_gain = 0.0;
+  // Configured hang height, and the measured signed distance from the
+  // nearest robot geom to the floor (negative = pressed into it).
+  double hoist_clearance = 0.0;
+  double foot_clearance = 0.0;
   bool physics_fault = false;
   bool realtime_configured = false;
   double last_command_age_ms = -1.0;
@@ -89,7 +101,8 @@ class MujocoDdsPlant {
                  bool freeze_until_command = false,
                  bool vendor_enabled = false,
                  const std::string& vendor_name = "ai",
-                 bool hoist_enabled = false);
+                 bool hoist_enabled = false,
+                 double hoist_clearance = kDefaultHoistClearanceMeters);
   ~MujocoDdsPlant();
 
   MujocoDdsPlant(const MujocoDdsPlant&) = delete;
@@ -134,6 +147,9 @@ class MujocoDdsPlant {
   void publish_low_state() noexcept;
   void apply_vendor_drive() noexcept;
   void apply_hoist() noexcept;
+  // Signed distance from the nearest robot collision geom to the floor.
+  // Runs the kinematics first, so it is valid straight after mj_step.
+  double measure_floor_gap() noexcept;
 
   std::unique_ptr<Impl> impl_;
   std::unique_ptr<CommandSlot> command_slot_;
@@ -177,6 +193,21 @@ class MujocoDdsPlant {
   bool hoist_enabled_ = false;
   double hoist_gain_ = 0.0;
   double hoist_release_seconds_ = 3.0;
+  // The hang height the strap holds, and how far below the captured pose it
+  // pays out when lowering: past the clearance by a margin, so the feet
+  // reach the floor and the one-sided z term then goes slack under the
+  // robot's own weight. The strap moves at a winch's pace, never in a jump:
+  // a target that teleports 10 cm down is a free fall onto the ankles.
+  double hoist_clearance_ = kDefaultHoistClearanceMeters;
+  double hoist_rate_ = 0.05;
+  double floor_gap_ = 0.0;
+  int previous_hoist_mode_ = -1;
+  double hoist_goal_z_ = 0.0;
+  std::vector<int> floor_geoms_;
+  std::vector<int> robot_geoms_;
+  std::uint64_t clearance_period_steps_ = 1;
+  std::uint64_t clearance_countdown_ = 0;
+  std::atomic<float> foot_clearance_{0.0F};
   std::uint64_t hoist_generation_seen_ = 0;
   std::uint64_t reset_generation_seen_ = 0;
   std::array<double, 3> hoist_target_position_{};

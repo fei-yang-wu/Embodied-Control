@@ -265,7 +265,9 @@ use those names to map plant state into a controller or reference ordering.
 `ReleaseMode`, ramp to the start pose, settle, lower, pose match against the
 sim start frame, planner fresh, engage, blend in, run, hold, and back to the
 vendor standing still. The same object runs against the MuJoCo plant when
-the plant serves the vendor (`--vendor`) and a virtual gantry (`--hoist`):
+the plant serves the vendor (`--vendor`) and a virtual gantry (`--hoist`,
+hanging the robot `--hoist-clearance` metres clear of the floor, 0.10 by
+default, so the ramp to a start pose never pushes the feet through it):
 
 ```bash
 # T0: the plant, owning the joints until ReleaseMode and hanging the robot
@@ -273,8 +275,8 @@ pixi run -e native ec lowlevel plant examples/g1_plant.yaml \
   --model assets/latent_playkit/model/g1_29dof_rev_1_0.xml --network lo \
   --vendor --hoist --dds-domain 51
 # T1: the planner (stays up across episodes, owns the slots)
-pixi run -e native ec lowlevel oracle-worker assets/latent_playkit/bundles/fsq64_sonic_4500m \
-  --reference-root assets/latent_playkit/reference/root_qpos_v1 \
+pixi run -e native ec lowlevel oracle-worker assets/models/controller/sonic_v1_1 \
+  --reference-root assets/models/reference/root_qpos_v1 \
   --motion hurry_idle_001_A277 --request-slot /ec_g1_request \
   --response-slot /ec_g1_response --create-slots
 # T2: the lifecycle, scripted (or `console` for the single-key operator shell)
@@ -367,10 +369,17 @@ No plant-window restart is needed. Command is unavailable on hardware.
 Jobs may expose more trackers with operator-facing names:
 
 ```yaml
-bundle: ../assets/models/controller/fsq64_sonic_4500m
+bundle: ../assets/models/controller/sonic_v1_1
 trackers:
-  fsq64-10b: ../assets/models/controller/fsq64_10b
+  sonic_v1_1: ../assets/models/controller/sonic_v1_1
+  fsq64_sonic_4500m: ../assets/models/controller/fsq64_sonic_4500m
+  fsq64_10b: ../assets/models/controller/fsq64_10b
+  rollout24_gamma097_3500m: ../assets/models/controller/rollout24_gamma097_3500m
 ```
+
+`t`/`T` cycles them between episodes and the console restarts the oracle
+worker for the bundle it switches to, so a job can carry every pinned
+controller and the encoder contract follows the selection.
 
 Each controller entry names a complete deployment bundle (`manifest.json` plus
 declared checkpoints), since the joint contract and the normalization travel

@@ -912,7 +912,8 @@ class MujocoDdsPlantBinding {
       double noise_base_ang_vel, double noise_imu_tilt_rad,
       std::uint64_t noise_seed, std::size_t state_log_capacity,
       int dds_domain, bool freeze_until_command, bool vendor_enabled,
-      const std::string& vendor_name, bool hoist_enabled)
+      const std::string& vendor_name, bool hoist_enabled,
+      double hoist_clearance)
       : plant_(model_path, network_interface, sdk_joint_names,
                vector_from_array(default_joint_position, ec_native::kJointCount,
                                  "default_joint_position"),
@@ -933,7 +934,7 @@ class MujocoDdsPlantBinding {
                    .seed = noise_seed,
                },
                state_log_capacity, dds_domain, freeze_until_command,
-               vendor_enabled, vendor_name, hoist_enabled) {
+               vendor_enabled, vendor_name, hoist_enabled, hoist_clearance) {
     if (mode_machine < 0 || mode_machine > 255) {
       throw std::runtime_error("mode_machine must fit in one byte");
     }
@@ -991,6 +992,8 @@ class MujocoDdsPlantBinding {
     result["hoisted"] = values.hoisted;
     result["hoist_mode"] = values.hoist_mode;
     result["hoist_gain"] = values.hoist_gain;
+    result["hoist_clearance"] = values.hoist_clearance;
+    result["foot_clearance"] = values.foot_clearance;
     result["physics_fault"] = values.physics_fault;
     result["realtime_configured"] = values.realtime_configured;
     result["last_command_age_ms"] = values.last_command_age_ms;
@@ -1410,7 +1413,8 @@ PYBIND11_MODULE(_ec_native, m) {
                     const FloatArray&, const FloatArray&, const FloatArray&,
                     const FloatArray&, double, int, int, int, bool, bool,
                     double, double, double, double, std::uint64_t,
-                    std::size_t, int, bool, bool, const std::string&, bool>(),
+                    std::size_t, int, bool, bool, const std::string&, bool,
+                    double>(),
            py::arg("model_path"), py::arg("network_interface"),
            py::arg("sdk_joint_names"), py::arg("default_joint_position"),
            py::arg("armature"), py::arg("effort_limit"),
@@ -1425,7 +1429,8 @@ PYBIND11_MODULE(_ec_native, m) {
            py::arg("state_log_capacity") = 0, py::arg("dds_domain") = 0,
            py::arg("freeze_until_command") = false,
            py::arg("vendor_enabled") = false, py::arg("vendor_name") = "ai",
-           py::arg("hoist_enabled") = false)
+           py::arg("hoist_enabled") = false,
+           py::arg("hoist_clearance") = ec_native::kDefaultHoistClearanceMeters)
       .def("start", &MujocoDdsPlantBinding::start)
       .def("hoist", &MujocoDdsPlantBinding::hoist)
       .def("lower", &MujocoDdsPlantBinding::lower)

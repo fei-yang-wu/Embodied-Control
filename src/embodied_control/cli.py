@@ -1572,6 +1572,7 @@ def _cmd_lowlevel_plant(args) -> int:
         vendor=args.vendor,
         vendor_name=args.vendor_name,
         hoist=args.hoist,
+        hoist_clearance=args.hoist_clearance,
         # One row per publish; the plant serves at 1 / timestep.
         state_log_capacity=(
             int(args.seconds / args.timestep) + 1024 if args.states else 0
@@ -1926,6 +1927,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--hoist",
         action="store_true",
         help="hang the pelvis from a virtual gantry until `lower` is requested",
+    )
+    lplant.add_argument(
+        "--hoist-clearance",
+        type=float,
+        default=0.10,
+        help=(
+            "metres of floor clearance the gantry hangs the robot at, the "
+            "number the operator manual asks for on hardware; the ramp to a "
+            "start pose extends the legs ~4 cm, so a smaller value stands "
+            "the rehearsal on the floor. 0 hangs it where it spawns"
+        ),
     )
     lplant.add_argument(
         "--viewer",

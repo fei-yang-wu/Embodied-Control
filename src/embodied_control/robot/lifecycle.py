@@ -290,6 +290,16 @@ class LifecycleConfig:
     # per joint.
     settle_position_rad: float | None = None
     hoist_release_seconds: float = 1.5
+    # A gantry that measures its own floor clearance (the plant does) turns
+    # the hoist acks into evidence: hoisted means the feet are really off the
+    # floor, lowered means they are really on it. On hardware there is no
+    # such number and the operator's eyes remain the evidence, so both checks
+    # skip when the gantry reports none.
+    # Hoisted has to mean clear enough to ramp, not merely not-touching: the
+    # ramp to a start pose extends the legs by about 4 cm. Lowered has to mean
+    # the feet are on the floor, and a landed foot reads a hair negative.
+    hoist_clearance_min: float = 0.05
+    lowered_clearance_max: float = 0.002
     pose_tolerance_rad: list[float] | float = 0.05
     tilt_tolerance_degrees: float = 10.0
     # Per-sample wire noise (0.01 rad joints, 0.05 rad IMU tilt on the plant)
@@ -509,13 +519,7 @@ class Lifecycle:
             st = dict(self.tracker.stats())
         except Exception:
             st = {}
-        hoist = None
-        status = getattr(self.hoist, "status", None)
-        if status is not None:
-            try:
-                hoist = status()
-            except Exception:
-                hoist = None
+        hoist = self._hoist_status()
         last = self.last_result
         return {
             "state": str(self.state),
@@ -702,6 +706,30 @@ class Lifecycle:
         self.last_result = result
         self._note(detail)
         return result
+
+    def _hoist_status(self) -> dict | None:
+        status = getattr(self.hoist, "status", None)
+        if status is None:
+            return None
+        try:
+            return dict(status())
+        except Exception:
+            return None
+
+    def _measured_clearance(self) -> float | None:
+        """Metres from the nearest robot geom to the floor, when measured.
+
+        Only a simulated gantry knows this. Hardware returns None and the
+        operator ack stands in for it, which is the whole parity argument:
+        the plant checks what the operator confirms by eye.
+        """
+        status = self._hoist_status()
+        if not status or status.get("foot_clearance") is None:
+            return None
+        try:
+            return float(status["foot_clearance"])
+        except (TypeError, ValueError):
+            return None
 
     def _hoist_ready(self) -> bool:
         if self.auto_ack:
@@ -922,6 +950,10 @@ class Lifecycle:
         if not self._hoist_ready():
             return GateResult(False, "confirm the robot is hoisted (press H)", values)
         values["hoisted_ack"] = True
+        clear = self._wait_for_hoist_clear()
+        values.update(clear.values)
+        if not clear.ok:
+            return GateResult(False, clear.detail, values)
         detail = "link, vendor and hoist confirmed"
         if rehearsal is not None:
             detail += f"; {rehearsal.detail}"
@@ -1056,6 +1088,9 @@ class Lifecycle:
         if not self.lowered_ack:
             return GateResult(False, "lower the hoist until the feet carry the weight, then press l")
         self._sleep(self.config.hoist_release_seconds)
+        down = self._wait_for_feet_down()
+        if not down.ok:
+            return down
         result = self._quiet_window(
             position_tol=None,
             window=self.config.settle_seconds,
@@ -1063,7 +1098,77 @@ class Lifecycle:
         )
         if not result.ok:
             return result
-        return GateResult(True, "feet loaded; robot settled again", result.values)
+        return GateResult(
+            True, "feet loaded; robot settled again", {**result.values, **down.values}
+        )
+
+    def _wait_for_hoist_clear(self) -> GateResult:
+        """Wait for a measuring gantry to report the feet off the floor.
+
+        A second episode starts with the robot standing where the last one
+        left it, so the ack winches it back up and the winch takes seconds.
+        Hardware measures nothing and the `H` ack is the evidence.
+        """
+        clearance = self._measured_clearance()
+        if clearance is None:
+            return GateResult(True, "hoisted", {})
+        started = self._now()
+        poll = max(self.config.poll_seconds, 0.1)
+        while clearance < self.config.hoist_clearance_min:
+            if self._now() - started >= self.config.settle_timeout_seconds:
+                return GateResult(
+                    False,
+                    f"the gantry has the robot {clearance:.3f} m off the floor "
+                    f"after {self.config.settle_timeout_seconds:.0f}s: the ramp "
+                    "extends the legs and would drive the feet through it, "
+                    "hoist first",
+                    {"foot_clearance": clearance},
+                )
+            self._sleep(poll)
+            measured = self._measured_clearance()
+            if measured is None:
+                return GateResult(False, "gantry status unavailable while hoisting", {})
+            clearance = measured
+        return GateResult(
+            True,
+            f"hoisted {clearance:.3f} m clear",
+            {"foot_clearance": clearance, "hoist_seconds": self._now() - started},
+        )
+
+    def _wait_for_feet_down(self) -> GateResult:
+        """Wait until a measuring gantry says the feet reached the floor.
+
+        The strap pays out at a winch's pace, so the robot is still on its way
+        down when the settle window would otherwise open and grade a hanging
+        robot as a landed one. Hardware measures nothing here and the `l` ack
+        is the evidence, so this returns at once.
+        """
+        clearance = self._measured_clearance()
+        if clearance is None:
+            return GateResult(True, "lowered", {})
+        started = self._now()
+        # The gantry status is a DDS RPC, not a counter: poll it at the pace
+        # the display does, not at the pose-sampling pace.
+        poll = max(self.config.poll_seconds, 0.1)
+        while clearance > self.config.lowered_clearance_max:
+            if self._now() - started >= self.config.settle_timeout_seconds:
+                return GateResult(
+                    False,
+                    f"the gantry still holds the robot {clearance:.3f} m clear "
+                    f"after {self.config.settle_timeout_seconds:.0f}s: the feet "
+                    "are not carrying the weight",
+                    {"foot_clearance": clearance},
+                )
+            self._sleep(poll)
+            measured = self._measured_clearance()
+            if measured is None:
+                return GateResult(False, "gantry status unavailable while lowering", {})
+            clearance = measured
+        return GateResult(
+            True,
+            f"feet down after {self._now() - started:.1f}s",
+            {"foot_clearance": clearance, "lower_seconds": self._now() - started},
+        )
 
     def _sampled_state(self) -> tuple[list[float], list[float]]:
         """Mean joint position and projected gravity over pose_samples reads."""

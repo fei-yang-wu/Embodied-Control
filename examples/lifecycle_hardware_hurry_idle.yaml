@@ -1,10 +1,11 @@
 # Real G1 hardware session, same bundle + reference already rehearsed in sim
-# via examples/lifecycle_sim_hurry_idle.yaml. Robot stays hoisted for the
-# whole hardware ladder (docs/design/robot_lifecycle.md M4, H0-H3) until an
+# via examples/lifecycle_sim_sonic_v1_1.yaml (the rehearsal gate below matches
+# on bundle sha, motion and command source, so the sim job and this one have
+# to name the same bundle). Robot stays hoisted for the whole hardware ladder (docs/design/robot_lifecycle.md M4, H0-H3) until an
 # operator has confirmed FSM behavior and settle thresholds on real motors.
 #
-#   T0  pixi run -e native ec lowlevel oracle-worker assets/latent_playkit/bundles/fsq64_sonic_4500m \
-#         --reference-root assets/latent_playkit/reference/root_qpos_v1 \
+#   T0  pixi run -e native ec lowlevel oracle-worker assets/models/controller/sonic_v1_1 \
+#         --reference-root assets/models/reference/root_qpos_v1 \
 #         --motion hurry_idle_001_A277 --request-slot /ec_g1_request \
 #         --response-slot /ec_g1_response --create-slots
 #   T1  pixi run -e native ec lifecycle console examples/lifecycle_hardware_hurry_idle.yaml \
@@ -19,14 +20,23 @@
 # --auto-ack here) — advance one rung at a time, don't jump straight to
 # `go`. Robot must be damped and hoisted before PRECHECK.
 api_version: ec.lifecycle/v1alpha1
-bundle: ../assets/latent_playkit/bundles/fsq64_sonic_4500m
+bundle: ../assets/models/controller/sonic_v1_1
+trackers:
+  # Every pinned controller bundle is selectable with `t`/`T`; the console
+  # restarts the oracle worker for the bundle it switches to, so the encoder
+  # contract (SONIC v1.1 is stride 5 over qvel, the fsq64 bundles stride 1)
+  # follows the selection instead of being fixed at startup.
+  sonic_v1_1: ../assets/models/controller/sonic_v1_1
+  fsq64_sonic_4500m: ../assets/models/controller/fsq64_sonic_4500m
+  fsq64_10b: ../assets/models/controller/fsq64_10b
+  rollout24_gamma097_3500m: ../assets/models/controller/rollout24_gamma097_3500m
 network: ""
 dds_domain: 0
 request_slot: /ec_g1_request
 response_slot: /ec_g1_response
 connect_slots: true
 command_source: oracle
-reference_root: ../assets/latent_playkit/reference/root_qpos_v1
+reference_root: ../assets/models/reference/root_qpos_v1
 motion: hurry_idle_001_A277
 start_frame: 0
 fixed_initial_anchor: true

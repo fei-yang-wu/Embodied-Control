@@ -10,6 +10,15 @@ what to do, in order, in front of the robot.
 
 ## Before the robot
 
+**Hoist it clear.** Every rung up to `LOWERED` assumes the feet are
+off the floor: the ramp to the start pose extends the legs by about
+4 cm, and a robot whose toes are already down has that ramp pushing
+against the floor instead of hanging free, which makes the pose match
+grade a loaded robot. Hang it about **10 cm clear** before `PRECHECK`,
+and press `H` only once it is. The plant rehearses the same 10 cm
+(`--hoist-clearance`) and refuses `PRECHECK` when its measured
+clearance says the robot is on the floor.
+
 **Rehearse first.** A hardware run refuses to start until the same
 bundle and motion have reached the end of the ladder against the
 MuJoCo plant. The plant serves the vendor's RPCs and rejects
@@ -20,7 +29,7 @@ path the robot will run; only the network interface differs.
 # 1. the plant, owning the joints until ReleaseMode, robot hoisted
 pixi run -e native ec lowlevel plant examples/g1_plant.yaml \
   --model assets/latent_playkit/model/g1_29dof_rev_1_0.xml \
-  --network lo --vendor --hoist --dds-domain 51
+  --network lo --vendor --hoist --hoist-clearance 0.10 --dds-domain 51
 # 2. the console, against the plant
 pixi run -e native ec lifecycle console examples/lifecycle_sim_sonic_v1_1.yaml \
   --enable-writes --confirm ENABLE_G1_LOWLEVEL_NON_REALTIME --allow-non-realtime
@@ -54,7 +63,7 @@ end up, not rungs to climb.
 
 | # | State | What it proves |
 |---|---|---|
-| 1 | `PRECHECK` | the link, the vendor and the hoist are all confirmed |
+| 1 | `PRECHECK` | the link, the vendor and the hoist are all confirmed (feet clear of the floor) |
 | 2 | `VENDOR_DAMP_CONFIRMED` | the vendor has the robot limp, read back from its own FSM |
 | 3 | `SAFE_EXTERNAL_COMMAND_PRESENT` | our damp frames are on the wire, before anyone lets go |
 | 4 | `USER_CONTROL_CONFIRMED` | the vendor released and our frames own the joints |

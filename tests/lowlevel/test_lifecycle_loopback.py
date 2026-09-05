@@ -139,9 +139,11 @@ def test_vendor_owns_the_joints_until_released(tmp_path, latent_manifest):
         assert runtime.wait_for_state(10.0)
         gravity = runtime.latest_state()["projected_gravity"]
         # The strap levels the pelvis toward upright, so only part of the
-        # 10 deg survives; the sign is the regression under test (the old
-        # formula reported a forward pitch as gravity along -x).
-        assert 0.03 < gravity[0] < np.sin(np.radians(10.0)) + 0.03, gravity
+        # 10 deg survives (less of it since the strap hangs the robot clear of
+        # the floor instead of resting its toes on it); the sign is the
+        # regression under test (the old formula reported a forward pitch as
+        # gravity along -x).
+        assert 0.02 < gravity[0] < np.sin(np.radians(10.0)) + 0.03, gravity
         assert gravity[2] < -0.95, gravity
         assert runtime.vendor_mode() == "ai"
         runtime.open_damp_gate()

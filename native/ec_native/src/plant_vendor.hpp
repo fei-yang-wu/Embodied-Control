@@ -42,6 +42,12 @@ class PlantVendor {
   // for a slack strap needs the measured value, not the release timer.
   float hoist_gain() const noexcept;
   void set_hoist_gain(float gain) noexcept;
+  // Smallest signed distance from any robot geom to the floor, metres,
+  // negative while something is pressed into it. The plant measures it; the
+  // lifecycle reads it so "hoisted" means the feet are actually clear, the
+  // thing an operator confirms with their eyes on hardware.
+  float foot_clearance() const noexcept;
+  void set_foot_clearance(float clearance) noexcept;
   // Bumps on every hoist request, so the plant re-captures the hoist target
   // at the robot's current pose rather than the one it started at.
   std::uint64_t hoist_generation() const noexcept;
@@ -74,7 +80,8 @@ class PlantClient {
   void lower();
   void slack();
   void reset();
-  // JSON: ownership, FSM, hoist mode, reset acknowledgement, service name.
+  // JSON: ownership, FSM, hoist mode and gain, measured foot clearance,
+  // reset acknowledgement, service name.
   std::string status();
 
  private:

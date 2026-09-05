@@ -54,13 +54,13 @@ starting values, tuned during the hardware ladder in §6.
 
 | # | State | Entry action | Gate to leave | Evidence source | Sim parity |
 |---|---|---|---|---|---|
-| 0 | `PRECHECK` | open sport client, motion switcher (read-only), tracker in DISABLED | `rt/lowstate` ≥ 900 Hz, CRC 0, no motor errors, max temperature < 70 °C; sport `GetFsmId` answers; `CheckMode` returns a service name (recorded for restore); bundle joint limits loaded; RT configured or non-RT explicitly acknowledged; **operator acks hoist** (unsensable) | probe + sport + switcher | plant serves both RPC services; hoist is a weld |
+| 0 | `PRECHECK` | open sport client, motion switcher (read-only), tracker in DISABLED | `rt/lowstate` ≥ 900 Hz, CRC 0, no motor errors, max temperature < 70 °C; sport `GetFsmId` answers; `CheckMode` returns a service name (recorded for restore); bundle joint limits loaded; RT configured or non-RT explicitly acknowledged; **operator acks hoist** — feet clear of the floor by ~10 cm (unsensable on hardware; the plant measures it) | probe + sport + switcher | plant serves both RPC services; hoist is a weld, and the gate reads the plant's measured floor clearance |
 | 1 | `VENDOR_DAMP_CONFIRMED` | our `Damp()` over the sport service (FSM 1), from the PC | `GetFsmId == 1` read back; joint speed max < 0.05 rad/s for 500 ms | sport + lowstate | plant FSM 1 = kd-only |
 | 2 | `SAFE_EXTERNAL_COMMAND_PRESENT` | tracker opens the write gate in DAMP: kp 0, kd 8 on `rt/lowcmd` | ≥ 100 consecutive publishes, 0 publish failures, lowstate still fresh, robot still limp | writer stats | plant counts and **rejects** these frames (vendor still owns) |
 | 3 | `USER_CONTROL_CONFIRMED` | `ReleaseMode` | `CheckMode` name empty on 3 polls 100 ms apart; lowstate fresh; publishes continuing; joint speed still < 0.05 rad/s | switcher + writer | plant releases, starts applying `rt/lowcmd` |
 | 4 | `START_POSE_RAMP` | ramp current → start pose over T s (0.5 rad/s cap, existing) | ramp complete; **new guard**: any joint with tracking error > 0.3 rad for > 50 ms → `FAULT` (blocked joint / collision) | writer + lowstate | identical |
 | 5 | `POSE_SETTLED` | hold start pose (WAIT) | ‖q − q*‖∞ < 0.05 rad and ‖q̇‖∞ < 0.1 rad/s for 500 ms | lowstate | identical |
-| 6 | `LOWERED` **new** | operator lowers the hoist while the tracker holds the pose | operator ack on hardware; joint speed settles again (< 0.1 rad/s for 500 ms) after the load change | operator + lowstate | plant releases the pelvis weld on `lower` |
+| 6 | `LOWERED` **new** | operator lowers the hoist while the tracker holds the pose | operator ack on hardware; joint speed settles again (< 0.1 rad/s for 500 ms) after the load change | operator + lowstate | plant pays the strap out at 0.05 m/s to past the hang height; the gate waits for measured clearance ≤ 2 mm before it grades the settle |
 | 7 | `POSE_MATCH_VERIFIED` **new** | capture the fixed anchor, write `pose_match.json` | ‖q_hw − q_sim_start‖∞ < per-joint tolerance (0.05 rad legs, 0.1 rad arms); projected-gravity tilt vs reference frame 0 < 5°; base height plausible (IMU-only, so tilt is the real check) | lowstate + reference | identical; sim additionally has ground-truth root pose to grade the IMU check |
 | 8 | `POLICY_COMMAND_FRESH` | planner warm-up: N ≥ 20 inferences, p99 latency < 60 % of the tick | command age < `command_stale_ms`; sequence advancing; **first-action consistency**: ‖a₀ − q_hold‖∞ < 0.2 rad | command slot + planner stats | identical |
 | 9 | `PRIMED` | `engage_control` | immediate | backend | identical |
@@ -350,6 +350,10 @@ pixi run -e native ec lowlevel plant examples/g1_plant.yaml \
   --network lo --vendor --hoist --dds-domain 51
 ```
 
+`--hoist` hangs the robot with its feet `--hoist-clearance` metres (0.10 by
+default) off the floor, the same thing the operator is asked to do with the
+real strap before `PRECHECK`.
+
 Its nominal pose and simulated vendor gains belong to the robot config.
 The session still selects a policy bundle for the tracker and a reference
 for the planner. Those choices do not reconfigure the plant. Initial-pose
@@ -387,7 +391,9 @@ The operator's script for one episode, hoisted, robot under vendor damp:
 3. `n` runs `PRECHECK` and prints its table (rates, temperatures, vendor
    service name, planner probe). `a` then auto-advances through rows 1–5 and
    stops at `POSE_SETTLED` because the next state needs a person.
-4. Lower the hoist until the feet carry the weight. Press `l`.
+4. Lower the hoist until the feet carry the weight. Press `l`. (In sim the
+   `l` key pays the plant's strap out for you and the gate waits for the
+   measured clearance to reach the floor.)
 5. `n` → `POSE_MATCH_VERIFIED` prints the per-joint table and writes
    `pose_match.json`. `n` → `POLICY_COMMAND_FRESH` prints probe latencies.
    `n` → `PRIMED`.
@@ -566,9 +572,30 @@ would have reached hardware otherwise.
   at 3x (the 5 N m wrists saturate at 1.4x on any real command) plus a coarse
   2.5 rad bound. The ramp guard is 0.5 rad for 100 ms, configurable.
 - **The strap has three states.** Hoisted (rigid), lowered (the feet carry
-  the weight, the rope only catches a 5 cm drop and steadies the tilt at half
+  the weight, the rope only catches a drop and steadies the tilt at half
   gain), slack (paid out over 3 s). Lowering with the strap fully released
   toppled the held robot.
+- **Hoisted has to mean off the floor (2026-09-05).** The plant reset the
+  pelvis to a fixed 0.76 m and welded the strap there. The nominal crouch
+  touches the floor at 0.757 m, so "hoisted" was 3 mm of clearance, and a
+  start pose from the reference stands 0.795 m tall: the ramp drove the feet
+  3.5 cm through the floor, `POSE_SETTLED` and `POSE_MATCH_VERIFIED` graded a
+  loaded robot (tracking error pinned at 0.27 rad on the waist through the
+  whole ladder, and the pose match failed on it), and `LOWERED` was a no-op
+  because the 5 cm drop landed on feet that were already carrying. The plant
+  now measures the smallest distance from any robot geom to the floor
+  (`mj_geomDistance`, every 10 ms) and hangs the robot at
+  `--hoist-clearance` (default 0.10 m) on reset, whatever the pose; `lower`
+  pays the strap out past that height at 0.05 m/s, because a target that
+  drops 15 cm in one step is a 1.4 m/s free fall onto the ankles; and `hoist`
+  from a robot standing on the floor winches it back to the same clearance,
+  so a retake ramps with the feet clear exactly as the first episode did. The
+  measurement is served in the plant's status RPC as `foot_clearance`, and
+  `PRECHECK` and `LOWERED` gate on it — 5 cm clear to start the ladder (the
+  ramp needs 4 cm of leg extension; the strap is still winching up when the
+  first centimetre arrives) and 2 mm to call the feet loaded. In sim the
+  plant proves what the operator confirms by eye on hardware, where no such
+  number exists and the `H` / `l` acks remain the evidence.
 - **The reference waits for the strap, too (2026-09-03).** Slack used to
   begin at RUNNING, the same tick the reference clock started. The lateral
   spring is 20 kN/m, so for the first three seconds of every episode the

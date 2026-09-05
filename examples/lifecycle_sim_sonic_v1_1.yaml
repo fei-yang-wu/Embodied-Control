@@ -21,8 +21,14 @@
 api_version: ec.lifecycle/v1alpha1
 bundle: ../assets/models/controller/sonic_v1_1
 trackers:
-  fsq64-sonic-4500m: ../assets/models/controller/fsq64_sonic_4500m
-  fsq64-10b: ../assets/models/controller/fsq64_10b
+  # Every pinned controller bundle is selectable with `t`/`T`; the console
+  # restarts the oracle worker for the bundle it switches to, so the encoder
+  # contract (SONIC v1.1 is stride 5 over qvel, the fsq64 bundles stride 1)
+  # follows the selection instead of being fixed at startup.
+  sonic_v1_1: ../assets/models/controller/sonic_v1_1
+  fsq64_sonic_4500m: ../assets/models/controller/fsq64_sonic_4500m
+  fsq64_10b: ../assets/models/controller/fsq64_10b
+  rollout24_gamma097_3500m: ../assets/models/controller/rollout24_gamma097_3500m
 network: lo
 dds_domain: 51
 request_slot: /ec_g1_request
