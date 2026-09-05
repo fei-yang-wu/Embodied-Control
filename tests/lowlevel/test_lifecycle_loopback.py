@@ -301,6 +301,16 @@ def test_lifecycle_hoist_to_standing_on_the_plant(tmp_path, latent_manifest):
         lifecycle.poll()
         assert lifecycle.state is S.HOLD, (lifecycle.state, lifecycle.fault_reason)
         assert runtime.unitree_mode == NativeUnitreeLoop.HOLD
+        # A stiff PD hold is not balance. The strap was paid out for the run,
+        # so HOLD takes the load again the way an operator hooks the hoist;
+        # without it the robot topples where it stands and the fall guard
+        # (state_fault_reason 64) damps it a few seconds into the hold.
+        assert hoist.status()["hoist_mode"] == 1
+        time.sleep(5.0)
+        held = runtime.writer_stats()
+        assert held["state_fault_reason"] == 0, held
+        assert held["hardware_faults"] == 0, held
+        assert runtime.unitree_mode == NativeUnitreeLoop.HOLD
         stats = runtime.stats()
         assert stats["fault"] == 0, stats
         assert stats["control_ticks"] >= 140

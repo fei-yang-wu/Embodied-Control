@@ -961,6 +961,14 @@ def _key_hint(key: str, label: str) -> Row:
     return [Span(f" {key} ", "key"), Span(f"{label} ", "dim")]
 
 
+#: The prompt is always this tall, open or closed, matching or not. A footer
+#: that grows by a row the moment a command matches moves every row above it,
+#: and ncurses realises that with an insert-line: on a short terminal the
+#: bottom row falls off and the prompt lands inside the key legend. Reserving
+#: the row costs one line and keeps every frame the same shape.
+PROMPT_ROWS = 2
+
+
 def _prompt_rows(line: "CommandLine | None", width: int) -> list[Row]:
     """The prompt, plus what it would complete to and what else matches."""
     if line is None:
@@ -971,7 +979,8 @@ def _prompt_rows(line: "CommandLine | None", width: int) -> list[Row]:
                     Span("Type / for commands · /diagnose explains current failure", "dim"),
                 ],
                 width,
-            )
+            ),
+            pad([], width),
         ]
     ghost = line.ghost()
     rows = [
@@ -997,6 +1006,10 @@ def _prompt_rows(line: "CommandLine | None", width: int) -> list[Row]:
     elif line.text:
         rows.append(pad([Span("   no command matches; TAB completes, ESC cancels",
                               "warn")], width))
+    else:
+        rows.append(pad([Span("   TAB completes · ESC cancels · Enter runs", "dim")],
+                        width))
+    assert len(rows) == PROMPT_ROWS
     return rows
 
 

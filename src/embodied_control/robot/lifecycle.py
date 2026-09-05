@@ -1429,11 +1429,25 @@ class Lifecycle:
             "runtime_fault": int(st.get("fault", 0)),
         }
         values.update(self._upright_evidence())
-        return GateResult(
-            True,
-            "frozen on the last target; hook the hoist and press H",
-            values,
-        )
+        detail = "frozen on the last target; hook the hoist and press H"
+        # A stiff PD hold is not balance: the strap was paid out for the run,
+        # and a robot standing on slack strap topples in the seconds an
+        # operator takes to reach for the hoist (the fall guard then damps it,
+        # which reads as "it went limp at the end of the motion"). Taking the
+        # load is what the operator does here, so in sim the strap does it the
+        # moment HOLD is entered rather than waiting for the `H` that is
+        # auto-acknowledged anyway.
+        if self.hoist is not None and self.auto_ack:
+            try:
+                self.hoist.hoist()
+                self.hoisted_ack = True
+                detail = "frozen on the last target; strap taut again"
+                clearance = self._measured_clearance()
+                if clearance is not None:
+                    values["foot_clearance"] = clearance
+            except Exception as exc:  # a gantry that is gone must not fault HOLD
+                self._note(f"hoist unavailable at HOLD: {exc}")
+        return GateResult(True, detail, values)
 
     def _upright_evidence(self) -> dict:
         """Pelvis tilt at HOLD, recorded for the untethered question.

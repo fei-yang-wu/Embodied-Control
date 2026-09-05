@@ -66,7 +66,7 @@ starting values, tuned during the hardware ladder in §6.
 | 9 | `PRIMED` | `engage_control` | immediate | backend | identical |
 | 10 | `BLEND_IN` **new** | target and gains blend held → policy, weight 0 → 1 over 250 writer ticks (0.5 s); `last_action` reports the blended action; the reference clock stays on frame 0 until the blend is done | blend complete, no watchdog trip | writer + control thread | identical |
 | 11 | `RUNNING` | serve | operator `hold` / `damp`, tick budget, or any watchdog | existing | identical |
-| 12 | `HOLD` **new** | freeze on the last commanded target | operator takes the load on the hoist, then `damp` | operator | plant re-welds on `hoist` |
+| 12 | `HOLD` **new** | freeze on the last commanded target; in sim the strap takes the load on entry | operator takes the load on the hoist, then `damp` | operator | plant re-welds on `hoist` |
 | 13 | `DAMP` | kd-only frames | always reachable; `FAULT_DAMP` is the same frame with a recorded reason | writer | identical |
 | 14 | `RELEASED` **new** | write gate closed, publisher silent | writer publishes 0 for 200 ms | writer stats | identical |
 | 15 | `VENDOR_RESTORED` (optional) | `SelectMode(name from PRECHECK)` | `CheckMode == name`; `GetFsmId == 1`; robot damp under the vendor again, so `ec robot ready` is available | switcher + sport | plant re-takes ownership, rejects `rt/lowcmd` again |
@@ -320,6 +320,14 @@ still gets bold and dim. The layout reflows rather than truncates: above 118
 columns the three links share a row, below 96 the ladder is one column and
 the episode summary gives up its row, and under about fifteen rows the ladder
 leaves rather than showing a header with nothing under it.
+
+The prompt is a fixed two rows — the line, plus the row that lists what
+matches — open or closed, matching or not. It grew by a row when a command
+matched at first, and ncurses realised that shift with an insert-line: on a
+24-row terminal the bottom row fell off and the prompt was drawn inside the
+key legend. A frame whose shape never changes costs one line and cannot do
+that; `render` is asserted to keep the same row count and the same `CONTROLS`
+row index across every prompt state.
 
 The full-screen view uses a command palette modeled after coding-agent CLIs.
 `/help` lists named forms of every key (`/next`, `/auto`, `/go`, `/hold`,
@@ -575,6 +583,18 @@ would have reached hardware otherwise.
   the weight, the rope only catches a drop and steadies the tilt at half
   gain), slack (paid out over 3 s). Lowering with the strap fully released
   toppled the held robot.
+- **A held robot falls if nothing holds the strap (2026-09-05).** `HOLD`
+  freezes the joints on the last commanded target, which is a stiff PD hold
+  and not balance, and the strap was paid out at `BLEND_IN` for the run. In a
+  console session the robot stood for a few seconds after the motion ended,
+  toppled, and the writer's fall guard (`state_fault_reason` 64, pelvis past
+  60°) damped it — which reads as "it went limp at the end of the motion"
+  rather than as a fall. On hardware the operator hooks the hoist here, which
+  is what the rung asks for; in sim nothing did, because the `H` ack is
+  auto-acknowledged and never reached the gantry. `HOLD` now takes the load
+  itself when a gantry is present and the acks are automatic, and the
+  loopback test sits in `HOLD` for five seconds and requires the fall guard
+  to stay clear.
 - **Hoisted has to mean off the floor (2026-09-05).** The plant reset the
   pelvis to a fixed 0.76 m and welded the strap there. The nominal crouch
   touches the floor at 0.757 m, so "hoisted" was 3 mm of clearance, and a

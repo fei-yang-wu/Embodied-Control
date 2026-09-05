@@ -249,6 +249,29 @@ def test_line_editor_kill_keys():
     assert line.text == "abc"
 
 
+def test_the_prompt_keeps_the_frame_the_same_shape_however_it_is_typed():
+    """A footer that grows when a command matches moves every row above it.
+
+    ncurses realises that shift with an insert-line, and on a short terminal
+    the bottom row falls off and the prompt is drawn inside the key legend
+    (reproduced in a pty at 24 rows). The prompt therefore reserves its
+    completion row whether it is closed, empty, matching or not.
+    """
+    lifecycle, tracker, clock = _lifecycle()
+    assert lifecycle.auto(S.POSE_SETTLED).ok
+    snapshot, bindings = lifecycle.snapshot(), build_lifecycle_bindings(lifecycle)
+    for height in (22, 24, 30, 40):
+        shapes = set()
+        for command in (None, "", "s", "zzz"):
+            rows = render(
+                snapshot, bindings, ["one", "two"],
+                width=100, height=height, command=command,
+            )
+            controls = next(i for i, row in enumerate(rows) if "CONTROLS" in row)
+            shapes.add((len(rows), controls))
+        assert len(shapes) == 1, (height, shapes)
+
+
 def test_diagnosis_gets_snapshot_and_has_its_own_panel():
     lifecycle, tracker, clock = _lifecycle()
     seen = {}
