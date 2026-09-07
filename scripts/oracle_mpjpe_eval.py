@@ -65,7 +65,7 @@ def evaluate_motion(
         request_slot=f"{slot}_req",
         create_slots=False,
         command_source="oracle",
-        lead_ticks=4,
+        lead_ticks=min(4, bundle.manifest.command.hold_steps - 1),
         cpu=cpu,
         physics_cpu=physics_cpu,
     )

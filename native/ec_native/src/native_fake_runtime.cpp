@@ -121,8 +121,8 @@ NativeFakeRuntime::NativeFakeRuntime(
 
   if (!encoder_path.empty()) {
     raw_reference_width_ =
-        planner_.reference_encoder_layout ==
-                NativePlannerConfig::ReferenceEncoderLayout::kRootQpos
+        planner_.reference_encoder_layout !=
+                NativePlannerConfig::ReferenceEncoderLayout::kJointQposQvelAnchorOri
             ? kJointCount + 3 + 4
             : kJointCount * 2 + 4;
     if (encoder_input_width == 0 || encoder_output_width != planner_.z_dim ||
@@ -706,8 +706,8 @@ bool NativeFakeRuntime::encode_active_reference(
   const float* raw = active_reference_chunk_.data() + kReferenceHeaderWidth;
   const std::size_t input_width = encoder_->input_width();
   bool packed = false;
-  if (planner_.reference_encoder_layout ==
-      NativePlannerConfig::ReferenceEncoderLayout::kRootQpos) {
+  if (planner_.reference_encoder_layout !=
+      NativePlannerConfig::ReferenceEncoderLayout::kJointQposQvelAnchorOri) {
     const std::size_t selected_width = planner_.window_frames *
                                        raw_reference_width_;
     if (selected_width <= encoder_raw_window_.size()) {
@@ -726,7 +726,9 @@ bool NativeFakeRuntime::encode_active_reference(
                                           selected_width),
                    planner_.window_frames, robot_state_.anchor_position_w,
                    robot_state_.anchor_quaternion_w,
-                   std::span<float>(encoder_window_.data(), input_width));
+                   std::span<float>(encoder_window_.data(), input_width),
+                   planner_.reference_encoder_layout ==
+                       NativePlannerConfig::ReferenceEncoderLayout::kRootQposHeading);
     }
   } else {
     packed = pack_joint_qpos_qvel_anchor_ori_window(

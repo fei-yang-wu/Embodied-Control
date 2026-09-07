@@ -59,7 +59,7 @@ void copy_array(const FloatArray& source, std::array<float, Size>& destination,
 
 py::array_t<float> reexpress_root_qpos_binding(
     const FloatArray& raw_world_frames, const FloatArray& anchor_position_w,
-    const FloatArray& anchor_quaternion_w) {
+    const FloatArray& anchor_quaternion_w, bool heading_only) {
   const auto raw = raw_world_frames.request();
   if (raw.ndim != 2 || raw.shape[1] != 36 || raw.shape[0] <= 0) {
     throw std::runtime_error("raw_world_frames must have shape [H, 36]");
@@ -75,7 +75,7 @@ py::array_t<float> reexpress_root_qpos_binding(
                                  static_cast<std::size_t>(raw.shape[0]) * 36),
           static_cast<std::size_t>(raw.shape[0]), position, quaternion,
           std::span<float>(output.mutable_data(),
-                           static_cast<std::size_t>(raw.shape[0]) * 38))) {
+                           static_cast<std::size_t>(raw.shape[0]) * 38), heading_only)) {
     throw std::runtime_error("raw reference pose is invalid");
   }
   return output;
@@ -132,6 +132,9 @@ py::array_t<float> pack_joint_reference_binding(
 
 ec_native::NativePlannerConfig::ReferenceEncoderLayout reference_layout(
     const std::string& value) {
+  if (value == "root_qpos_heading") {
+    return ec_native::NativePlannerConfig::ReferenceEncoderLayout::kRootQposHeading;
+  }
   if (value == "root_qpos") {
     return ec_native::NativePlannerConfig::ReferenceEncoderLayout::kRootQpos;
   }
@@ -1057,7 +1060,7 @@ PYBIND11_MODULE(_ec_native, m) {
         "CLOCK_MONOTONIC seconds (same clock as Python time.monotonic on Linux)");
   m.def("reexpress_root_qpos_window", &reexpress_root_qpos_binding,
         py::arg("raw_world_frames"), py::arg("anchor_position_w"),
-        py::arg("anchor_quaternion_w"));
+        py::arg("anchor_quaternion_w"), py::arg("heading_only") = false);
   m.def("projected_gravity_from_xyzw", &projected_gravity_binding,
         py::arg("quaternion_xyzw"));
   m.def("align_heading_to_reference", &align_heading_binding,
