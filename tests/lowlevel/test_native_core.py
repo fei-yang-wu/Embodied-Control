@@ -1033,6 +1033,49 @@ def test_native_latent_plan_serves_every_slot_from_one_reply(
     assert len(plateaus) >= slots
 
 
+def test_native_latent_plan_ignores_a_reply_between_episode_runs(
+    tmp_path, latent_manifest
+):
+    bundle = _native_bundle(tmp_path, latent_manifest)
+    response_name = _shm_name("plan_restart_response")
+    request_name = _shm_name("plan_restart_request")
+    slots, hold = 3, 5
+    loop = NativeFakeLoop(
+        bundle,
+        response_slot=response_name,
+        request_slot=request_name,
+        hold_steps=hold,
+        lead_ticks=2,
+        plan_slots=slots,
+        latent_plan=True,
+        command_stale_ms=5000.0,
+    )
+    server = _PlanServer(
+        request_name,
+        response_name,
+        slots=slots,
+        z_dim=latent_manifest.command.z_dim,
+        reply_delay_s=0.05,
+    ).start()
+    try:
+        loop.start(1, paced=True)
+        loop.wait()
+        deadline = time.monotonic() + 2.0
+        while server.replies < 1 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert server.replies == 1
+
+        loop.start(slots * hold * 2, paced=True)
+        loop.wait()
+    finally:
+        server.stop()
+
+    stats = loop.stats()
+    assert stats["fault"] == 0
+    assert stats["control_ticks"] > 0
+    assert stats["stale_responses"] >= 1
+
+
 def test_native_latent_plan_allows_a_lead_longer_than_one_hold(
     tmp_path, latent_manifest
 ):

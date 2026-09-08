@@ -124,8 +124,8 @@ def build_session_bindings(session) -> list[KeyBinding]:
     return [
         KeyBinding(KEY_DAMP, "DAMP (safety stop, then vendor damp)", lambda: report(session.damp()), "safety"),
         KeyBinding("o", "mode: oracle / vla", lambda: report(session.toggle_mode()), "select"),
-        KeyBinding("m", "motion: next", lambda: report(session.step_motion(1)), "select"),
-        KeyBinding("M", "motion: previous", lambda: report(session.step_motion(-1)), "select"),
+        KeyBinding("m", "motion / VLA goal: next", lambda: report(session.step_motion(1)), "select"),
+        KeyBinding("M", "motion / VLA goal: previous", lambda: report(session.step_motion(-1)), "select"),
         KeyBinding("t", "tracker: next", lambda: report(session.step_tracker(1)), "select"),
         KeyBinding("T", "tracker: previous", lambda: report(session.step_tracker(-1)), "select"),
         KeyBinding("f", "start frame +25", lambda: report(session.step_frame(session.config.frame_step)), "select"),

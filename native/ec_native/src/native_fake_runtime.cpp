@@ -437,6 +437,12 @@ void NativeFakeRuntime::read_response() noexcept {
   static_cast<void>(sender_stamp);
   last_response_sequence_ = sequence;
   planner_responses_.fetch_add(1, std::memory_order_relaxed);
+  if (request_slot_ && outstanding_request_sequence_ == 0) {
+    // stop() can leave a planner request in flight. If its reply lands before
+    // the next run publishes a request, it belongs to the previous episode.
+    stale_responses_.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
   if (request_slot_ && sequence < outstanding_request_sequence_) {
     // A reply to a request from before the last stop(): the planner stays up
     // across episodes and answers whatever was in flight when the control

@@ -1,0 +1,71 @@
+# MuJoCo lifecycle rehearsal for the fsq64_10b tracker driven by the
+# language-conditioned GR00T latent head. Run from the Embodied-Control root;
+# adjust the sibling IsaacLab-Imitation manifest path if the repos live
+# elsewhere.
+#
+#   T0  pixi run -e native ec lowlevel plant examples/g1_plant.yaml \
+#         --model assets/latent_playkit/model/g1_29dof_rev_1_0.xml \
+#         --network lo --vendor --hoist --dds-domain 61 --viewer
+#   T1  pixi run -e native ec lifecycle console \
+#         examples/lifecycle_sim_gr00t_fsq64.yaml --enable-writes \
+#         --confirm ENABLE_G1_LOWLEVEL_NON_REALTIME --allow-non-realtime
+#
+# In the console: p, r, a, g. At HOLD use m/M to choose another cached goal,
+# then e, a, g. The GR00T process and fsq64 tracker stay loaded across retakes.
+api_version: ec.lifecycle/v1alpha1
+bundle: ../assets/models/controller/fsq64_10b
+trackers:
+  fsq64_10b: ../assets/models/controller/fsq64_10b
+network: lo
+dds_domain: 61
+request_slot: /ec_g1_gr00t_request
+response_slot: /ec_g1_gr00t_response
+connect_slots: true
+command_source: vla
+reference_root: ../assets/models/reference/root_qpos_v1
+motion: walk_ff_loop_180_R_slow_001_A443
+start_frame: 0
+start_pose: default
+ramp_seconds: 3.0
+ticks: 500
+blend_ticks: 250
+lead_ticks: 4
+command_stale_ms: 500.0
+end_state: vendor_damp
+sim_hoist: true
+slack_on_run: true
+require_rehearsal: false
+artifacts_dir: ../artifacts/lifecycle_gr00t_fsq64
+mjcf: ../assets/latent_playkit/model/g1_29dof_rev_1_0.xml
+planner:
+  vla_service_command:
+    - pixi
+    - run
+    - --manifest-path
+    - ../IsaacLab-Imitation/.codex/worktrees/gr00t-g1-eval/pixi.toml
+    - -e
+    - gr00t
+    - python
+    - -m
+    - imitation_experiments.planner.gr00t_chunk_service
+    - --checkpoint
+    - assets/models/planner/gr00t_language30_10b/gr00t_head.pt
+    - --goal-features
+    - assets/models/planner/gr00t_language30_10b/goal_features.pt
+    - --goal
+    - walk_ff_loop_180_R_slow_001_A443
+    - --seed
+    - "0"
+  vla_reply: latent_plan
+  vla_z_dim: 64
+  vla_plan_slots: 3
+  vla_hold_steps: 10
+realtime:
+  control_cpu: -1
+  writer_cpu: -1
+  control_priority: 0
+  writer_priority: 0
+  lock_memory: false
+  policy_threads: 4
+thresholds:
+  settle_timeout_seconds: 15.0

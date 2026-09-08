@@ -106,8 +106,8 @@ the robot on its feet. Our controller never stands the robot itself.
 | Key | Command | What it does |
 |---|---|---|
 | `o` | `/mode` | mode: oracle / vla |
-| `m` | `/motion` | motion: next |
-| `M` | `/motion-prev` | motion: previous |
+| `m` | `/motion` | motion / VLA goal: next |
+| `M` | `/motion-prev` | motion / VLA goal: previous |
 | `t` | `/tracker` | tracker: next |
 | `T` | `/tracker-prev` | tracker: previous |
 | `f` | `/frame-next` | start frame +25 |

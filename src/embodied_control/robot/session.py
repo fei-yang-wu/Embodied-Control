@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import subprocess
 import sys
 import time
@@ -146,6 +147,8 @@ def planner_worker_argv(
     plan_slots: int = 1,
     hold_steps: int = 10,
     lead_ticks: int = 4,
+    goal: str = "",
+    goal_file: str = "",
     report: str = "",
 ) -> list[str]:
     argv = [
@@ -155,9 +158,23 @@ def planner_worker_argv(
         "--plan-slots", str(plan_slots), "--hold-steps", str(hold_steps),
         "--lead-ticks", str(lead_ticks),
     ]
+    if goal:
+        argv += ["--goal", goal]
+    if goal_file:
+        argv += ["--goal-file", goal_file]
     if report:
         argv += ["--report", report]
     return argv + ["--", *service_command]
+
+
+def write_goal_file(path: str | Path, goal: str) -> None:
+    if not goal or "\n" in goal or "\r" in goal:
+        raise ValueError("planner goal must be one non-empty line")
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
+    temporary.write_text(goal + "\n")
+    temporary.replace(destination)
 
 
 def unlink_slot_files(names: list[str]) -> None:
@@ -247,6 +264,7 @@ class SessionConfig:
     # Off by default; see `_planner_is_cheap` for the modes this never
     # applies to.
     planner_autostart: bool = False
+    hot_switch_vla_goals: bool = False
 
 
 class ExperimentSession:
@@ -264,6 +282,7 @@ class ExperimentSession:
         unlink_slots: Callable[[list[str]], None] | None = None,
         note: Callable[[str], None] = lambda _msg: None,
         mpjpe: Callable[[Path, Selection], dict | None] | None = None,
+        planner_goal: Callable[[str], None] | None = None,
     ) -> None:
         self.config = config
         self.selection = selection
@@ -276,7 +295,9 @@ class ExperimentSession:
         self._unlink_slots = unlink_slots or unlink_slot_files
         self._note = note
         self._mpjpe = mpjpe
+        self._planner_goal = planner_goal
         self.planner: PlannerHandle | None = None
+        self._planner_exit_reported = False
         self.tracker: TrackerHandle | None = None
         self.lifecycle: Lifecycle | None = None
         self.built_for: Selection | None = None
@@ -333,7 +354,31 @@ class ExperimentSession:
         if motion not in self.config.catalog:
             return self._refuse(f"unknown motion {motion}")
         frame = min(self.selection.start_frame, self.motion_length(motion) - 1)
-        return self._reconfigure(replace(self.selection, motion=motion, start_frame=max(0, frame)))
+        change = replace(self.selection, motion=motion, start_frame=max(0, frame))
+        if self._can_hot_switch_goal():
+            try:
+                assert self._planner_goal is not None
+                self._planner_goal(motion)
+            except Exception as exc:
+                return self._refuse(f"planner goal switch failed: {exc}")
+            self.selection = change
+            self.built_for = change
+            assert self.lifecycle is not None
+            self.lifecycle.identity["motion"] = motion
+            self._note(f"planner goal selected {motion}; press e to retake")
+            return GateResult(True, f"planner goal {motion}")
+        return self._reconfigure(change)
+
+    def _can_hot_switch_goal(self) -> bool:
+        return bool(
+            self.config.hot_switch_vla_goals
+            and self.selection.mode == "vla"
+            and self.lifecycle is not None
+            and self.lifecycle.state is LifecycleState.HOLD
+            and self.planner is not None
+            and self.planner.alive()
+            and self._planner_goal is not None
+        )
 
     def step_frame(self, delta: int) -> GateResult:
         length = self.motion_length(self.selection.motion)
@@ -360,6 +405,13 @@ class ExperimentSession:
             return self._refuse("planner already running; press p to stop it")
         if self.selection.mode == "oracle" and not self.selection.motion:
             return self._refuse("pick a motion first")
+        if self.selection.mode == "vla" and self._planner_goal is not None:
+            if not self.selection.motion:
+                return self._refuse("pick a planner goal first")
+            try:
+                self._planner_goal(self.selection.motion)
+            except Exception as exc:
+                return self._refuse(f"planner goal setup failed: {exc}")
         # A previous worker's mailboxes outlive it, and a new one refuses to
         # create a slot that already exists.
         if self._slot_names:
@@ -372,6 +424,7 @@ class ExperimentSession:
             self.planner.stop()
             return self._refuse("planner did not create its slots in time")
         self._note(f"planner started: {self.planner.describe()}")
+        self._planner_exit_reported = False
         return GateResult(True, self.planner.describe())
 
     def stop_planner(self) -> GateResult:
@@ -407,36 +460,50 @@ class ExperimentSession:
         """Build the tracker and lifecycle for the current selection."""
         if not self.can_reconfigure():
             return self._refuse("cannot rebuild while the tracker owns the joints")
+        had_tracker = self.tracker is not None or self.lifecycle is not None
         if self.lifecycle is not None:
             self.lifecycle.shutdown()
         if self.tracker is not None:
             self.tracker.close()
             self.tracker = None
-        # A fresh tracker numbers its requests from 1 again and an oracle
-        # worker serves one start frame, so the planner restarts with the
-        # tracker: stop it, drop the old mailboxes, start it for this
-        # selection, then connect.
+        # Replacing a tracker restarts its request sequence, and an oracle
+        # worker serves one start frame, so that path gets fresh mailboxes.
+        # A VLA planner started before the first tracker has seen no request
+        # yet and can be connected without loading its checkpoint twice.
         had_planner = self.planner is not None
-        if self.planner is not None:
+        reuse_pristine_vla = bool(
+            self.selection.mode == "vla"
+            and not had_tracker
+            and self.planner is not None
+            and self.planner.alive()
+        )
+        if self.planner is not None and not reuse_pristine_vla:
             self.planner.stop()
             self.planner = None
-        if self._slot_names:
+        if self._slot_names and not reuse_pristine_vla:
             self._unlink_slots(self._slot_names)
         # The planner owns the mailboxes and the tracker connects to them, so
         # a tracker that needs slots cannot be built before one is running.
         # Starting a cheap one is a detail; starting a multi-gigabyte one
         # because somebody pressed `n` is not.
-        may_start = (
-            had_planner or self.config.planner_autostart or self._planner_is_cheap()
-        )
-        if not may_start and self._slot_names:
-            return self._refuse(
-                "no planner running: press p to start it for this "
-                "selection, then r to build the tracker"
+        if reuse_pristine_vla:
+            if self._planner_goal is not None:
+                try:
+                    self._planner_goal(self.selection.motion)
+                except Exception as exc:
+                    return self._refuse(f"planner goal update failed: {exc}")
+        else:
+            may_start = (
+                had_planner or self.config.planner_autostart or self._planner_is_cheap()
             )
-        result = self.start_planner()
-        if not result.ok:
-            return result
+            if not may_start and self._slot_names:
+                return self._refuse(
+                    "no planner running: press p to start it for this "
+                    "selection, then r to build the tracker"
+                )
+            result = self.start_planner()
+            if not result.ok:
+                return result
         try:
             self.tracker = self._tracker_factory(self.selection)
             self.lifecycle = self._lifecycle_factory(self.tracker, self.selection, self)
@@ -658,6 +725,11 @@ class ExperimentSession:
         return self.lifecycle.damp()
 
     def retake(self) -> GateResult:
+        if (
+            self.selection.mode == "vla"
+            and (self.planner is None or not self.planner.alive())
+        ):
+            return self._refuse("VLA planner is not running")
         return self._current().retake()
 
     def recover(self, end_state: str | None = None) -> GateResult:
@@ -681,4 +753,14 @@ class ExperimentSession:
     def poll(self) -> None:
         self.refresh_hoist()
         if self.lifecycle is not None:
+            planner_dead = self.planner is not None and not self.planner.alive()
+            if (
+                planner_dead
+                and self.lifecycle.state in OWNING_STATES
+                and self.lifecycle.state is not LifecycleState.HOLD
+            ):
+                if not self._planner_exit_reported:
+                    self._note("planner exited while the tracker owned the joints; damping")
+                    self._planner_exit_reported = True
+                self.lifecycle.external_fault("planner exited while tracker owned joints")
             self.lifecycle.poll()

@@ -48,9 +48,9 @@ constexpr double kHoistKdRotation = 40.0;
 // the feet reach the floor and take the weight whatever the leg pose is; the
 // rope then only catches a fall (one-sided in z) and steadies the tilt at
 // reduced gain, like a harness on a slack gantry.
-constexpr double kHoistLowerMarginMeters = 0.05;
+constexpr double kHoistLowerMarginMeters = 0.10;
 constexpr double kHoistLoweredLateralGain = 0.5;
-// The strap moves at a winch's pace. Dropping the target 15 cm in one step
+// The strap moves at a winch's pace. Dropping the target 20 cm in one step
 // is a free fall onto the ankles at 1.4 m/s; an operator pays it out.
 constexpr double kHoistRateMetersPerSecond = 0.05;
 // Floor clearance is measured this often, and never further than this: a
@@ -763,6 +763,24 @@ double MujocoDdsPlant::measure_floor_gap() noexcept {
     for (const int geom : robot_geoms_) {
       gap = std::min(gap, mj_geomDistance(model, data, floor, geom,
                                           kClearanceDistMax, nullptr));
+    }
+  }
+  const auto belongs_to = [](const std::vector<int>& geoms, int geom) {
+    return std::find(geoms.begin(), geoms.end(), geom) != geoms.end();
+  };
+  for (int index = 0; index < data->ncon; ++index) {
+    const mjContact& contact = data->contact[index];
+    const bool floor_robot =
+        (belongs_to(floor_geoms_, contact.geom[0]) &&
+         belongs_to(robot_geoms_, contact.geom[1])) ||
+        (belongs_to(floor_geoms_, contact.geom[1]) &&
+         belongs_to(robot_geoms_, contact.geom[0]));
+    if (floor_robot) {
+      // MuJoCo may support a foot inside its positive contact margin. Surface
+      // distance then reads about 9 mm even though the floor carries load.
+      // The lifecycle needs physical clearance, for which active contact is 0.
+      gap = std::min(gap, 0.0);
+      break;
     }
   }
   return gap;

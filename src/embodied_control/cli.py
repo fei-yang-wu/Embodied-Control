@@ -587,6 +587,8 @@ def _cmd_lowlevel_planner_worker(args) -> int:
         command,
         action_width=args.z_dim if args.reply == "latent_plan" else args.state_width,
         window_frames=args.plan_slots if args.reply == "latent_plan" else 10,
+        goal=args.goal or None,
+        goal_file=args.goal_file or None,
     )
     if args.reply == "latent_plan":
         # A latent head predicts the commands themselves: forward its plan and
@@ -633,6 +635,7 @@ def _cmd_lowlevel_planner_worker(args) -> int:
             round(max(worker.request_ms), 3) if worker.request_ms else None
         ),
         "rtc_enabled": args.rtc,
+        "goal": service.goal,
         "interrupted": interrupted,
         "error": None if worker.last_error is None else str(worker.last_error),
     }
@@ -1372,6 +1375,7 @@ def _build_session(args):
         SubprocessPlanner,
         oracle_worker_argv,
         planner_worker_argv,
+        write_goal_file,
     )
 
     from embodied_control.robot.isolation import (
@@ -1412,6 +1416,11 @@ def _build_session(args):
     vendor, hoist = _lifecycle_peers(job, args)
     log = LifecycleLog(artifacts)
     notes: list = []
+    goal_file = (
+        artifacts_path / "planner_goal.txt"
+        if artifacts_path is not None
+        else Path("/tmp") / f"ec_planner_goal_{os.getpid()}.txt"
+    )
 
     def note(message: str) -> None:
         for sink in notes:
@@ -1434,7 +1443,8 @@ def _build_session(args):
                 job.planner.vla_service_command, job.request_slot, job.response_slot,
                 reply=job.planner.vla_reply, z_dim=job.planner.vla_z_dim,
                 plan_slots=job.planner.vla_plan_slots, hold_steps=job.planner.vla_hold_steps,
-                lead_ticks=job.lead_ticks, report=report,
+                lead_ticks=job.lead_ticks, goal=selection.motion,
+                goal_file=str(goal_file), report=report,
             )
         return SubprocessPlanner(argv, planner_log, preexec=planner_preexec)
 
@@ -1470,6 +1480,7 @@ def _build_session(args):
             trackers=list(tracker_paths),
             artifacts_dir=artifacts,
             planner_autostart=bool(getattr(args, "planner_autostart", False)),
+            hot_switch_vla_goals=job.start_pose == "default",
         ),
         _lifecycle_selection(job, default_tracker),
         hoist=hoist,
@@ -1479,6 +1490,7 @@ def _build_session(args):
         slot_names=[job.request_slot, job.response_slot] if job.connect_slots else [],
         note=note,
         mpjpe=_episode_mpjpe(job, bundle_for),
+        planner_goal=lambda goal: write_goal_file(goal_file, goal),
     )
     session.note_sinks = notes
     session.pinner = pinner
@@ -1882,6 +1894,8 @@ def build_parser() -> argparse.ArgumentParser:
     lnplanner.add_argument("--z-dim", type=int, default=256)
     lnplanner.add_argument("--plan-slots", type=int, default=1)
     lnplanner.add_argument("--rtc", action="store_true")
+    lnplanner.add_argument("--goal", default="")
+    lnplanner.add_argument("--goal-file", default="")
     lnplanner.add_argument("--report", default="")
     lnplanner.add_argument("service_command", nargs=argparse.REMAINDER)
     lnplanner.set_defaults(func=_cmd_lowlevel_planner_worker)

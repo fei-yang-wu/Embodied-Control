@@ -351,7 +351,8 @@ choice (`r`). In oracle mode `r` starts the worker too: it memory-maps the
 reference and loads no weights. In VLA mode the planner is yours to start,
 because that worker loads its own checkpoint, several gigabytes on the GPU,
 and a build refuses until it is running rather than launching one.
-`--planner-autostart` starts either. The display shows the
+Pressing `r` after `p` reuses that ready process, so the checkpoint is loaded
+only once. `--planner-autostart` starts either. The display shows the
 ladder, the writer's live numbers, link health (lowstate and lowcmd rates,
 state gaps, planner reply age), a progress bar over the reference trajectory
 in oracle mode, and per-episode tracking summaries. Each episode's telemetry
@@ -418,6 +419,14 @@ pixi run -e native ec lifecycle console examples/lifecycle_sim_hurry_idle.yaml \
 A run ends limp under the vendor (`end_state: vendor_damp`), so the next
 trajectory climbs the whole ladder again. `e` is the one shortcut, and it
 re-reads the link before it drives the robot a second time.
+
+For the native `fsq64_10b` + GR00T path, use
+`examples/lifecycle_sim_gr00t_fsq64.yaml`. Its 30-motion reference catalog
+matches the 30 cached language goals. After an episode reaches HOLD, `m`/`M`
+changes the GR00T goal and `e`, `a`, `g` starts the next motion without
+reloading either GR00T or the tracker. A planner exit while the tracker owns
+the joints immediately enters DAMP/FAULT; a dead planner cannot retake from
+HOLD.
 
 `R` (`/reset-sim`) closes current tracker and planner, then atomically resets
 running MuJoCo plant to configured initial pose (bundle default when absent),

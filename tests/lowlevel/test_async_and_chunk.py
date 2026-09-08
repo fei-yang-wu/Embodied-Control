@@ -290,7 +290,7 @@ for line in sys.stdin:
     assert plan.shape == (3, 64)
 
 
-def test_stdio_chunk_service_switches_goal_without_restarting():
+def test_stdio_chunk_service_switches_goal_file_without_restarting(tmp_path):
     script = r"""
 import json
 import sys
@@ -310,15 +310,17 @@ for line in sys.stdin:
     value = 1.0 if request.get("goal") == "walk" else 2.0
     print(json.dumps({"chunk": [value, value], "head_ms": value}), flush=True)
 """
+    goal_file = tmp_path / "goal.txt"
+    goal_file.write_text("walk\n")
     service = StdioChunkService(
         [sys.executable, "-u", "-c", script],
         action_width=2,
         window_frames=1,
-        goal="walk",
+        goal_file=goal_file,
     )
     try:
         walk = service(np.zeros(930, dtype=np.float32), {})
-        service.goal = "idle"
+        goal_file.write_text("idle\n")
         idle = service(np.zeros(930, dtype=np.float32), {})
     finally:
         service.close()
