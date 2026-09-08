@@ -616,6 +616,15 @@ A few things worth knowing if you touch this container:
   normal image (`frame[::-1]` corrects it — confirmed against LIBERO's own
   `benchmark_scripts/render_single_task.py`, which does the same flip).
   `pixi run smoke-libero-video` renders one.
+- **An optional live browser view uses those same camera observations.** Set
+  `sim.backend_config.live_view: true` (the GR00T example does this) and open
+  `http://127.0.0.1:8766/` while the run is active. The page shows the agent
+  and wrist cameras plus the task, episode, step, and success state. It keeps
+  only the latest JPEG for each camera and serves clients on a background
+  thread, so a slow or disconnected browser cannot hold up the rollout.
+  `live_view_host`, `live_view_port`, and `live_view_fps` override the
+  loopback host, port, and 10 FPS default. Keep the loopback default unless
+  remote access is protected by an SSH port forward.
 - The real run: one `libero_spatial` task ("pick up the black bowl between
   the plate and the ramekin and place it on the plate"), 2 episodes × 200
   steps × 128×128 cameras, both containers, ran in **~50 seconds** end to end
