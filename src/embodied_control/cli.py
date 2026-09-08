@@ -645,6 +645,50 @@ def _cmd_lowlevel_planner_worker(args) -> int:
     return 0 if worker.last_error is None else 1
 
 
+def _cmd_lowlevel_native_motion_eval(args) -> int:
+    from embodied_control.lowlevel.native_motion_eval import (
+        NativeMotionEvalError,
+        run_native_motion_evaluation,
+    )
+
+    command = list(args.service_command)
+    if command and command[0] == "--":
+        command = command[1:]
+    if not command:
+        print("FAIL: native-motion-eval needs a service command after --")
+        return 2
+    try:
+        run_dir, result = run_native_motion_evaluation(
+            args.bundle,
+            args.model,
+            args.goal,
+            command,
+            repeats=args.repeats,
+            ticks=args.ticks,
+            output_root=args.output_root,
+            plan_slots=args.plan_slots,
+            lead_ticks=args.lead_ticks,
+            hold_steps=args.hold_steps,
+            command_stale_ms=args.command_stale_ms,
+            policy_threads=args.policy_threads,
+            telemetry_hz=args.telemetry_hz,
+        )
+    except NativeMotionEvalError as exc:
+        print(f"FAIL: {exc}")
+        print(f"run_dir: {exc.run_dir}")
+        return 1
+    print(f"run_dir: {run_dir}")
+    metrics = result["metrics"]
+    for goal, summary in metrics["by_goal"].items():
+        latency = summary["planner_request_ms_mean"]
+        latency_text = "n/a" if latency is None else f"{latency:.3f} ms"
+        print(
+            f"{goal}: {summary['successes']}/{summary['episodes']} succeeded, "
+            f"planner={latency_text}"
+        )
+    return 0 if result["status"]["succeeded"] else 1
+
+
 def _cmd_lowlevel_certify_report(args) -> int:
     from embodied_control.lowlevel.slo import certify_report_file
 
@@ -1841,6 +1885,29 @@ def build_parser() -> argparse.ArgumentParser:
     lnplanner.add_argument("--report", default="")
     lnplanner.add_argument("service_command", nargs=argparse.REMAINDER)
     lnplanner.set_defaults(func=_cmd_lowlevel_planner_worker)
+    lnmotion = lows.add_parser(
+        "native-motion-eval",
+        help="evaluate several GR00T goals with one loaded native planner",
+    )
+    lnmotion.add_argument("--bundle", required=True)
+    lnmotion.add_argument("--model", required=True)
+    lnmotion.add_argument(
+        "--goal",
+        action="append",
+        required=True,
+        help="cached GR00T goal name; repeat for each motion",
+    )
+    lnmotion.add_argument("--repeats", type=int, default=1)
+    lnmotion.add_argument("--ticks", type=int, default=500)
+    lnmotion.add_argument("--output-root", default="runs")
+    lnmotion.add_argument("--plan-slots", type=int, default=3)
+    lnmotion.add_argument("--lead-ticks", type=int, default=4)
+    lnmotion.add_argument("--hold-steps", type=int)
+    lnmotion.add_argument("--command-stale-ms", type=float, default=500.0)
+    lnmotion.add_argument("--policy-threads", type=int, default=4)
+    lnmotion.add_argument("--telemetry-hz", type=float, default=0.0)
+    lnmotion.add_argument("service_command", nargs=argparse.REMAINDER)
+    lnmotion.set_defaults(func=_cmd_lowlevel_native_motion_eval)
     lnoracle = lows.add_parser(
         "oracle-worker",
         help="stream a fixed reference motion to the native root_qpos encoder",

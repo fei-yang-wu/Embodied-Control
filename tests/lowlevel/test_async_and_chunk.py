@@ -238,9 +238,15 @@ for line in sys.stdin:
     request = json.loads(line)
     if request.get("stop"):
         break
-    print(json.dumps({"chunk": list(range(10 * 38))}), flush=True)
+    print(json.dumps({
+        "chunk": list(range(10 * 38)),
+        "head_ms": 12.5,
+        "echo_goal": request.get("goal"),
+    }), flush=True)
 """
-    service = StdioChunkService([sys.executable, "-u", "-c", script])
+    service = StdioChunkService(
+        [sys.executable, "-u", "-c", script], goal="walk_straight"
+    )
     try:
         chunk = service(
             np.zeros(930, dtype=np.float32),
@@ -250,6 +256,7 @@ for line in sys.stdin:
         service.close()
     assert chunk.shape == (10, 38)
     np.testing.assert_array_equal(chunk.reshape(-1), np.arange(10 * 38))
+    assert service.head_ms == [12.5]
 
 
 def test_stdio_chunk_service_accepts_latent_plan_contract():
@@ -281,6 +288,43 @@ for line in sys.stdin:
     finally:
         service.close()
     assert plan.shape == (3, 64)
+
+
+def test_stdio_chunk_service_switches_goal_without_restarting():
+    script = r"""
+import json
+import sys
+
+print(json.dumps({
+    "ready": True,
+    "action_horizon": 1,
+    "state_history": 10,
+    "state_width": 93,
+    "action_width": 2,
+    "window_frames": 1,
+}), flush=True)
+for line in sys.stdin:
+    request = json.loads(line)
+    if request.get("stop"):
+        break
+    value = 1.0 if request.get("goal") == "walk" else 2.0
+    print(json.dumps({"chunk": [value, value], "head_ms": value}), flush=True)
+"""
+    service = StdioChunkService(
+        [sys.executable, "-u", "-c", script],
+        action_width=2,
+        window_frames=1,
+        goal="walk",
+    )
+    try:
+        walk = service(np.zeros(930, dtype=np.float32), {})
+        service.goal = "idle"
+        idle = service(np.zeros(930, dtype=np.float32), {})
+    finally:
+        service.close()
+    np.testing.assert_array_equal(walk, [[1.0, 1.0]])
+    np.testing.assert_array_equal(idle, [[2.0, 2.0]])
+    assert service.head_ms == [1.0, 2.0]
 
 
 def test_stdio_chunk_service_rejects_wrong_response_width():

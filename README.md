@@ -147,6 +147,32 @@ status. The viewer reads one completed 36-float pose at its own rate and never
 touches the native MuJoCo data or either real-time thread. Use
 `--viewer-host`, `--viewer-port`, and `--viewer-fps` to override the defaults.
 
+For repeatable evaluation of several cached GR00T goals, use the integrated
+runner instead of managing two terminals. It loads the GR00T head once, changes
+the goal on each request, and starts a fresh native MuJoCo episode for every
+goal/repeat pair:
+
+```bash
+pixi run -e native ec lowlevel native-motion-eval \
+  --bundle assets/models/controller/fsq64_10b \
+  --model assets/latent_playkit/model/g1_29dof_rev_1_0.xml \
+  --goal walk_ff_loop_180_R_slow_001_A443 \
+  --goal walk_arc_cw_start_R_slow_001_A443 \
+  --goal crossed_arms_idle_R_001_A456 \
+  --repeats 2 --ticks 500 --output-root artifacts/g1_gr00t_eval -- \
+  pixi run --manifest-path /absolute/path/to/IsaacLab-Imitation/pixi.toml \
+  -e gr00t python -m imitation_experiments.planner.gr00t_chunk_service \
+  --checkpoint assets/models/planner/gr00t_language30_10b/gr00t_head.pt \
+  --goal-features assets/models/planner/gr00t_language30_10b/goal_features.pt \
+  --goal walk_ff_loop_180_R_slow_001_A443 --seed 0
+```
+
+Each run preserves the standard job, resolved job, manifest, validation,
+status, metrics, episodes, and logs artifacts. It also writes per-episode
+native telemetry, `summary.csv`, and a top-down `trajectories.svg`. This command
+is intentionally scoped to the current latent-plan `fsq64_10b` path; it does
+not select or adapt the separate SONIC bundle.
+
 For reference-streaming oracle evaluation, replace the GR00T worker with the
 oracle worker and select the source explicitly. This mode streams a 5 Hz
 expert `root_qpos` window into the same native encoder as the VLA path. It is

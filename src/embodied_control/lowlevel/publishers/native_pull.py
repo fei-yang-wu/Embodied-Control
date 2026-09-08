@@ -258,6 +258,7 @@ class StdioChunkService:
         # Per-episode goal switch: the service re-selects its cached language
         # features when a request carries a "goal" key.
         self.goal = goal
+        self.head_ms: list[float] = []
         self._process = subprocess.Popen(
             list(command),
             stdin=subprocess.PIPE,
@@ -341,6 +342,11 @@ class StdioChunkService:
         response = json.loads(line)
         if "chunk" not in response:
             raise RuntimeError(f"GR00T response has no chunk: {response}")
+        if response.get("head_ms") is not None:
+            head_ms = float(response["head_ms"])
+            if not np.isfinite(head_ms):
+                raise RuntimeError(f"GR00T response has invalid head_ms: {head_ms}")
+            self.head_ms.append(head_ms)
         horizon = int(self.ready["action_horizon"])
         chunk = np.asarray(response["chunk"], dtype=np.float32)
         if chunk.size != horizon * self.action_width:
