@@ -378,6 +378,7 @@ def test_operator_acks_gate_precheck_and_lowering():
     assert lifecycle.state is S.POSE_SETTLED
 
     lifecycle.ack_lowered()
+    assert lifecycle.hoisted_ack is False
     assert lifecycle.auto().ok
     assert lifecycle.state is S.PRIMED
     assert hoist.calls == ["hoist", "lower"]
@@ -461,7 +462,7 @@ def test_writer_damp_during_running_is_a_fault():
     assert "writer damped" in lifecycle.fault_reason
 
 
-def test_damp_then_recover_to_damp_only_releases():
+def test_damp_then_recover_to_damp_keeps_our_writer():
     lifecycle, tracker, vendor, hoist, clock = _lifecycle(end_state="damp")
     assert lifecycle.auto().ok
     assert lifecycle.go().ok
@@ -469,8 +470,31 @@ def test_damp_then_recover_to_damp_only_releases():
     assert lifecycle.state is S.DAMP
     assert tracker.mode == WRITER_DAMP
     assert lifecycle.recover().ok
-    assert lifecycle.state is S.RELEASED
+    assert lifecycle.state is S.DAMP
     assert tracker.restored_with == ""
+
+
+def test_fault_recovery_needs_a_fresh_hoist_ack_before_silencing_the_writer():
+    lifecycle, tracker, vendor, hoist, clock = _lifecycle(
+        auto_ack=False, tracker_kwargs={"planner_fault": 3}
+    )
+    lifecycle.ack_hoisted()
+    assert not lifecycle.auto().ok
+    lifecycle.ack_lowered()
+    assert not lifecycle.auto().ok
+    assert lifecycle.state is S.FAULT
+    assert lifecycle.hoisted_ack is False
+
+    result = lifecycle.recover()
+
+    assert not result.ok and "press H" in result.detail
+    assert lifecycle.state is S.DAMP
+    assert tracker.mode == WRITER_DAMP
+    assert tracker.gate_open
+
+    lifecycle.ack_hoisted()
+    assert lifecycle.recover().ok
+    assert lifecycle.state is S.VENDOR_RESTORED
 
 
 def test_rearm_from_hold_ramps_again_without_the_vendor():

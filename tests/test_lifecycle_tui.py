@@ -23,7 +23,7 @@ from embodied_control.robot.lifecycle import (
 )
 from embodied_control.robot.shell import build_lifecycle_bindings
 from embodied_control.robot.diagnostics import DiagnosticResult
-from embodied_control.robot.tui import DISPLAY_ORDER, LifecycleTui, render
+from embodied_control.robot.tui import DISPLAY_ORDER, LifecycleTui, _session_rows, render
 from test_lifecycle import POSE, FakeClock, FakeHoist, StubTracker
 
 
@@ -103,6 +103,7 @@ def test_display_order_covers_every_non_sink_state():
 def test_damp_chord_bypasses_the_lock_and_space_is_inert():
     lifecycle, tracker, clock = _lifecycle()
     tui = LifecycleTui(lifecycle, build_lifecycle_bindings(lifecycle), clock=clock.now)
+
     assert tui.handle(KEY_DAMP) is True
     # The writer got the damp before any worker ran.
     assert tracker.calls[-1] == "force_damp"
@@ -113,6 +114,40 @@ def test_damp_chord_bypasses_the_lock_and_space_is_inert():
     assert tui.handle(KEY_SPACE) is True
     assert tui._queue.qsize() == 1
     assert any("SPACE does nothing" in note for note in tui.notes)
+
+
+def test_a_pending_action_blocks_a_second_key_before_the_worker_runs():
+    lifecycle, tracker, clock = _lifecycle()
+    tui = LifecycleTui(lifecycle, build_lifecycle_bindings(lifecycle), clock=clock.now)
+
+    assert tui.handle("n") is True
+    assert tui.handle("g") is True
+
+    assert tui._queue.qsize() == 1
+    assert tui._pending == "next: advance one state"
+    assert any("'g' ignored" in note for note in tui.notes)
+
+
+def test_damp_discards_a_pending_action_instead_of_running_it_first():
+    lifecycle, tracker, clock = _lifecycle()
+    tui = LifecycleTui(lifecycle, build_lifecycle_bindings(lifecycle), clock=clock.now)
+
+    assert tui.handle("a") is True
+    assert tui.handle(KEY_DAMP) is True
+
+    assert tracker.calls[-1] == "force_damp"
+    assert tui._queue.qsize() == 1
+    queued = tui._queue.get_nowait()
+    assert queued is not None and queued.key == KEY_DAMP
+
+
+def test_a_stopped_planner_is_not_colored_as_running():
+    rows = _session_rows(
+        {"session": {"planner": "not running", "planner_running": False}},
+        width=100,
+    )
+    planner = [span for row in rows for span in row if span.text == "not running"]
+    assert len(planner) == 1 and planner[0].style == "warn"
 
 
 def test_quit_is_refused_while_busy_and_unknown_keys_are_ignored():

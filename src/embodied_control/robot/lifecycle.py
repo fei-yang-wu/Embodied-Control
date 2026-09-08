@@ -509,7 +509,7 @@ class Lifecycle:
         """
         self.tracker.force_damp()
 
-    def snapshot(self) -> dict:
+    def snapshot(self, *, include_hoist: bool = True) -> dict:
         """Lock-free view for a display thread; never blocks on a gate."""
         try:
             ws = dict(self.tracker.writer_stats())
@@ -519,7 +519,7 @@ class Lifecycle:
             st = dict(self.tracker.stats())
         except Exception:
             st = {}
-        hoist = self._hoist_status()
+        hoist = self._hoist_status() if include_hoist else None
         last = self.last_result
         return {
             "state": str(self.state),
@@ -564,12 +564,16 @@ class Lifecycle:
                 result = self._attempt(LifecycleState.DAMP)
                 if not result.ok:
                     return result
+            if end == "damp":
+                return GateResult(True, f"recovered to {self.state}")
             if self.state is LifecycleState.DAMP:
+                if not self._hoist_ready():
+                    return self._refuse(
+                        "hook the hoist and press H before silencing our writer"
+                    )
                 result = self._attempt(LifecycleState.RELEASED)
                 if not result.ok:
                     return result
-            if end == "damp":
-                return GateResult(True, f"recovered to {self.state}")
             if self.state is LifecycleState.RELEASED:
                 if not self._hoist_ready():
                     return self._refuse(
@@ -631,6 +635,7 @@ class Lifecycle:
         with self._lock:
             if self.hoist is not None:
                 self.hoist.lower()
+            self.hoisted_ack = False
             self.lowered_ack = True
 
     def poll(self) -> None:

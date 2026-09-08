@@ -9,7 +9,7 @@ is bright and one link's dot can be red while its neighbours stay green;
 `render` flattens the same rows to plain text, which is what the tests read
 and what a pipe gets. Curses only maps a style name to an attribute.
 
-Two rules the layout serves. SPACE reaches the writer before anything else:
+Two rules the layout serves. Ctrl-D reaches the writer before anything else:
 it bypasses the lifecycle lock (a gate may hold it for its whole timeout) and
 stores DAMP straight into the writer. And a key never blocks the screen:
 actions run on one worker thread, one at a time, while the display keeps
@@ -831,6 +831,11 @@ def _session_rows(snapshot: dict, width: int) -> list[Row]:
     rows = [_rule("SESSION", width)]
     built = bool(session.get("built"))
     planner = str(session.get("planner", "?"))
+    planner_running = session.get("planner_running")
+    if planner_running is None:
+        planner_running = planner.endswith(" running") and not planner.startswith(
+            "not "
+        )
     # Whole fields, so a narrow terminal drops the last one instead of
     # cutting a word in half. The first three are the selection an operator
     # is about to run, and they never drop.
@@ -843,7 +848,7 @@ def _session_rows(snapshot: dict, width: int) -> list[Row]:
         # narrow terminal cannot drop it.
         [
             Span("   planner ", "label"),
-            Span(planner, "ok" if "running" in planner else "warn"),
+            Span(planner, "ok" if planner_running else "warn"),
         ],
         [
             Span("   TRACKER ", "label"),
@@ -1232,7 +1237,10 @@ class LifecycleTui:
         self.refresh_seconds = refresh_seconds
         self.notes: deque[str] = deque(maxlen=200)
         self._queue: queue.Queue[KeyBinding | None] = queue.Queue()
+        self._action_lock = threading.Lock()
         self._busy = ""
+        self._pending = ""
+        self._damp_requested = threading.Event()
         self._quit = threading.Event()
         self._clock = clock
         self._t0 = clock()
@@ -1276,9 +1284,20 @@ class LifecycleTui:
             # is never text and never waits.
             self._line = None
             self._help_open = False
+            with self._action_lock:
+                first_request = not self._damp_requested.is_set()
+                self._damp_requested.set()
+                if first_request:
+                    while True:
+                        try:
+                            self._queue.get_nowait()
+                        except queue.Empty:
+                            break
+                    binding = self.bindings[KEY_DAMP]
+                    self._pending = binding.label
+                    self._queue.put(binding)
             self.lifecycle.emergency_damp()
             self.note("^D: damp stored in the writer", "damp")
-            self._queue.put(self.bindings[KEY_DAMP])
             return True
         if self._line is not None:
             return self._handle_command_key(key)
@@ -1297,18 +1316,36 @@ class LifecycleTui:
             self.note("SPACE does nothing here; damp is Ctrl-D")
             return True
         if key == "q":
-            if self._busy:
-                self.note("busy: wait for the action to finish, or SPACE")
+            current = self._current_action()
+            if current:
+                self.note(
+                    "busy: wait for the action to finish, or press Ctrl-D to damp"
+                )
                 return True
             return False
         binding = self.bindings.get(key)
         if binding is None:
             return True
-        if self._busy:
-            self.note(f"busy with '{self._busy}'; '{key}' ignored")
+        current = self._current_action()
+        if current:
+            self.note(f"busy with '{current}'; '{key}' ignored")
             return True
-        self._queue.put(binding)
+        if not self._enqueue(binding):
+            current = self._current_action()
+            self.note(f"busy with '{current}'; '{key}' ignored")
         return True
+
+    def _current_action(self) -> str:
+        with self._action_lock:
+            return self._busy or self._pending
+
+    def _enqueue(self, binding: KeyBinding) -> bool:
+        with self._action_lock:
+            if self._busy or self._pending or self._damp_requested.is_set():
+                return False
+            self._pending = binding.label
+            self._queue.put(binding)
+            return True
 
     def _handle_command_key(self, key: str) -> bool:
         assert self._line is not None
@@ -1352,13 +1389,14 @@ class LifecycleTui:
                     "with --diagnostic-agent"
                 )
                 return True
-            if self._busy:
-                self.note(f"busy with '{self._busy}'; /{command} ignored")
-                return True
             self.assistant.clear()
-            self._queue.put(
-                KeyBinding("", f"diagnosing with {self.agent_label}", self._run_diagnosis)
+            binding = KeyBinding(
+                "", f"diagnosing with {self.agent_label}", self._run_diagnosis
             )
+            if not self._enqueue(binding):
+                self.note(
+                    f"busy with '{self._current_action()}'; /{command} ignored"
+                )
             return True
         key = SLASH_KEYS.get(command)
         if key is None or (key != "q" and key not in self.bindings):
@@ -1392,7 +1430,14 @@ class LifecycleTui:
                 continue
             if binding is None:
                 return
-            self._busy = binding.label
+            with self._action_lock:
+                if self._damp_requested.is_set() and binding.key != KEY_DAMP:
+                    if self._pending == binding.label:
+                        self._pending = ""
+                    continue
+                if self._pending == binding.label:
+                    self._pending = ""
+                self._busy = binding.label
             try:
                 binding.action()
             except ConsoleQuit:
@@ -1400,7 +1445,10 @@ class LifecycleTui:
             except Exception as exc:  # the console outlives any one refusal
                 self.note(f"!! {type(exc).__name__}: {exc}", "fail")
             finally:
-                self._busy = ""
+                with self._action_lock:
+                    self._busy = ""
+                    if binding.key == KEY_DAMP:
+                        self._damp_requested.clear()
 
     def rates(self, snapshot: dict) -> dict:
         """Per-second rates from counter deltas, refreshed every 0.5 s."""
@@ -1437,7 +1485,7 @@ class LifecycleTui:
             snapshot,
             self.ordered,
             list(self.notes),
-            busy=self._busy,
+            busy=self._current_action(),
             width=width,
             height=height,
             rates=self.rates(snapshot),

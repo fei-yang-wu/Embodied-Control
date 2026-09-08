@@ -157,6 +157,7 @@ def test_rebuild_with_autostart_starts_planner_and_tracker():
     assert len(built) == 1 and session.built_for == session.selection
     snapshot = session.snapshot()
     assert snapshot["session"]["built"] is True
+    assert snapshot["session"]["planner_running"] is True
 
     assert session.step_motion(1).ok
     assert session.snapshot()["session"]["built"] is False
@@ -279,20 +280,23 @@ def test_snapshot_never_blocks_on_the_plant_rpc():
             return {"owned": False, "fsm_id": 1, "hoisted": False, "hoist_mode": 0}
 
     session, built, clock = _session()
-    session.hoist = SlowHoist()
+    assert session.rebuild().ok
+    slow_hoist = SlowHoist()
+    session.hoist = slow_hoist
+    session.lifecycle.hoist = slow_hoist
 
     started = time.monotonic()
     for _ in range(20):
         assert session.snapshot()["hoist"] is None
     assert time.monotonic() - started < 0.2
-    assert session.hoist.calls == 0
+    assert slow_hoist.calls == 0
 
     session.refresh_hoist()
     assert session.snapshot()["hoist"]["hoist_mode"] == 0
     # And the watcher does not re-ask on every one of its 100 Hz ticks.
     for _ in range(10):
         session.refresh_hoist()
-    assert session.hoist.calls == 1
+    assert slow_hoist.calls == 1
 
 
 def test_sim_reset_closes_runtime_and_returns_to_no_tracker():

@@ -575,15 +575,26 @@ class ExperimentSession:
             self._hoist_status = None
 
     def snapshot(self) -> dict:
-        base = self.lifecycle.snapshot() if self.lifecycle is not None else {
-            "state": "NO TRACKER", "fault_reason": "", "vendor_name": "",
-            "episode": 0, "writer": {}, "control": {}, "hoist": None,
-            "last_ok": None,
-            "last_detail": "press r to build the tracker",
-        }
+        base = (
+            self.lifecycle.snapshot(include_hoist=False)
+            if self.lifecycle is not None
+            else {
+                "state": "NO TRACKER",
+                "fault_reason": "",
+                "vendor_name": "",
+                "episode": 0,
+                "writer": {},
+                "control": {},
+                "hoist": None,
+                "last_ok": None,
+                "last_detail": "press r to build the tracker",
+            }
+        )
         planner = "not running"
+        planner_running = False
         if self.planner is not None:
             planner = self.planner.describe()
+            planner_running = self.planner.alive()
         base["session"] = {
             "mode": self.selection.mode,
             "tracker": self.selection.tracker,
@@ -597,6 +608,7 @@ class ExperimentSession:
             "start_frame": self.selection.start_frame,
             "motion_length": self.motion_length(self.selection.motion),
             "planner": planner,
+            "planner_running": planner_running,
             "built": self.built_for == self.selection and self.lifecycle is not None,
             "built_for": self.built_for.label() if self.built_for else "",
             "episodes": self.episodes[-3:],
