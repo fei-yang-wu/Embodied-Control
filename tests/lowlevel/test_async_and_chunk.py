@@ -252,6 +252,37 @@ for line in sys.stdin:
     np.testing.assert_array_equal(chunk.reshape(-1), np.arange(10 * 38))
 
 
+def test_stdio_chunk_service_accepts_latent_plan_contract():
+    script = r"""
+import json
+import sys
+
+print(json.dumps({
+    "ready": True,
+    "action_horizon": 3,
+    "state_history": 10,
+    "state_width": 93,
+    "action_width": 64,
+    "window_frames": 3,
+}), flush=True)
+for line in sys.stdin:
+    request = json.loads(line)
+    if request.get("stop"):
+        break
+    print(json.dumps({"chunk": list(range(3 * 64))}), flush=True)
+"""
+    service = StdioChunkService(
+        [sys.executable, "-u", "-c", script],
+        action_width=64,
+        window_frames=3,
+    )
+    try:
+        plan = service(np.zeros(930, dtype=np.float32), {})
+    finally:
+        service.close()
+    assert plan.shape == (3, 64)
+
+
 def test_stdio_chunk_service_rejects_wrong_response_width():
     script = r"""
 import json

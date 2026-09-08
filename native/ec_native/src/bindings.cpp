@@ -435,6 +435,14 @@ class NativeFakeRuntimeBinding {
     return result;
   }
 
+  py::object latest_pose() const {
+    py::array_t<float> pose(7 + ec_native::kJointCount);
+    if (!runtime_->latest_pose(std::span<float>(pose.mutable_data(), pose.size()))) {
+      return py::none();
+    }
+    return std::move(pose);
+  }
+
   py::array_t<std::uint64_t> tick_durations_ns() const {
     const auto durations = runtime_->tick_durations_ns();
     py::array_t<std::uint64_t> result(
@@ -1167,6 +1175,7 @@ PYBIND11_MODULE(_ec_native, m) {
       .def_property_readonly("running", &NativeFakeRuntimeBinding::running)
       .def("stats", &NativeFakeRuntimeBinding::stats)
       .def("state", &NativeFakeRuntimeBinding::state)
+      .def("latest_pose", &NativeFakeRuntimeBinding::latest_pose)
       .def("tick_durations_ns",
            &NativeFakeRuntimeBinding::tick_durations_ns)
       .def("set_initial_pose", &NativeFakeRuntimeBinding::set_initial_pose,

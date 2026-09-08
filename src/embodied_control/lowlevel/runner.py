@@ -123,8 +123,18 @@ def _build_publisher(job: LowLevelJob, bundle: PolicyBundle, buffer, encoder_eng
     return ReferencePlaybackPublisher(buffer, {name: data[name] for name in order}, order)
 
 
-def run_lowlevel_job(job_path: str | Path, *, device: str = "cpu") -> tuple[Path, RunResult]:
+def run_lowlevel_job(
+    job_path: str | Path,
+    *,
+    device: str = "cpu",
+    viewer: bool = False,
+    viewer_host: str = "127.0.0.1",
+    viewer_port: int = 8765,
+    viewer_fps: int = 25,
+) -> tuple[Path, RunResult]:
     job = load_lowlevel_job(job_path)
+    if viewer and job.env.backend != "mujoco":
+        raise ValueError("the live viewer is only available for the MuJoCo backend")
     bundle = PolicyBundle.load(job.bundle)
     control_hz = bundle.manifest.rates.control_hz
 
@@ -160,6 +170,10 @@ def run_lowlevel_job(job_path: str | Path, *, device: str = "cpu") -> tuple[Path
             timestep=bundle.manifest.rates.physics_dt,
             decimation=bundle.manifest.rates.decimation,
             record_video=job.rollout.record_video,
+            viewer=viewer,
+            viewer_host=viewer_host,
+            viewer_port=viewer_port,
+            viewer_fps=viewer_fps,
         )
     else:
         raise NotImplementedError(f"env backend {job.env.backend!r} is not built yet")
@@ -185,6 +199,8 @@ def run_lowlevel_job(job_path: str | Path, *, device: str = "cpu") -> tuple[Path
     finally:
         if hasattr(publisher, "close"):
             publisher.close()
+        if hasattr(backend, "close"):
+            backend.close()
     write_run_artifacts(
         run_dir, job, json.loads((bundle.root / "manifest.json").read_text()), result
     )

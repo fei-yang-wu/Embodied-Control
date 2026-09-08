@@ -412,6 +412,13 @@ class NativeMujocoLoop(NativeFakeLoop):
             int(noise_seed),
         )
 
+    def latest_state(self) -> np.ndarray | None:
+        pose = self._runtime.latest_pose()
+        if pose is None:
+            return None
+        values = np.asarray(pose, dtype=np.float32)
+        return values if values.shape == (36,) else None
+
 
 class NativeUnitreeLoop(NativeFakeLoop):
     """C++ G1 DDS runtime with explicit write and operator gates."""

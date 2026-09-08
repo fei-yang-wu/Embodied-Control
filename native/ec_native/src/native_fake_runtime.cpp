@@ -1029,6 +1029,26 @@ std::vector<float> NativeFakeRuntime::anchor_pose_log() const {
   return {anchor_pose_log_.begin(), anchor_pose_log_.begin() + count * 7};
 }
 
+bool NativeFakeRuntime::latest_pose(
+    std::span<float> destination) const noexcept {
+  if (destination.size() != 7 + kJointCount) {
+    return false;
+  }
+  // A released tick owns an immutable log row, so the viewer can read one
+  // completed pose without sharing mjData or blocking either real-time loop.
+  const std::size_t count =
+      static_cast<std::size_t>(ticks_.load(std::memory_order_acquire));
+  if (count == 0) {
+    return false;
+  }
+  const std::size_t row = count - 1;
+  std::copy_n(anchor_pose_log_.begin() + row * 7, 7, destination.begin());
+  std::copy_n(joint_position_log_.begin() + row * kJointCount, kJointCount,
+              destination.begin() + 7);
+  return std::all_of(destination.begin(), destination.end(),
+                     [](float value) { return std::isfinite(value); });
+}
+
 RobotState NativeFakeRuntime::state() const {
   if (running_.load(std::memory_order_acquire)) {
     throw std::runtime_error("native state is available after the loop stops");

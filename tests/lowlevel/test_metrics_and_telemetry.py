@@ -130,6 +130,7 @@ class _FakeRuntime:
             "wake_late_ns_max": 1000,
         }
 
+    @property
     def running(self):
         return self._running
 

@@ -69,7 +69,7 @@ class TelemetryRecorder:
                 wake_late_ns_max=int(stats.get("wake_late_ns_max", 0)),
                 base_height=float(heights[-1]) if len(heights) else float("nan"),
             )
-            if not self.runtime.running():
+            if not self.runtime.running:
                 return
 
     def collect(self) -> dict:

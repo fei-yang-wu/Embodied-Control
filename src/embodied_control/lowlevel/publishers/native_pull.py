@@ -247,12 +247,14 @@ class StdioChunkService:
         command: Sequence[str],
         *,
         action_width: int = 38,
+        window_frames: int = 10,
         goal: str | None = None,
     ) -> None:
         # A chunk head predicts root_qpos frames (38 wide); a latent head
         # predicts the commands themselves (z_dim wide). Both speak this
         # protocol, so the expected width is a parameter, not a constant.
         self.action_width = int(action_width)
+        self.window_frames = int(window_frames)
         # Per-episode goal switch: the service re-selects its cached language
         # features when a request carries a "goal" key.
         self.goal = goal
@@ -286,7 +288,7 @@ class StdioChunkService:
             "state_history": 10,
             "state_width": 93,
             "action_width": self.action_width,
-            "window_frames": 10,
+            "window_frames": self.window_frames,
         }
         mismatches = {
             key: (ready.get(key), value)

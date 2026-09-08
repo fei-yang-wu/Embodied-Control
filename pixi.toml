@@ -61,6 +61,9 @@ imageio = ">=2.30"
 imageio-ffmpeg = ">=0.4"
 ffmpeg = ">=6"
 
+[feature.sim.pypi-dependencies]
+mjviser = ">=0.0.14"
+
 [feature.sim.tasks]
 # These require MuJoCo, so they live in the sim environment: `pixi run -e sim smoke`.
 smoke = "ec eval run examples/mujoco_zero_local.yaml"

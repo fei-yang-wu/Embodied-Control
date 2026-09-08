@@ -335,7 +335,14 @@ def _cmd_policy_ping(args) -> int:
 def _cmd_lowlevel_run(args) -> int:
     from embodied_control.lowlevel.runner import run_lowlevel_job
 
-    run_dir, result = run_lowlevel_job(args.job, device=args.device)
+    run_dir, result = run_lowlevel_job(
+        args.job,
+        device=args.device,
+        viewer=args.viewer,
+        viewer_host=args.viewer_host,
+        viewer_port=args.viewer_port,
+        viewer_fps=args.viewer_fps,
+    )
     print(f"run_dir: {run_dir}")
     for episode in result.episodes:
         print(
@@ -408,6 +415,12 @@ def _cmd_lowlevel_mujoco_native(args) -> int:
     from embodied_control.lowlevel.bundle import PolicyBundle
     from embodied_control.lowlevel.native_core import NativeMujocoLoop
 
+    if args.plan_slots < 1:
+        raise SystemExit("--plan-slots must be at least 1")
+    if args.plan_slots != 1 and not args.latent_plan:
+        raise SystemExit("--plan-slots > 1 needs --latent-plan")
+    if args.latent_plan and args.command_source != "vla":
+        raise SystemExit("--latent-plan needs --command-source vla")
     bundle = PolicyBundle.load(args.bundle)
     runtime = NativeMujocoLoop(
         bundle,
@@ -418,6 +431,8 @@ def _cmd_lowlevel_mujoco_native(args) -> int:
         command_absent_ticks=args.command_absent_ticks,
         command_stale_ms=args.command_stale_ms,
         lead_ticks=args.lead_ticks,
+        plan_slots=args.plan_slots,
+        latent_plan=args.latent_plan,
         cpu=args.cpu,
         fifo_priority=args.fifo_priority,
         lock_memory=args.lock_memory,
@@ -462,13 +477,38 @@ def _cmd_lowlevel_mujoco_native(args) -> int:
                 ]
             )
         )
+    view = None
     try:
-        recorder.start()
-        runtime.start(args.ticks, paced=True)
+        if args.viewer:
+            from embodied_control.lowlevel.plant_view import watch
+
+            def start_runtime() -> None:
+                recorder.start()
+                runtime.start(args.ticks, paced=True)
+
+            view = watch(
+                runtime,
+                args.model,
+                bundle.manifest.action.isaac_joint_names,
+                live=True,
+                fps=args.viewer_fps,
+                host=args.viewer_host,
+                port=args.viewer_port,
+                stats=runtime.stats,
+                on_ready=start_runtime,
+                should_stop=lambda: not runtime.running,
+            )
+        else:
+            recorder.start()
+            runtime.start(args.ticks, paced=True)
         runtime.wait()
     except KeyboardInterrupt:
         runtime.stop()
         runtime.wait()
+    except Exception:
+        runtime.stop()
+        runtime.wait()
+        raise
     finally:
         recorder.stop()
     telemetry_record = recorder.collect()
@@ -500,6 +540,8 @@ def _cmd_lowlevel_mujoco_native(args) -> int:
             else None
         ),
     }
+    if view is not None:
+        report["viewer"] = view
     if args.mpjpe:
         from embodied_control.lowlevel.metrics import oracle_tracking_metrics
 
@@ -541,7 +583,11 @@ def _cmd_lowlevel_planner_worker(args) -> int:
     if not command:
         print("FAIL: planner-worker needs a service command after --")
         return 2
-    service = StdioChunkService(command)
+    service = StdioChunkService(
+        command,
+        action_width=args.z_dim if args.reply == "latent_plan" else args.state_width,
+        window_frames=args.plan_slots if args.reply == "latent_plan" else 10,
+    )
     if args.reply == "latent_plan":
         # A latent head predicts the commands themselves: forward its plan and
         # let the controller walk it, one head call per plan.
@@ -1688,6 +1734,14 @@ def build_parser() -> argparse.ArgumentParser:
     lrun = lows.add_parser("run", help="run a lowlevel job (needs the lowlevel env)")
     lrun.add_argument("job")
     lrun.add_argument("--device", default="cpu")
+    lrun.add_argument(
+        "--viewer",
+        action="store_true",
+        help="serve a live browser viewer and pace MuJoCo to simulation time",
+    )
+    lrun.add_argument("--viewer-host", default="127.0.0.1")
+    lrun.add_argument("--viewer-port", type=int, default=8765)
+    lrun.add_argument("--viewer-fps", type=int, default=25)
     lrun.set_defaults(func=_cmd_lowlevel_run)
     lver = lows.add_parser("verify-bundle", help="replay a bundle's golden traces")
     lver.add_argument("bundle")
@@ -1722,6 +1776,12 @@ def build_parser() -> argparse.ArgumentParser:
     lnmj.add_argument("--command-source", choices=["vla", "oracle"], default="vla")
     lnmj.add_argument("--ticks", type=int, default=500)
     lnmj.add_argument("--lead-ticks", type=int, default=4)
+    lnmj.add_argument(
+        "--latent-plan",
+        action="store_true",
+        help="consume planner replies as [plan_slots, z_dim] latent plans",
+    )
+    lnmj.add_argument("--plan-slots", type=int, default=1)
     lnmj.add_argument("--policy-threads", type=int, default=4)
     lnmj.add_argument("--command-absent-ticks", type=int, default=100)
     lnmj.add_argument("--command-stale-ms", type=float, default=500.0)
@@ -1749,6 +1809,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     lnmj.add_argument("--telemetry-dir", default="")
     lnmj.add_argument("--telemetry-hz", type=float, default=1.0)
+    lnmj.add_argument("--viewer", action="store_true")
+    lnmj.add_argument("--viewer-host", default="127.0.0.1")
+    lnmj.add_argument("--viewer-port", type=int, default=8765)
+    lnmj.add_argument("--viewer-fps", type=int, default=25)
     lnmj.set_defaults(func=_cmd_lowlevel_mujoco_native)
     lnplanner = lows.add_parser(
         "planner-worker",

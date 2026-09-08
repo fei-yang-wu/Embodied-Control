@@ -61,6 +61,19 @@ pixi run doctor         # check host + dependencies
 The default env is intentionally light (no MuJoCo). The MuJoCo backend lives in
 the `sim` feature env, so eval commands run with `pixi run -e sim ...`.
 
+The Python G1 tracker can expose its MuJoCo state as an interactive browser
+view. `--viewer` prints a `VIEWER_URL`, keeps the pelvis centered by default,
+and paces the otherwise faster-than-real-time rollout to its 50 Hz simulation
+clock. Without the flag, batch evaluation remains unpaced.
+
+```bash
+pixi run -e lowlevel-sim ec lowlevel run /absolute/path/to/job.yaml --viewer
+```
+
+The default URL is `http://127.0.0.1:8765/`. Use `--viewer-port`,
+`--viewer-host`, and `--viewer-fps` to override it; keep the loopback host for
+local work or access it remotely through an SSH port forward.
+
 ### Native G1 tracker
 
 The low-latency G1 path is a separate scikit-build-core package. C++ owns the
@@ -114,6 +127,25 @@ pixi run -e native ec lowlevel mujoco-native /absolute/path/to/bundle \
   --request-slot /ec_g1_request --response-slot /ec_g1_response \
   --connect-slots
 ```
+
+A GR00T head trained to predict latent plans must use matching geometry on
+both processes. The `fsq64_10b` eval-kit head predicts three 64-value latent
+slots, each held for ten control ticks:
+
+```bash
+# Add to planner-worker before the `--` service-command separator:
+--reply latent_plan --z-dim 64 --plan-slots 3 --hold-steps 10
+
+# Add to mujoco-native:
+--latent-plan --plan-slots 3
+```
+
+Add `--viewer` to `mujoco-native` for an interactive browser view. It prints a
+`VIEWER_URL`, follows the pelvis by default, draws the base trajectory, and
+shows live planner latency, fault, deadline, displacement, and path-length
+status. The viewer reads one completed 36-float pose at its own rate and never
+touches the native MuJoCo data or either real-time thread. Use
+`--viewer-host`, `--viewer-port`, and `--viewer-fps` to override the defaults.
 
 For reference-streaming oracle evaluation, replace the GR00T worker with the
 oracle worker and select the source explicitly. This mode streams a 5 Hz
