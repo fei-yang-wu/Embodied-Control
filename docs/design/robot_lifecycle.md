@@ -2,7 +2,7 @@
 
 Status: software v1 implemented; hardware ladder pending
 Audience: embodied-control developers, G1 rig operators
-Last updated: 2026-09-02
+Last updated: 2026-09-08
 Depends on: `docs/design/robot_runtime_interface.md` (vendor axis, decided:
 `MotionSwitcherClient::ReleaseMode` + `rt/lowcmd`)
 
@@ -73,9 +73,11 @@ starting values, tuned during the hardware ladder in §6.
 
 Two sinks:
 
-- **`FAULT`**: from any state ≥ 2. Action is the DAMP frame; the reason is the
-  backend's latched fault code or the gate that failed. Leaving `FAULT` means
-  `RELEASED` and a fresh `PRECHECK`, never a resume.
+- **`FAULT`**: from any state ≥ 2. Action is the DAMP frame; after the writer
+  stops, the simulated gantry automatically takes the load because a fault
+  bypasses `HOLD`. Hardware still requires a fresh operator hoist ack. The
+  reason is the backend's latched fault code or the gate that failed. Leaving
+  `FAULT` means `RELEASED` and a fresh `PRECHECK`, never a resume.
 - **`ABORT`**: operator, from any state < 9. Same path: DAMP → RELEASED →
   optional restore.
 

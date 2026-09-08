@@ -793,6 +793,21 @@ class Lifecycle:
             self.tracker.stop()
         except RuntimeError:
             pass
+        self.hoisted_ack = False
+        self.lowered_ack = False
+        if self.hoist is not None and self.auto_ack:
+            try:
+                # A simulated fall bypasses HOLD, whose entry normally takes
+                # the load. Re-capture only after the writer is damped and
+                # stopped; hardware keeps requiring an explicit H instead.
+                self.hoist.hoist()
+                self.hoisted_ack = True
+                values["fault_hoist_requested"] = True
+                self._note("fault recovery: simulator hoist requested")
+            except Exception as exc:
+                values["fault_hoist_requested"] = False
+                values["fault_hoist_error"] = f"{type(exc).__name__}: {exc}"
+                self._note(f"hoist unavailable at FAULT: {exc}")
         previous = self.state
         self.state = LifecycleState.FAULT
         self._record(

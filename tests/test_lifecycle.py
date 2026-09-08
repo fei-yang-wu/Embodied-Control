@@ -458,11 +458,15 @@ def test_writer_damp_during_running_is_a_fault():
     lifecycle, tracker, vendor, hoist, clock = _lifecycle()
     assert lifecycle.auto().ok
     assert lifecycle.go().ok
+    assert hoist.calls[-1] == "slack"
     tracker.pending_writer_damp = True
     clock.sleep(0.1)
     lifecycle.poll()
     assert lifecycle.state is S.FAULT
     assert "writer damped" in lifecycle.fault_reason
+    assert hoist.calls[-1] == "hoist"
+    assert lifecycle.hoisted_ack
+    assert lifecycle.log.transitions[-1].values["fault_hoist_requested"] is True
 
 
 def test_damp_then_recover_to_damp_keeps_our_writer():
@@ -487,6 +491,7 @@ def test_fault_recovery_needs_a_fresh_hoist_ack_before_silencing_the_writer():
     assert not lifecycle.auto().ok
     assert lifecycle.state is S.FAULT
     assert lifecycle.hoisted_ack is False
+    assert hoist.calls.count("hoist") == 1
 
     result = lifecycle.recover()
 
