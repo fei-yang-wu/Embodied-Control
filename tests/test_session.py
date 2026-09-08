@@ -6,6 +6,7 @@ import json
 
 import pytest
 
+from embodied_control.console import KEY_DOWN, KEY_ENTER
 from embodied_control.robot import FakeRobotRuntime, RobotMode
 from embodied_control.robot.lifecycle import (
     Lifecycle,
@@ -22,7 +23,7 @@ from embodied_control.robot.session import (
     planner_worker_argv,
 )
 from embodied_control.robot.shell import build_session_bindings
-from embodied_control.robot.tui import render
+from embodied_control.robot.tui import LifecycleTui, render
 from test_lifecycle import POSE, FakeClock, FakeHoist, StubTracker
 
 CATALOG = ["hurry_idle_001_A277", "walk_arc_cw_001", "wave_002"]
@@ -134,6 +135,9 @@ def test_selection_keys_cycle_motions_and_clamp_frames():
     assert session.toggle_mode().ok and session.selection.mode == "vla"
     assert session.toggle_mode().ok and session.selection.mode == "oracle"
     assert not session.select_mode("teleop").ok
+    assert session.select_motion(CATALOG[1]).ok
+    assert session.selection.motion == CATALOG[1]
+    assert not session.select_motion("missing-motion").ok
 
 
 def test_selection_cycles_trackers_and_marks_build_stale():
@@ -217,6 +221,15 @@ def test_episode_telemetry_is_recorded_at_hold(tmp_path):
 
 def test_session_render_shows_selection_progress_and_comm():
     session, built, clock = _session()
+    tui = LifecycleTui(session, build_session_bindings(session), clock=clock.now)
+    assert tui.handle("m")
+    picker = "\n".join(tui.frame(90, 30))
+    assert "MOTION SELECTOR" in picker and CATALOG[0] in picker
+    assert tui.handle(KEY_DOWN) and tui.handle(KEY_ENTER)
+    selection = tui._queue.get_nowait()
+    assert selection is not None
+    selection.action()
+    assert session.selection.motion == CATALOG[1]
     assert session.rebuild().ok
     assert session.auto().ok
     assert session.go().ok
@@ -224,7 +237,7 @@ def test_session_render_shows_selection_progress_and_comm():
     snapshot = session.snapshot()
     rows = render(snapshot, build_session_bindings(session), [], width=140, rates={"state_hz": 500.0, "publish_hz": 500.0, "planner_hz": 5.0})
     text = "\n".join(rows)
-    assert "MODE oracle" in text and CATALOG[0] in text
+    assert "MODE oracle" in text and CATALOG[1] in text
     assert "REFERENCE  [" in text and "%" in text
     assert "LOWSTATE    500 Hz" in text and "PLANNER    5.0 Hz" in text
     assert "o mode" in text and "p planner" in text

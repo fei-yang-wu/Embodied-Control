@@ -327,7 +327,11 @@ class ExperimentSession:
         except ValueError:
             index = -1
         index = (index + step) % len(self.config.catalog)
-        motion = self.config.catalog[index]
+        return self.select_motion(self.config.catalog[index])
+
+    def select_motion(self, motion: str) -> GateResult:
+        if motion not in self.config.catalog:
+            return self._refuse(f"unknown motion {motion}")
         frame = min(self.selection.start_frame, self.motion_length(motion) - 1)
         return self._reconfigure(replace(self.selection, motion=motion, start_frame=max(0, frame)))
 
@@ -605,6 +609,7 @@ class ExperimentSession:
             "motion_index": (self.config.catalog.index(self.selection.motion) + 1)
             if self.selection.motion in self.config.catalog else 0,
             "catalog_size": len(self.config.catalog),
+            "motions": list(self.config.catalog),
             "start_frame": self.selection.start_frame,
             "motion_length": self.motion_length(self.selection.motion),
             "planner": planner,

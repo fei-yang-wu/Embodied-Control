@@ -1093,12 +1093,11 @@ def _footer_rows(
     groups: list[Row] = [[Span(" ^D DAMP ", "pill.bad")]]
     groups += [_key_hint(key, label) for key, label in (("/", "commands"), ("?", "help"))]
     groups.append([Span("  │", "rule")])
+    groups += [_key_hint("o", "mode"), _key_hint("t/T", "tracker")]
+    groups.append(_key_hint("m", "motion"))
     groups += [
         _key_hint(key, label)
         for key, label in (
-            ("o", "mode"),
-            ("t/T", "tracker"),
-            ("m/M", "motion"),
             ("f/F", "frame"),
             ("p", "planner"),
             ("r", "rebuild"),
@@ -1147,6 +1146,67 @@ def _footer_rows(
     return rows
 
 
+def _motion_picker_rows(
+    snapshot: dict,
+    width: int,
+    height: int,
+    options: tuple[str, ...],
+    cursor: int,
+) -> list[Row]:
+    session = snapshot.get("session", {})
+    selected = str(session.get("motion", ""))
+    cursor = max(0, min(len(options) - 1, cursor))
+    title: Row = [
+        Span(" ▌EMBODIED-CONTROL", "bar"),
+        Span("  MOTION SELECTOR ", "bar.dim"),
+    ]
+    position = [Span(f" {cursor + 1}/{len(options)} ", "pill.accent")]
+    rows = [
+        pad(title + [Span(" " * max(0, width - _len(title) - _len(position)), "bar.dim")]
+            + position, width, "bar.dim"),
+        pad(
+            [
+                Span(" current ", "label"),
+                Span(selected or "none", "value"),
+                Span("   choose one; press r afterwards to build it", "dim"),
+            ],
+            width,
+        ),
+        _rule("MOTIONS", width),
+    ]
+    footer = [
+        _rule("SELECT", width),
+        pad(
+            [
+                Span(" ↑/↓ ", "key"),
+                Span("move  ", "dim"),
+                Span(" ENTER ", "key"),
+                Span("choose  ", "dim"),
+                Span(" ESC ", "key"),
+                Span("back  ", "dim"),
+                Span(" ^D DAMP ", "pill.bad"),
+            ],
+            width,
+        ),
+    ]
+    room = max(0, height - len(rows) - len(footer))
+    start = max(0, min(cursor - room // 2, len(options) - room))
+    for index in range(start, min(len(options), start + room)):
+        option = options[index]
+        here = index == cursor
+        current = option == selected
+        row: Row = [
+            Span(f" {MARK_NOW if here else ' '} ", "accent" if here else "text"),
+            Span(f"{index + 1:>3} ", "rule"),
+            Span(option, "state.now" if here else "text"),
+        ]
+        if current:
+            row += [Span("  current", "ok")]
+        rows.append(pad(row, width))
+    rows += [pad([], width) for _ in range(room - min(room, len(options)))]
+    return (rows + footer)[:height]
+
+
 def render_rows(
     snapshot: dict,
     bindings: list[KeyBinding],
@@ -1159,6 +1219,7 @@ def render_rows(
     trends: dict | None = None,
     command: "CommandLine | str | None" = None,
     help_open: bool = False,
+    motion_picker: tuple[tuple[str, ...], int] | None = None,
     assistant: list[str] | None = None,
     agent_label: str = "off",
 ) -> list[Row]:
@@ -1167,6 +1228,9 @@ def render_rows(
     line = CommandLine() if isinstance(command, str) else command
     if isinstance(command, str):
         line.text, line.cursor = command, len(command)
+    if motion_picker is not None:
+        options, cursor = motion_picker
+        return _motion_picker_rows(snapshot, width, height, options, cursor)
     if help_open:
         return _help_rows(bindings, width, height, agent_label)
 
@@ -1320,6 +1384,8 @@ class LifecycleTui:
         }
         self._line: CommandLine | None = None
         self._help_open = False
+        self._motion_options: tuple[str, ...] | None = None
+        self._motion_index = 0
         self._history: list[str] = []
         self._diagnose = diagnose
         # Called once on each console thread: the display and the key handler
@@ -1352,6 +1418,7 @@ class LifecycleTui:
             # is never text and never waits.
             self._line = None
             self._help_open = False
+            self._motion_options = None
             with self._action_lock:
                 first_request = not self._damp_requested.is_set()
                 self._damp_requested.set()
@@ -1367,6 +1434,8 @@ class LifecycleTui:
             self.lifecycle.emergency_damp()
             self.note("^D: damp stored in the writer", "damp")
             return True
+        if self._motion_options is not None:
+            return self._handle_motion_picker(key)
         if self._line is not None:
             return self._handle_command_key(key)
         if key == "/":
@@ -1382,6 +1451,8 @@ class LifecycleTui:
             return True
         if key == KEY_SPACE:
             self.note("SPACE does nothing here; damp is Ctrl-D")
+            return True
+        if key == "m" and self._open_motion_picker():
             return True
         if key == "q":
             current = self._current_action()
@@ -1401,6 +1472,53 @@ class LifecycleTui:
         if not self._enqueue(binding):
             current = self._current_action()
             self.note(f"busy with '{current}'; '{key}' ignored")
+        return True
+
+    def _open_motion_picker(self) -> bool:
+        session = self.lifecycle.snapshot().get("session", {})
+        options = tuple(str(item) for item in session.get("motions", ()))
+        if not options:
+            return False
+        current = self._current_action()
+        if current:
+            self.note(f"busy with '{current}'; 'm' ignored")
+            return True
+        selected = str(session.get("motion", ""))
+        self._motion_options = options
+        self._motion_index = options.index(selected) if selected in options else 0
+        self._help_open = False
+        self.assistant.clear()
+        return True
+
+    def _handle_motion_picker(self, key: str) -> bool:
+        assert self._motion_options is not None
+        options = self._motion_options
+        if key in {KEY_ESCAPE, "\x1b"}:
+            self._motion_options = None
+            return True
+        if key == KEY_UP:
+            self._motion_index = (self._motion_index - 1) % len(options)
+            return True
+        if key == KEY_DOWN:
+            self._motion_index = (self._motion_index + 1) % len(options)
+            return True
+        if key not in {KEY_ENTER, "\r", "\n"}:
+            return True
+        motion = options[self._motion_index]
+        self._motion_options = None
+        select = getattr(self.lifecycle, "select_motion", None)
+        if select is None:
+            self.note("motion selection is unavailable", "fail")
+            return True
+
+        def apply_selection() -> None:
+            result = select(motion)
+            if not result.ok:
+                raise RuntimeError(result.detail)
+
+        binding = KeyBinding("m", f"select motion {motion}", apply_selection, "select")
+        if not self._enqueue(binding):
+            self.note(f"busy with '{self._current_action()}'; motion selection ignored")
         return True
 
     def _current_action(self) -> str:
@@ -1568,6 +1686,8 @@ class LifecycleTui:
             trends={name: list(values) for name, values in self._trends.items()},
             command=self._line,
             help_open=self._help_open,
+            motion_picker=(self._motion_options, self._motion_index)
+            if self._motion_options is not None else None,
             assistant=self.assistant,
             agent_label=self.agent_label,
         )
