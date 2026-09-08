@@ -1446,6 +1446,7 @@ class Lifecycle:
             try:
                 self.hoist.hoist()
                 self.hoisted_ack = True
+                self.lowered_ack = False
                 detail = "frozen on the last target; strap taut again"
                 clearance = self._measured_clearance()
                 if clearance is not None:

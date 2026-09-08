@@ -50,9 +50,9 @@ def test_render_marks_the_current_rung_and_fits_the_width():
     assert all(len(row) == 90 for row in rows)
     text = "\n".join(rows)
     # The current rung is marked and numbered; the ones behind it are ticked.
-    assert "▸  6 POSE SETTLED" in text
-    assert "✓  5 START POSE RAMP" in text
-    assert "·  7 LOWERED" in text
+    assert ">  6 POSE SETTLED" in text
+    assert "+  5 START POSE RAMP" in text
+    assert ".  7 LOWERED" in text
     assert "^D DAMP" in text
     assert " POSE_SETTLED " in text
     assert "vendor released" in text
@@ -297,13 +297,14 @@ def test_the_prompt_keeps_the_frame_the_same_shape_however_it_is_typed():
     snapshot, bindings = lifecycle.snapshot(), build_lifecycle_bindings(lifecycle)
     for height in (22, 24, 30, 40):
         shapes = set()
-        for command in (None, "", "s", "zzz"):
-            rows = render(
-                snapshot, bindings, ["one", "two"],
-                width=100, height=height, command=command,
-            )
-            controls = next(i for i, row in enumerate(rows) if "CONTROLS" in row)
-            shapes.add((len(rows), controls))
+        for notes in ([], ["one", "two"], [f"line {i}" for i in range(10)]):
+            for command in (None, "", "s", "zzz"):
+                rows = render(
+                    snapshot, bindings, notes,
+                    width=100, height=height, command=command,
+                )
+                controls = next(i for i, row in enumerate(rows) if "CONTROLS" in row)
+                shapes.add((len(rows), controls))
         assert len(shapes) == 1, (height, shapes)
 
 
@@ -446,17 +447,24 @@ def test_fault_and_links_carry_their_own_tone():
     assert "bad" in styles and "pill.bad" in styles
     # One bad link does not colour its neighbours.
     snapshot = {"writer": {"crc_errors": 4}, "control": {}}
-    row = comm_rows(snapshot, {"state_hz": 500.0, "publish_hz": 500.0}, None)[0]
-    dots = [span.style for span in row if span.text.strip() in {"•", "!"}]
+    link_rows = comm_rows(
+        snapshot, {"state_hz": 500.0, "publish_hz": 500.0}, None
+    )
+    dots = [
+        span.style
+        for row in link_rows
+        for span in row
+        if span.text.strip() in {"*", "!"}
+    ]
     assert dots == ["bad", "ok", "ok"]
 
 
-def test_links_stack_when_the_terminal_is_narrow():
+def test_links_keep_the_same_height_at_every_terminal_width():
     from embodied_control.robot.tui import comm_rows
 
     snapshot = {"writer": {}, "control": {}}
     rates = {"state_hz": 500.0, "publish_hz": 500.0, "planner_hz": 5.0}
-    assert len(comm_rows(snapshot, rates, None, width=140)) == 1
+    assert len(comm_rows(snapshot, rates, None, width=140)) == 3
     assert len(comm_rows(snapshot, rates, None, width=90)) == 3
 
 

@@ -316,6 +316,8 @@ def test_happy_path_hoist_to_standing(tmp_path):
     _run_to_hold(lifecycle, tracker, clock)
     assert tracker.mode == WRITER_HOLD
     assert not tracker.running
+    assert lifecycle.hoisted_ack
+    assert not lifecycle.lowered_ack
     # Pinned for the probe, pinned again at go, released once the blend is in.
     assert tracker.reference_paused == [True, True, False]
 

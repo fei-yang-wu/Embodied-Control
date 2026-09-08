@@ -18,6 +18,7 @@ refreshing from a lock-free snapshot.
 
 from __future__ import annotations
 
+import math
 import queue
 import re
 import textwrap
@@ -50,15 +51,21 @@ from embodied_control.robot.lifecycle import (
     LifecycleState,
 )
 
-DISPLAY_ORDER: tuple[LifecycleState, ...] = tuple(LADDER[1:]) + (
+ARMING_STATES: tuple[LifecycleState, ...] = tuple(LADDER[1:])
+EXECUTION_STATES: tuple[LifecycleState, ...] = (
     LifecycleState.BLEND_IN,
     LifecycleState.RUNNING,
     LifecycleState.HOLD,
+)
+RECOVERY_STATES: tuple[LifecycleState, ...] = (
     LifecycleState.DAMP,
     LifecycleState.RELEASED,
     LifecycleState.VENDOR_RESTORED,
     LifecycleState.VENDOR_STAND,
     LifecycleState.STANDING,
+)
+DISPLAY_ORDER: tuple[LifecycleState, ...] = (
+    ARMING_STATES + EXECUTION_STATES + RECOVERY_STATES
 )
 
 HOIST_MODE_NAMES = {0: "slack", 1: "hoisted", 2: "lowered"}
@@ -134,19 +141,12 @@ SPARK = "▁▂▃▄▅▆▇█"
 # Partial blocks: a bar then moves every eighth of a cell, not every cell.
 BLOCKS = " ▏▎▍▌▋▊▉█"
 
-# Anything that has to line up column-wise is ASCII or Latin-1. Dingbats and
-# Geometric Shapes (✓ U+2713, ● U+25CF) are missing from many monospace fonts,
-# and the fallback glyph arrives at a different advance width, which walks the
-# column separator sideways row by row. Blocks and box drawing stay: they are
-# the one non-Latin range a terminal font reliably ships, and they only ever
-# appear at the end of a field.
-# The console targets an English terminal, so any single-cell glyph is fine
-# here. Every row is padded to an exact cell count, and a mark that is not
-# one cell wide would shift the column separator.
-MARK_DONE = "✓"
-MARK_NOW = "▸"
-MARK_TODO = "·"
-MARK_LINK_OK = "•"
+# These marks sit before fixed columns. Font fallback can render Unicode
+# dingbats at a different width than curses counted and leave stale cells.
+MARK_DONE = "+"
+MARK_NOW = ">"
+MARK_TODO = "."
+MARK_LINK_OK = "*"
 MARK_LINK_BAD = "!"
 
 
@@ -378,10 +378,11 @@ def _log_rows(
     if height == 1:
         return [_rule("LOG", width)]
     visible = visual[-(height - 1) :]
-    return [_rule("LOG", width)] + [
+    rows = [_rule("LOG", width)] + [
         pad([Span(f" {line}", LOG_STYLES.get(level, "dim"))], width)
         for line, level in visible
     ]
+    return rows + [pad([], width) for _ in range(height - len(rows))]
 
 
 def sparkline(values: Iterable[float], width: int = 8) -> str:
@@ -441,7 +442,7 @@ def _rule(title: str, width: int, *, style: str = "rule") -> Row:
 def _link(
     name: str, hz: float | None, healthy: bool, trend: Iterable[float], detail: Row
 ) -> Row:
-    if hz is None:
+    if hz is None or not math.isfinite(hz) or hz < 0.0:
         rate = "   -- Hz"
     else:
         # A planner runs at single-digit Hz; a wire runs at hundreds.
@@ -455,12 +456,6 @@ def _link(
         Span(f" {rate} ", "value"),
         Span(sparkline(trend, 6), "accent"),
     ] + detail
-
-
-# Under this width the three links stop sharing a row: a truncated link is
-# worse than a taller panel, because the number that got cut is the one an
-# operator is looking for.
-LINKS_ONE_ROW = 118
 
 
 def comm_rows(
@@ -510,12 +505,7 @@ def comm_rows(
             [Span(f" age {age_text}", "dim")] + count("stale", stale),
         ),
     ]
-    if width < LINKS_ONE_ROW:
-        return links
-    joined: Row = []
-    for index, link in enumerate(links):
-        joined += ([Span("  │", "rule")] if index else []) + link
-    return [joined]
+    return links
 
 
 def comm_lines(snapshot: dict, rates: dict | None) -> list[str]:
@@ -539,15 +529,20 @@ def reference_row(snapshot: dict, width: int) -> Row | None:
     )
     fraction = played / total
     cells = max(12, min(44, width - 46))
-    return [
-        Span(" REFERENCE  ", "label"),
-        Span("[", "rule"),
-        Span(bar_cells(fraction, cells), "accent"),
-        Span("]", "rule"),
-        Span(f" {fraction * 100:3.0f}%", "value"),
-        Span(f"  frame {start + played}/{length}", "dim"),
-        Span(f"  ({played}/{total} played)", "dim"),
-    ]
+    return _fit(
+        [
+            [
+                Span(" REFERENCE  ", "label"),
+                Span("[", "rule"),
+                Span(bar_cells(fraction, cells), "accent"),
+                Span("]", "rule"),
+                Span(f" {fraction * 100:3.0f}%", "value"),
+            ],
+            [Span(f"  frame {start + played}/{length}", "dim")],
+            [Span(f"  ({played}/{total} played)", "dim")],
+        ],
+        width,
+    )
 
 
 def reference_line(snapshot: dict) -> str | None:
@@ -567,12 +562,14 @@ def _state_cell(entry: LifecycleState, current: int, index: int, width: int) -> 
     # it makes the climb legible when every label is dim.
     rung = index < len(LADDER) - 1
     number = f"{index + 1:>2} " if rung else "   "
-    if not rung and index > current:
-        mark, tone = " ", "rule"
     return pad(
         [Span(f" {mark} ", tone), Span(number, "rule"), Span(label, text_style)],
         width,
     )
+
+
+def _phase_cell(label: str, width: int) -> Row:
+    return pad([Span(f" {label}", "section")], width)
 
 
 def _fit(groups: list[Row], width: int) -> Row:
@@ -606,15 +603,21 @@ def _live_rows(snapshot: dict) -> list[Row]:
     # ramp-fault scale, 2 rad/s is twice the init ramp cap.
     track_cells, track_tone = gauge(tracking, 1.0)
     speed_cells, speed_tone = gauge(speed, 2.0)
-    rows = [
-        _metric(
-            "publishes",
-            f"{ws.get('publishes', 0)}",
-            trail=[
-                Span("  fail ", "label"),
-                Span(str(fails), "value" if fails == 0 else "bad"),
-            ],
+    ack_row = [
+        Span(" ack hoist/lower", "label"),
+        Span(
+            "  yes" if snapshot.get("hoisted_ack") else "   no",
+            "ok" if snapshot.get("hoisted_ack") else "dim",
         ),
+        Span("/", "rule"),
+        Span(
+            "yes" if snapshot.get("lowered_ack") else "no",
+            "ok" if snapshot.get("lowered_ack") else "dim",
+        ),
+    ]
+    # Short terminals clip the tail, so ownership and safety evidence stays
+    # ahead of counters and post-run diagnostics.
+    rows = [
         _metric(
             "gate",
             "OPEN" if gate_open else "closed",
@@ -624,9 +627,6 @@ def _live_rows(snapshot: dict) -> list[Row]:
                 Span(str(crc), "value" if crc == 0 else "bad"),
             ],
         ),
-        _metric("control ticks", f"{st.get('control_ticks', 0)}"),
-        _metric("reference", f"{st.get('reference_ticks', 0)}"),
-        _metric("planner replies", f"{st.get('planner_responses', 0)}"),
         [
             Span(" faults hw/wd   ", "label"),
             Span(f"{hardware:>4}", "value" if hardware == 0 else "bad"),
@@ -635,6 +635,23 @@ def _live_rows(snapshot: dict) -> list[Row]:
             Span("  reason ", "label"),
             Span(str(ws.get("state_fault_reason", 0)), "dim"),
         ],
+        ack_row,
+    ]
+    hoist = snapshot.get("hoist")
+    if hoist:
+        owned = bool(hoist.get("owned"))
+        rows.append(
+            [
+                Span(" plant           ", "label"),
+                Span(
+                    HOIST_MODE_NAMES.get(int(hoist.get("hoist_mode", -1)), "?"), "value"
+                ),
+                Span("  vendor ", "label"),
+                Span("owns" if owned else "released", "warn" if owned else "ok"),
+                Span(f"  fsm {hoist.get('fsm_id', '-')}", "dim"),
+            ]
+        )
+    rows += [
         _metric(
             "joint speed",
             f"{speed:.3f}",
@@ -645,6 +662,17 @@ def _live_rows(snapshot: dict) -> list[Row]:
             f"{tracking:.3f}",
             trail=[Span(" rad   ", "dim"), Span(track_cells, track_tone)],
         ),
+        _metric(
+            "publishes",
+            f"{ws.get('publishes', 0)}",
+            trail=[
+                Span("  fail ", "label"),
+                Span(str(fails), "value" if fails == 0 else "bad"),
+            ],
+        ),
+        _metric("control ticks", f"{st.get('control_ticks', 0)}"),
+        _metric("planner replies", f"{st.get('planner_responses', 0)}"),
+        _metric("reference", f"{st.get('reference_ticks', 0)}"),
         _metric(
             "ramp error",
             f"{ramp:.3f}",
@@ -665,33 +693,7 @@ def _live_rows(snapshot: dict) -> list[Row]:
             f"{ws.get('blend_ticks_remaining', 0)}",
             trail=[Span(" ticks", "dim")],
         ),
-        [
-            Span(" ack hoist/lower", "label"),
-            Span(
-                "  yes" if snapshot.get("hoisted_ack") else "   no",
-                "ok" if snapshot.get("hoisted_ack") else "dim",
-            ),
-            Span("/", "rule"),
-            Span(
-                "yes" if snapshot.get("lowered_ack") else "no",
-                "ok" if snapshot.get("lowered_ack") else "dim",
-            ),
-        ],
     ]
-    hoist = snapshot.get("hoist")
-    if hoist:
-        owned = bool(hoist.get("owned"))
-        rows.append(
-            [
-                Span(" plant           ", "label"),
-                Span(
-                    HOIST_MODE_NAMES.get(int(hoist.get("hoist_mode", -1)), "?"), "value"
-                ),
-                Span("  vendor ", "label"),
-                Span("owns" if owned else "released", "warn" if owned else "ok"),
-                Span(f"  fsm {hoist.get('fsm_id', '-')}", "dim"),
-            ]
-        )
     return rows
 
 
@@ -922,40 +924,105 @@ def _session_rows(snapshot: dict, width: int) -> list[Row]:
 def _body_rows(snapshot: dict, width: int) -> list[Row]:
     state = str(snapshot.get("state", "?"))
     try:
-        current = DISPLAY_ORDER.index(LifecycleState(state))
+        active_state = LifecycleState(state)
+    except ValueError:
+        active_state = None
+    try:
+        current = DISPLAY_ORDER.index(active_state) if active_state is not None else -1
     except ValueError:
         current = -1
     live = _live_rows(snapshot)
     rows: list[Row] = []
     wide = width >= 96
     ladder_width = min(62, max(54, width - 40)) if wide else 34
-    columns = 2 if wide else 1
-    per_column = (len(DISPLAY_ORDER) + columns - 1) // columns
-    cell_width = (ladder_width - 1) // columns
+    panel_title = "LIFECYCLE"
+    if not wide:
+        if active_state in ARMING_STATES or active_state is LifecycleState.IDLE:
+            panel_title = "ARMING"
+        elif active_state in EXECUTION_STATES:
+            panel_title = "EXECUTION"
+        elif active_state in RECOVERY_STATES:
+            panel_title = "RECOVERY"
+        elif active_state is LifecycleState.FAULT:
+            panel_title = "FAULT / RECOVERY"
     rows.append(
         pad(
-            pad(_rule("LIFECYCLE", ladder_width - 1), ladder_width - 1)
+            pad(_rule(panel_title, ladder_width - 1), ladder_width - 1)
             + [Span("│", "rule")]
             + _rule("TELEMETRY", width - ladder_width),
             width,
         )
     )
-    for index in range(max(per_column, len(live))):
-        left: Row = []
-        for column in range(columns):
-            entry_index = index + column * per_column
-            room = (
-                cell_width
-                if column + 1 < columns
-                else ladder_width - 1 - cell_width * column
+
+    lifecycle_width = ladder_width - 1
+    if wide:
+        first_width = (lifecycle_width - 1) // 2
+        second_width = lifecycle_width - first_width - 1
+        divider = [Span("│", "rule")]
+        left_rows = [
+            _phase_cell("ARMING", first_width)
+            + divider
+            + _phase_cell("EXECUTION", second_width)
+        ]
+        right: list[LifecycleState | str | None] = [
+            *EXECUTION_STATES,
+            "RECOVERY",
+            *RECOVERY_STATES,
+            None,
+        ]
+        for index, entry in enumerate(ARMING_STATES):
+            global_index = DISPLAY_ORDER.index(entry)
+            first = _state_cell(entry, current, global_index, first_width)
+            other = right[index]
+            if isinstance(other, LifecycleState):
+                other_index = DISPLAY_ORDER.index(other)
+                second = _state_cell(
+                    other, current, other_index, second_width
+                )
+            elif other is None:
+                second = pad([], second_width)
+            else:
+                second = _phase_cell(other, second_width)
+            left_rows.append(first + divider + second)
+    elif active_state in EXECUTION_STATES:
+        left_rows = [_phase_cell("ARMING (collapsed)", lifecycle_width)]
+        left_rows.extend(
+            _state_cell(
+                entry,
+                current,
+                DISPLAY_ORDER.index(entry),
+                lifecycle_width,
             )
-            # `index` runs past per_column when telemetry is the longer side;
-            # without the first test the tail of column one repeats column two.
-            left += (
-                _state_cell(DISPLAY_ORDER[entry_index], current, entry_index, room)
-                if index < per_column and entry_index < len(DISPLAY_ORDER)
-                else pad([], room)
+            for entry in EXECUTION_STATES
+        )
+        left_rows.append(_phase_cell("RECOVERY follows", lifecycle_width))
+    elif active_state in RECOVERY_STATES or active_state is LifecycleState.FAULT:
+        left_rows = [
+            _phase_cell("ARMING (collapsed)", lifecycle_width),
+            _phase_cell("EXECUTION (collapsed)", lifecycle_width),
+        ]
+        left_rows.extend(
+            _state_cell(
+                entry,
+                current,
+                DISPLAY_ORDER.index(entry),
+                lifecycle_width,
             )
+            for entry in RECOVERY_STATES
+        )
+    else:
+        left_rows = [
+            _state_cell(
+                entry,
+                current,
+                DISPLAY_ORDER.index(entry),
+                lifecycle_width,
+            )
+            for entry in ARMING_STATES
+        ]
+
+    for index in range(max(len(left_rows), len(live))):
+        left = left_rows[index] if index < len(left_rows) else pad([], lifecycle_width)
         right = live[index] if index < len(live) else []
         rows.append(pad(left + [Span("│", "rule")] + right, width))
     return rows
@@ -972,6 +1039,7 @@ def _key_hint(key: str, label: str) -> Row:
 #: bottom row falls off and the prompt lands inside the key legend. Reserving
 #: the row costs one line and keeps every frame the same shape.
 PROMPT_ROWS = 2
+LOG_PANEL_ROWS = 4
 
 
 def _prompt_rows(line: "CommandLine | None", width: int) -> list[Row]:
@@ -1143,14 +1211,14 @@ def render_rows(
 
     footer = _footer_rows(snapshot, width, busy, line)
     log_lines = _visual_log_lines(notes, width)
-    log_height = min(8, len(log_lines) + 1)
-    room = max(0, height - len(rows) - len(footer) - log_height)
+    available = max(0, height - len(rows) - len(footer))
+    log_height = min(LOG_PANEL_ROWS, available)
+    room = max(0, available - log_height)
     # A lone panel header helps nobody; below three rows the ladder is out.
-    if room >= 3:
-        rows += _body_rows(snapshot, width)[:room]
+    body = _body_rows(snapshot, width)[:room] if room >= 3 else []
+    rows += body + [pad([], width) for _ in range(room - len(body))]
     rows += footer
-    if len(rows) < height:
-        rows += _log_rows(notes, width, height - len(rows), log_lines)
+    rows += _log_rows(notes, width, min(log_height, height - len(rows)), log_lines)
     return rows[:height]
 
 
@@ -1464,6 +1532,14 @@ class LifecycleTui:
             self._last_sample = (now, counters)
             return self._rates
         then, previous = self._last_sample
+        if now < then or any(
+            counters[name] < previous[name] for name in counters
+        ):
+            self._last_sample = (now, counters)
+            self._rates = {}
+            for values in self._trends.values():
+                values.clear()
+            return self._rates
         dt = now - then
         if dt >= 0.5:
             self._rates = {
@@ -1525,10 +1601,25 @@ class LifecycleTui:
         screen.keypad(True)  # arrows, Home/End and Backspace arrive as codes
         screen.nodelay(True)
         screen.timeout(int(self.refresh_seconds * 1000))
+        last_layout = None
         while True:
             height, width = screen.getmaxyx()
-            screen.erase()
             rows = self.frame_rows(width - 1, height)
+            layout = (
+                height,
+                width,
+                tuple(
+                    (index, span.text)
+                    for index, row in enumerate(rows)
+                    for span in row
+                    if span.style == "section"
+                ),
+            )
+            if layout == last_layout:
+                screen.erase()
+            else:
+                screen.clear()
+                last_layout = layout
             paint_rows(screen, rows, width - 1, height, styles, curses.error)
             try:
                 curses.curs_set(1 if self._line is not None else 0)
@@ -1546,7 +1637,8 @@ class LifecycleTui:
             if code == -1:
                 continue
             if code == curses.KEY_RESIZE:
-                screen.erase()
+                last_layout = None
+                screen.clear()
                 continue
             key = decode_key(curses, code)
             if key is None:
