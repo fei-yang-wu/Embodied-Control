@@ -35,6 +35,7 @@ from embodied_control.lowlevel.publishers.native_pull import (  # noqa: E402
 from embodied_control.lowlevel.publishers.native_oracle import (  # noqa: E402
     NativeOracleWorker,
 )
+from embodied_control.cli import build_parser  # noqa: E402
 from embodied_control.lowlevel.maths import (  # noqa: E402
     rotate_inverse,
     rot6d_from_quat,
@@ -215,6 +216,30 @@ def _state():
 
 def _shm_name(label):
     return f"/ec_{label}_{os.getpid()}_{uuid.uuid4().hex[:8]}"
+
+
+def test_mujoco_native_cli_accepts_latent_plan_geometry():
+    args = build_parser().parse_args(
+        [
+            "lowlevel",
+            "mujoco-native",
+            "bundle",
+            "--model",
+            "robot.xml",
+            "--response-slot",
+            "/response",
+            "--latent-plan",
+            "--plan-slots",
+            "3",
+            "--viewer",
+            "--viewer-port",
+            "9000",
+        ]
+    )
+    assert args.latent_plan
+    assert args.plan_slots == 3
+    assert args.viewer
+    assert args.viewer_port == 9000
 
 
 def _write_reference_tree(root, joint_names, frames=20):
@@ -767,8 +792,13 @@ def test_native_mujoco_loop_runs_independent_physics_schedule(
         command_stale_ms=1000.0,
     )
     publisher = ec_native.ShmCommandSlot(response_name, False)
+    assert loop.latest_state() is None
     loop.start(25, paced=True)
     time.sleep(0.05)
+    live_pose = loop.latest_state()
+    assert live_pose is not None
+    assert live_pose.shape == (36,)
+    assert live_pose[2] > 0.1
     publisher.publish(1, 1, np.ones(8, dtype=np.float32), 0.0)
     loop.wait()
 
@@ -1001,6 +1031,49 @@ def test_native_latent_plan_serves_every_slot_from_one_reply(
         if not np.isclose(value, plateaus[-1]):
             plateaus.append(value)
     assert len(plateaus) >= slots
+
+
+def test_native_latent_plan_ignores_a_reply_between_episode_runs(
+    tmp_path, latent_manifest
+):
+    bundle = _native_bundle(tmp_path, latent_manifest)
+    response_name = _shm_name("plan_restart_response")
+    request_name = _shm_name("plan_restart_request")
+    slots, hold = 3, 5
+    loop = NativeFakeLoop(
+        bundle,
+        response_slot=response_name,
+        request_slot=request_name,
+        hold_steps=hold,
+        lead_ticks=2,
+        plan_slots=slots,
+        latent_plan=True,
+        command_stale_ms=5000.0,
+    )
+    server = _PlanServer(
+        request_name,
+        response_name,
+        slots=slots,
+        z_dim=latent_manifest.command.z_dim,
+        reply_delay_s=0.05,
+    ).start()
+    try:
+        loop.start(1, paced=True)
+        loop.wait()
+        deadline = time.monotonic() + 2.0
+        while server.replies < 1 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert server.replies == 1
+
+        loop.start(slots * hold * 2, paced=True)
+        loop.wait()
+    finally:
+        server.stop()
+
+    stats = loop.stats()
+    assert stats["fault"] == 0
+    assert stats["control_ticks"] > 0
+    assert stats["stale_responses"] >= 1
 
 
 def test_native_latent_plan_allows_a_lead_longer_than_one_hold(

@@ -6,6 +6,7 @@ import json
 
 import pytest
 
+from embodied_control.console import KEY_DOWN, KEY_ENTER
 from embodied_control.robot import FakeRobotRuntime, RobotMode
 from embodied_control.robot.lifecycle import (
     Lifecycle,
@@ -20,9 +21,10 @@ from embodied_control.robot.session import (
     episode_summary,
     oracle_worker_argv,
     planner_worker_argv,
+    write_goal_file,
 )
 from embodied_control.robot.shell import build_session_bindings
-from embodied_control.robot.tui import render
+from embodied_control.robot.tui import LifecycleTui, render
 from test_lifecycle import POSE, FakeClock, FakeHoist, StubTracker
 
 CATALOG = ["hurry_idle_001_A277", "walk_arc_cw_001", "wave_002"]
@@ -73,7 +75,13 @@ class RecordingTracker(StubTracker):
         return [1000] * self.control_ticks
 
 
-def _session(tmp_path=None, *, wait_ok=True, planner_autostart=True):
+def _session(
+    tmp_path=None,
+    *,
+    wait_ok=True,
+    planner_autostart=True,
+    hot_switch_vla_goals=False,
+):
     clock = FakeClock()
     FakePlanner.started = []
     built: list[RecordingTracker] = []
@@ -97,12 +105,14 @@ def _session(tmp_path=None, *, wait_ok=True, planner_autostart=True):
             sleep=clock.sleep,
         )
 
+    goals: list[str] = []
     session = ExperimentSession(
         SessionConfig(
             catalog=list(CATALOG),
             motion_lengths=dict(LENGTHS),
             artifacts_dir=str(tmp_path) if tmp_path else None,
             planner_autostart=planner_autostart,
+            hot_switch_vla_goals=hot_switch_vla_goals,
         ),
         Selection(mode="oracle", motion=CATALOG[0], start_frame=0),
         planner_factory=FakePlanner,
@@ -111,7 +121,9 @@ def _session(tmp_path=None, *, wait_ok=True, planner_autostart=True):
         slot_names=["/ec_req", "/ec_res"],
         wait_slots=lambda names, timeout: wait_ok,
         unlink_slots=lambda names: None,
+        planner_goal=goals.append if hot_switch_vla_goals else None,
     )
+    session.goal_writes = goals
     return session, built, clock
 
 
@@ -134,6 +146,9 @@ def test_selection_keys_cycle_motions_and_clamp_frames():
     assert session.toggle_mode().ok and session.selection.mode == "vla"
     assert session.toggle_mode().ok and session.selection.mode == "oracle"
     assert not session.select_mode("teleop").ok
+    assert session.select_motion(CATALOG[1]).ok
+    assert session.selection.motion == CATALOG[1]
+    assert not session.select_motion("missing-motion").ok
 
 
 def test_selection_cycles_trackers_and_marks_build_stale():
@@ -157,6 +172,7 @@ def test_rebuild_with_autostart_starts_planner_and_tracker():
     assert len(built) == 1 and session.built_for == session.selection
     snapshot = session.snapshot()
     assert snapshot["session"]["built"] is True
+    assert snapshot["session"]["planner_running"] is True
 
     assert session.step_motion(1).ok
     assert session.snapshot()["session"]["built"] is False
@@ -180,6 +196,39 @@ def test_selection_is_refused_while_the_tracker_owns_the_joints():
     assert session.selection.motion == CATALOG[0]
     assert session.abort().ok
     assert session.step_motion(1).ok
+
+
+def test_vla_goal_switches_at_hold_without_reloading_planner_or_tracker():
+    session, built, clock = _session(hot_switch_vla_goals=True)
+    assert session.select_mode("vla").ok
+    assert session.rebuild().ok
+    _run_episode(session, clock)
+    planner = session.planner
+    tracker = session.tracker
+
+    assert session.step_motion(1).ok
+
+    assert session.selection.motion == CATALOG[1]
+    assert session.goal_writes[-1] == CATALOG[1]
+    assert session.planner is planner and session.tracker is tracker
+    assert session.snapshot()["session"]["built"] is True
+    assert len(FakePlanner.started) == 1
+    assert session.retake().ok
+
+
+def test_dead_planner_damps_an_owning_vla_tracker():
+    session, built, clock = _session(hot_switch_vla_goals=True)
+    assert session.select_mode("vla").ok
+    assert session.rebuild().ok
+    assert session.auto().ok
+    assert session.go().ok
+    session.planner._alive = False
+
+    session.poll()
+
+    assert session.lifecycle.state is S.FAULT
+    assert "force_damp" in session.tracker.calls
+    assert "planner exited" in session.lifecycle.fault_reason
 
 
 def test_planner_that_never_creates_slots_is_stopped():
@@ -216,6 +265,15 @@ def test_episode_telemetry_is_recorded_at_hold(tmp_path):
 
 def test_session_render_shows_selection_progress_and_comm():
     session, built, clock = _session()
+    tui = LifecycleTui(session, build_session_bindings(session), clock=clock.now)
+    assert tui.handle("m")
+    picker = "\n".join(tui.frame(90, 30))
+    assert "MOTION SELECTOR" in picker and CATALOG[0] in picker
+    assert tui.handle(KEY_DOWN) and tui.handle(KEY_ENTER)
+    selection = tui._queue.get_nowait()
+    assert selection is not None
+    selection.action()
+    assert session.selection.motion == CATALOG[1]
     assert session.rebuild().ok
     assert session.auto().ok
     assert session.go().ok
@@ -223,7 +281,7 @@ def test_session_render_shows_selection_progress_and_comm():
     snapshot = session.snapshot()
     rows = render(snapshot, build_session_bindings(session), [], width=140, rates={"state_hz": 500.0, "publish_hz": 500.0, "planner_hz": 5.0})
     text = "\n".join(rows)
-    assert "MODE oracle" in text and CATALOG[0] in text
+    assert "MODE oracle" in text and CATALOG[1] in text
     assert "REFERENCE  [" in text and "%" in text
     assert "LOWSTATE    500 Hz" in text and "PLANNER    5.0 Hz" in text
     assert "o mode" in text and "p planner" in text
@@ -233,8 +291,24 @@ def test_worker_argv_builders():
     oracle = oracle_worker_argv("/b", "/ref", "m1", 25, "/req", "/res")
     assert "oracle-worker" in oracle and "--create-slots" in oracle
     assert oracle[oracle.index("--start-frame") + 1] == "25"
-    vla = planner_worker_argv(["python", "svc.py"], "/req", "/res", reply="chunk")
+    vla = planner_worker_argv(
+        ["python", "svc.py"], "/req", "/res", reply="chunk",
+        goal="walk", goal_file="/tmp/goal.txt",
+    )
     assert vla[-2:] == ["python", "svc.py"] and "chunk" in vla
+    assert vla[vla.index("--goal") + 1] == "walk"
+    assert vla[vla.index("--goal-file") + 1] == "/tmp/goal.txt"
+
+
+def test_goal_file_is_one_atomic_line(tmp_path):
+    path = tmp_path / "planner_goal.txt"
+
+    write_goal_file(path, "walk_arc_cw")
+
+    assert path.read_text() == "walk_arc_cw\n"
+    assert list(tmp_path.iterdir()) == [path]
+    with pytest.raises(ValueError, match="one non-empty line"):
+        write_goal_file(path, "bad\ngoal")
 
 
 def test_lifecycle_job_resolves_named_tracker_paths(tmp_path):
@@ -279,20 +353,23 @@ def test_snapshot_never_blocks_on_the_plant_rpc():
             return {"owned": False, "fsm_id": 1, "hoisted": False, "hoist_mode": 0}
 
     session, built, clock = _session()
-    session.hoist = SlowHoist()
+    assert session.rebuild().ok
+    slow_hoist = SlowHoist()
+    session.hoist = slow_hoist
+    session.lifecycle.hoist = slow_hoist
 
     started = time.monotonic()
     for _ in range(20):
         assert session.snapshot()["hoist"] is None
     assert time.monotonic() - started < 0.2
-    assert session.hoist.calls == 0
+    assert slow_hoist.calls == 0
 
     session.refresh_hoist()
     assert session.snapshot()["hoist"]["hoist_mode"] == 0
     # And the watcher does not re-ask on every one of its 100 Hz ticks.
     for _ in range(10):
         session.refresh_hoist()
-    assert session.hoist.calls == 1
+    assert slow_hoist.calls == 1
 
 
 def test_sim_reset_closes_runtime_and_returns_to_no_tracker():
@@ -375,6 +452,6 @@ def test_the_operator_starts_the_vla_planner_and_then_builds():
 
     assert session.rebuild().ok
     assert len(built) == 1
-    # A fresh tracker numbers its requests from 1, so the planner restarts
-    # with it. What must not happen is a start nobody asked for.
-    assert len(FakePlanner.started) == 2
+    # No tracker has sent a request yet, so the expensive planner and its
+    # mailboxes can be reused instead of loading the checkpoint twice.
+    assert len(FakePlanner.started) == 1

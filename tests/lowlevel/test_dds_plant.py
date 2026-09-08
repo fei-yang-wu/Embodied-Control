@@ -220,12 +220,12 @@ try:
     deadline = time.monotonic() + 10.0
     while time.monotonic() < deadline:
         landed = plant.stats()
-        if landed["foot_clearance"] <= 0.01:
+        if landed["foot_clearance"] <= 0.002:
             break
         time.sleep(0.1)
-    assert landed["foot_clearance"] <= 0.01, landed
+    assert landed["foot_clearance"] <= 0.002, landed
     assert landed["base_height"] < hanging["base_height"] - 0.05, (hanging, landed)
-    assert client.status()["foot_clearance"] <= 0.01
+    assert client.status()["foot_clearance"] <= 0.002
 finally:
     plant.stop()
     plant.wait_for_stop()

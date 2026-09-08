@@ -9,6 +9,7 @@ import pytest
 
 mujoco = pytest.importorskip("mujoco")
 
+from embodied_control.cli import build_parser  # noqa: E402
 from embodied_control.lowlevel.bundle import ActionContract  # noqa: E402
 from embodied_control.lowlevel.contracts import JointCommand  # noqa: E402
 from embodied_control.lowlevel.envs.mujoco import MujocoBackend  # noqa: E402
@@ -119,6 +120,166 @@ def test_damp_rewrites_gains(backend, contract):
     for actuator_id in range(model.nu):
         assert model.actuator_gainprm[actuator_id, 0] == 0.0
         assert model.actuator_biasprm[actuator_id, 2] == pytest.approx(-8.0)
+
+
+def test_video_camera_follows_pelvis(tmp_path, contract, monkeypatch):
+    class FakeRenderer:
+        def __init__(self, model, *, height, width):
+            self.camera = None
+            self.closed = False
+
+        def update_scene(self, data, *, camera):
+            self.camera = camera
+
+        def render(self):
+            return np.zeros((480, 640, 3), dtype=np.uint8)
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(mujoco, "Renderer", FakeRenderer)
+    model_file = tmp_path / "tiny.xml"
+    model_file.write_text(_TINY)
+    recorded = MujocoBackend(
+        contract,
+        model_file,
+        timestep=0.005,
+        decimation=1,
+        record_video=True,
+        video_every_ticks=1,
+    )
+    recorded.data.qpos[0:3] = [2.0, -1.0, 0.76]
+    mujoco.mj_forward(recorded.model, recorded.data)
+    recorded.write_command(
+        JointCommand(
+            q_target=np.asarray(contract.default_joint_pos, np.float32),
+            kp=np.asarray(contract.stiffness, np.float32),
+            kd=np.asarray(contract.damping, np.float32),
+        )
+    )
+
+    np.testing.assert_allclose(
+        recorded._renderer.camera.lookat,
+        recorded.data.xpos[recorded._pelvis_body],
+    )
+    renderer = recorded._renderer
+    recorded.close()
+    assert renderer.closed
+
+
+def test_live_view_streams_state_and_paces_clock(tmp_path, contract, monkeypatch):
+    from embodied_control.lowlevel import plant_view
+    from embodied_control.lowlevel.envs import mujoco as backend_module
+
+    class FakeStreamer:
+        def __init__(self, model, *, host, port):
+            self.url = f"http://{host}:{port}/"
+            self.positions = []
+            self.closed = False
+
+        def capture(self, data):
+            self.positions.append(data.xpos.copy())
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(plant_view, "MujocoStreamer", FakeStreamer)
+    model_file = tmp_path / "tiny.xml"
+    model_file.write_text(_TINY)
+    viewed = MujocoBackend(
+        contract,
+        model_file,
+        timestep=0.005,
+        decimation=1,
+        viewer=True,
+        viewer_port=0,
+        viewer_fps=50,
+    )
+    viewed.data.qpos[0:3] = [2.0, -1.0, 0.76]
+    mujoco.mj_forward(viewed.model, viewed.data)
+    viewed.write_command(
+        JointCommand(
+            q_target=np.asarray(contract.default_joint_pos, np.float32),
+            kp=np.asarray(contract.stiffness, np.float32),
+            kd=np.asarray(contract.damping, np.float32),
+        )
+    )
+    np.testing.assert_allclose(
+        viewed._viewer.positions[-1][viewed._pelvis_body],
+        viewed.data.xpos[viewed._pelvis_body],
+    )
+
+    viewed._clock._started_at = 100.0
+    monkeypatch.setattr(backend_module.time, "monotonic", lambda: 100.01)
+    delays = []
+    monkeypatch.setattr(backend_module.time, "sleep", delays.append)
+    viewed.clock().wait_for_tick(1, 50)
+    assert delays == [pytest.approx(0.01)]
+
+    streamer = viewed._viewer
+    viewed.close()
+    assert streamer.closed
+
+
+def test_watch_forwards_native_status_and_reports_trajectory(monkeypatch):
+    from embodied_control.lowlevel import plant_view
+
+    class FakePlant:
+        calls = 0
+
+        def latest_state(self):
+            self.calls += 1
+            return np.zeros(36, dtype=np.float32)
+
+    class FakePuppet:
+        def __init__(self, model_path, joint_names):
+            self.model = object()
+            self.data = object()
+            self.poses = []
+
+        def pose(self, row):
+            self.poses.append(row)
+
+    class FakeStreamer:
+        def __init__(self, model, *, host, port):
+            self.url = f"http://{host}:{port}/"
+            self.trajectory_samples = 1
+            self.path_length = 2.5
+            self.statuses = []
+            self.closed = False
+
+        def capture(self, data, *, status=None):
+            self.statuses.append(status)
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(plant_view, "PlantPuppet", FakePuppet)
+    monkeypatch.setattr(plant_view, "MujocoStreamer", FakeStreamer)
+    plant = FakePlant()
+    ready = []
+    view = plant_view.watch(
+        plant,
+        "robot.xml",
+        ["joint"],
+        live=True,
+        port=0,
+        stats=lambda: {"ticks": 7},
+        on_ready=lambda: ready.append(True),
+        should_stop=lambda: plant.calls >= 1,
+        sleep=lambda _: None,
+    )
+    assert view["trajectory_samples"] == 1
+    assert view["path_length_m"] == pytest.approx(2.5)
+    assert ready == [True]
+
+
+def test_lowlevel_run_viewer_cli_defaults():
+    args = build_parser().parse_args(["lowlevel", "run", "job.yaml", "--viewer"])
+    assert args.viewer
+    assert args.viewer_host == "127.0.0.1"
+    assert args.viewer_port == 8765
+    assert args.viewer_fps == 25
 
 
 def test_missing_armature_is_refused(tmp_path, contract):

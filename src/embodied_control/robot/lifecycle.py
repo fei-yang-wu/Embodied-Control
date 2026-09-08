@@ -297,7 +297,7 @@ class LifecycleConfig:
     # skip when the gantry reports none.
     # Hoisted has to mean clear enough to ramp, not merely not-touching: the
     # ramp to a start pose extends the legs by about 4 cm. Lowered has to mean
-    # the feet are on the floor, and a landed foot reads a hair negative.
+    # the feet are on the floor; the plant reports active contact as zero.
     hoist_clearance_min: float = 0.05
     lowered_clearance_max: float = 0.002
     pose_tolerance_rad: list[float] | float = 0.05
@@ -509,7 +509,13 @@ class Lifecycle:
         """
         self.tracker.force_damp()
 
-    def snapshot(self) -> dict:
+    def external_fault(self, reason: str) -> None:
+        """Latch a fault detected by an off-path session supervisor."""
+        with self._lock:
+            if self.state in OWNING_STATES and self.state is not LifecycleState.HOLD:
+                self._fault(reason)
+
+    def snapshot(self, *, include_hoist: bool = True) -> dict:
         """Lock-free view for a display thread; never blocks on a gate."""
         try:
             ws = dict(self.tracker.writer_stats())
@@ -519,7 +525,7 @@ class Lifecycle:
             st = dict(self.tracker.stats())
         except Exception:
             st = {}
-        hoist = self._hoist_status()
+        hoist = self._hoist_status() if include_hoist else None
         last = self.last_result
         return {
             "state": str(self.state),
@@ -564,12 +570,16 @@ class Lifecycle:
                 result = self._attempt(LifecycleState.DAMP)
                 if not result.ok:
                     return result
+            if end == "damp":
+                return GateResult(True, f"recovered to {self.state}")
             if self.state is LifecycleState.DAMP:
+                if not self._hoist_ready():
+                    return self._refuse(
+                        "hook the hoist and press H before silencing our writer"
+                    )
                 result = self._attempt(LifecycleState.RELEASED)
                 if not result.ok:
                     return result
-            if end == "damp":
-                return GateResult(True, f"recovered to {self.state}")
             if self.state is LifecycleState.RELEASED:
                 if not self._hoist_ready():
                     return self._refuse(
@@ -631,6 +641,7 @@ class Lifecycle:
         with self._lock:
             if self.hoist is not None:
                 self.hoist.lower()
+            self.hoisted_ack = False
             self.lowered_ack = True
 
     def poll(self) -> None:
@@ -782,6 +793,21 @@ class Lifecycle:
             self.tracker.stop()
         except RuntimeError:
             pass
+        self.hoisted_ack = False
+        self.lowered_ack = False
+        if self.hoist is not None and self.auto_ack:
+            try:
+                # A simulated fall bypasses HOLD, whose entry normally takes
+                # the load. Re-capture only after the writer is damped and
+                # stopped; hardware keeps requiring an explicit H instead.
+                self.hoist.hoist()
+                self.hoisted_ack = True
+                values["fault_hoist_requested"] = True
+                self._note("fault recovery: simulator hoist requested")
+            except Exception as exc:
+                values["fault_hoist_requested"] = False
+                values["fault_hoist_error"] = f"{type(exc).__name__}: {exc}"
+                self._note(f"hoist unavailable at FAULT: {exc}")
         previous = self.state
         self.state = LifecycleState.FAULT
         self._record(
@@ -904,14 +930,20 @@ class Lifecycle:
         if clear is not None:
             clear()
             self._sleep(self.config.poll_seconds * 5)
-        set_scale = getattr(self.tracker, "set_hold_gain_scale", None)
-        if set_scale is not None:
-            set_scale(self.config.hold_gain_scale)
         ws = self.tracker.writer_stats()
+        set_scale = getattr(self.tracker, "set_hold_gain_scale", None)
+        if set_scale is not None and int(ws.get("mode", -1)) in {
+            WRITER_DISABLED,
+            WRITER_DAMP,
+        }:
+            # HOLD is live on the writer thread. Its gains were already set
+            # before the first take and cannot be rewritten without a race.
+            set_scale(self.config.hold_gain_scale)
+            ws = self.tracker.writer_stats()
         values.update(self._writer_snapshot())
         if int(ws.get("crc_errors", 0)) != 0:
             return GateResult(False, "rt/lowstate CRC errors", values)
-        if int(ws.get("hardware_faults", 0)) != 0:
+        if int(ws.get("state_fault_reason", 0)) != 0:
             return GateResult(
                 False,
                 f"hardware fault latched (reason {ws.get('state_fault_reason')})",
@@ -1441,6 +1473,7 @@ class Lifecycle:
             try:
                 self.hoist.hoist()
                 self.hoisted_ack = True
+                self.lowered_ack = False
                 detail = "frozen on the last target; strap taut again"
                 clearance = self._measured_clearance()
                 if clearance is not None:

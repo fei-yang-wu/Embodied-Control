@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 import json
+from pathlib import Path
 import subprocess
 import threading
 import time
@@ -247,15 +248,20 @@ class StdioChunkService:
         command: Sequence[str],
         *,
         action_width: int = 38,
+        window_frames: int = 10,
         goal: str | None = None,
+        goal_file: str | Path | None = None,
     ) -> None:
         # A chunk head predicts root_qpos frames (38 wide); a latent head
         # predicts the commands themselves (z_dim wide). Both speak this
         # protocol, so the expected width is a parameter, not a constant.
         self.action_width = int(action_width)
+        self.window_frames = int(window_frames)
         # Per-episode goal switch: the service re-selects its cached language
         # features when a request carries a "goal" key.
         self.goal = goal
+        self.goal_file = Path(goal_file) if goal_file else None
+        self.head_ms: list[float] = []
         self._process = subprocess.Popen(
             list(command),
             stdin=subprocess.PIPE,
@@ -286,7 +292,7 @@ class StdioChunkService:
             "state_history": 10,
             "state_width": 93,
             "action_width": self.action_width,
-            "window_frames": 10,
+            "window_frames": self.window_frames,
         }
         mismatches = {
             key: (ready.get(key), value)
@@ -328,7 +334,19 @@ class StdioChunkService:
             "freeze_steps": int(context.get("freeze_steps", 0)),
             "hold_steps": int(context.get("hold_steps", 10)),
         }
-        goal = context.get("goal", self.goal)
+        goal = context.get("goal")
+        if goal is None and self.goal_file is not None:
+            try:
+                goal = self.goal_file.read_text().strip()
+            except OSError as exc:
+                raise RuntimeError(
+                    f"cannot read planner goal file {self.goal_file}: {exc}"
+                ) from exc
+            if not goal:
+                raise RuntimeError(f"planner goal file {self.goal_file} is empty")
+            self.goal = goal
+        if goal is None:
+            goal = self.goal
         if goal is not None:
             request["goal"] = str(goal)
         self._process.stdin.write(json.dumps(request, separators=(",", ":")) + "\n")
@@ -339,6 +357,11 @@ class StdioChunkService:
         response = json.loads(line)
         if "chunk" not in response:
             raise RuntimeError(f"GR00T response has no chunk: {response}")
+        if response.get("head_ms") is not None:
+            head_ms = float(response["head_ms"])
+            if not np.isfinite(head_ms):
+                raise RuntimeError(f"GR00T response has invalid head_ms: {head_ms}")
+            self.head_ms.append(head_ms)
         horizon = int(self.ready["action_horizon"])
         chunk = np.asarray(response["chunk"], dtype=np.float32)
         if chunk.size != horizon * self.action_width:

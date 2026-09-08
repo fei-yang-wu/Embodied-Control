@@ -23,6 +23,7 @@ a paper metric.
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import numpy as np
@@ -74,12 +75,21 @@ def load_scene_model(model_path: str | Path):
 class _SimClock:
     def __init__(self, backend: "MujocoBackend"):
         self._backend = backend
+        self._started_at = time.monotonic()
+
+    def reset(self) -> None:
+        self._started_at = time.monotonic()
 
     def now(self) -> float:
         return self._backend.now
 
     def wait_for_tick(self, tick: int, control_hz: int) -> None:
-        return
+        if not self._backend._pace_realtime:
+            return
+        deadline = self._started_at + tick / float(control_hz)
+        delay = deadline - time.monotonic()
+        if delay > 0:
+            time.sleep(delay)
 
 
 class MujocoBackend:
@@ -93,6 +103,10 @@ class MujocoBackend:
         decimation: int = 4,
         record_video: bool = False,
         video_every_ticks: int = 2,
+        viewer: bool = False,
+        viewer_host: str = "127.0.0.1",
+        viewer_port: int = 8765,
+        viewer_fps: int = 25,
     ):
         import mujoco
 
@@ -107,7 +121,6 @@ class MujocoBackend:
         self._action = action
         self._decimation = int(decimation)
         self._dt = float(timestep)
-        del control_hz
         self.model.opt.timestep = self._dt
         self.model.opt.integrator = mujoco.mjtIntegrator.mjINT_IMPLICITFAST
 
@@ -144,18 +157,40 @@ class MujocoBackend:
         if pelvis < 0:
             raise ValueError("model has no 'pelvis' body")
         self._pelvis_body = pelvis
+        self._pace_realtime = bool(viewer)
         self._clock = _SimClock(self)
 
         self._renderer = None
+        self._camera = None
+        self._viewer = None
         self._video_every = max(1, int(video_every_ticks))
+        self._viewer_every = max(1, round(control_hz / max(1, int(viewer_fps))))
         self._tick = 0
         self.frames: list[np.ndarray] = []
         if record_video:
             try:
                 self._renderer = mujoco.Renderer(self.model, height=480, width=640)
+                self._camera = mujoco.MjvCamera()
+                self._camera.distance = 3.2
+                self._camera.azimuth = 135.0
+                self._camera.elevation = -15.0
             except Exception as exc:  # rendering is best-effort, never fatal
                 print(f"video disabled: offscreen renderer unavailable ({exc})")
                 self._renderer = None
+                self._camera = None
+        if viewer:
+            try:
+                from embodied_control.lowlevel.plant_view import MujocoStreamer
+
+                self._viewer = MujocoStreamer(
+                    self.model, host=viewer_host, port=int(viewer_port)
+                )
+            except ImportError as exc:
+                raise ImportError(
+                    "the live viewer needs mjviser; install the lowlevel-sim "
+                    "or native environment"
+                ) from exc
+            print(f"VIEWER_URL {self._viewer.url}", flush=True)
         self.reset()
 
     def _write_gains(self, kp: np.ndarray, kd: np.ndarray) -> None:
@@ -197,6 +232,11 @@ class MujocoBackend:
         self.data.time = 0.0
         self._tick = 0
         self.frames = []
+        self._clock.reset()
+        if self._camera is not None:
+            self._camera.lookat[:] = self.data.xpos[self._pelvis_body]
+        if self._viewer is not None:
+            self._viewer.capture(self.data)
 
     def set_pose(self, root_pose_xyzw: np.ndarray, joint_pos: np.ndarray) -> None:
         """Place the robot on `[pos 3 | quat XYZW 4]` plus Isaac-ordered joints.
@@ -269,11 +309,23 @@ class MujocoBackend:
             mujoco.mj_step(self.model, self.data)
         self._tick += 1
         if self._renderer is not None and self._tick % self._video_every == 0:
-            self._renderer.update_scene(self.data, camera="track")
+            self._camera.lookat[:] = self.data.xpos[self._pelvis_body]
+            self._renderer.update_scene(self.data, camera=self._camera)
             self.frames.append(self._renderer.render().copy())
+        if self._viewer is not None and self._tick % self._viewer_every == 0:
+            self._viewer.capture(self.data)
 
     def clock(self) -> _SimClock:
         return self._clock
+
+    def close(self) -> None:
+        if self._viewer is not None:
+            self._viewer.close()
+            self._viewer = None
+        if self._renderer is not None:
+            self._renderer.close()
+            self._renderer = None
+            self._camera = None
 
     @property
     def base_height(self) -> float:

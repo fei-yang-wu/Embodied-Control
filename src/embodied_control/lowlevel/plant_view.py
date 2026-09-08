@@ -9,7 +9,7 @@ is overwritten from the plant's published true state each frame and settled
 with `mj_forward`. It never steps physics, never touches the plant's memory,
 and costs the plant nothing but one 36-float read per drawn frame.
 
-The live view is served by `mjviser` (`PlantStreamer`): real geometry pushed
+The live view is served by `mjviser` (`MujocoStreamer`): real geometry pushed
 to a three.js client over Viser's own HTTP/WebSocket server, so orbit / pan /
 zoom are native mouse controls in the browser, not something reimplemented
 server-side. Works from a headless/remote host: `ssh -L` the port to your
@@ -102,8 +102,8 @@ class PlantRecorder:
         self._renderer.close()
 
 
-class PlantStreamer:
-    """Serves the puppet as an interactive 3D scene via mjviser (Viser).
+class MujocoStreamer:
+    """Serves live MuJoCo state as an interactive 3D scene via mjviser.
 
     Real geometry is pushed to a three.js client over Viser's own
     HTTP/WebSocket server, so orbit/pan/zoom are the browser's native mouse
@@ -114,24 +114,87 @@ class PlantStreamer:
 
     def __init__(
         self,
-        puppet: PlantPuppet,
+        model,
         *,
         host: str = "127.0.0.1",
         port: int = 8765,
     ) -> None:
+        import mujoco
         import viser
         from mjviser import ViserMujocoScene
 
-        self.puppet = puppet
         self._server = viser.ViserServer(host=host, port=port, verbose=False)
-        self._scene = ViserMujocoScene(self._server, puppet.model, num_envs=1)
+        self._scene = ViserMujocoScene(self._server, model, num_envs=1)
         self._scene.create_visualization_gui()
+        self._pelvis = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "pelvis")
+        self._trajectory: list[np.ndarray] = []
+        self._trajectory_handle = None
+        self._path_length = 0.0
+        self._status = self._server.gui.add_markdown("### MuJoCo\nWaiting for state…")
         self.host = host
         self.port = self._server.get_port()
         self.url = f"http://{self.host}:{self.port}/"
 
-    def capture(self) -> None:
-        self._scene.update_from_mjdata(self.puppet.data)
+    @property
+    def trajectory_samples(self) -> int:
+        return len(self._trajectory)
+
+    @property
+    def path_length(self) -> float:
+        return self._path_length
+
+    def capture(self, data, *, status: dict | None = None) -> None:
+        self._scene.update_from_mjdata(data)
+        if self._pelvis < 0:
+            return
+        position = np.asarray(data.xpos[self._pelvis], dtype=np.float32).copy()
+        if not np.isfinite(position).all():
+            return
+        ground = position.copy()
+        ground[2] = 0.025
+        if not self._trajectory or np.linalg.norm(
+            ground[:2] - self._trajectory[-1][:2]
+        ) >= 0.005:
+            if self._trajectory:
+                self._path_length += float(
+                    np.linalg.norm(ground[:2] - self._trajectory[-1][:2])
+                )
+            self._trajectory.append(ground)
+            if len(self._trajectory) >= 2:
+                points = np.stack(
+                    [self._trajectory[:-1], self._trajectory[1:]], axis=1
+                )
+                if self._trajectory_handle is None:
+                    # mjviser moves /fixed_bodies when camera tracking is on;
+                    # parenting the trail there keeps it in the same world frame.
+                    self._trajectory_handle = self._server.scene.add_line_segments(
+                        "/fixed_bodies/ec_trajectory",
+                        points,
+                        colors=(48, 180, 255),
+                        thickness=0.012,
+                    )
+                else:
+                    self._trajectory_handle.points = points
+        displacement = float(
+            np.linalg.norm(ground[:2] - self._trajectory[0][:2])
+        )
+        lines = [
+            "### Native MuJoCo" if status is not None else "### MuJoCo",
+            f"Base `x {position[0]:+.2f}` · `y {position[1]:+.2f}` · `z {position[2]:.2f}`",
+            f"Displacement `{displacement:.2f} m` · path `{self._path_length:.2f} m`",
+        ]
+        if status is not None:
+            age = float(status.get("command_age_ms", -1.0))
+            age_text = f"{age:.0f} ms" if age >= 0 else "waiting"
+            lines.extend(
+                [
+                    f"Tick `{int(status.get('ticks', 0))}` · planner "
+                    f"`{int(status.get('planner_responses', 0))}` · age `{age_text}`",
+                    f"Fault `{int(status.get('fault', 0))}` · deadlines "
+                    f"`{int(status.get('deadline_misses', 0))}`",
+                ]
+            )
+        self._status.content = "\n\n".join(lines)
 
     def close(self) -> None:
         self._server.stop()
@@ -150,6 +213,8 @@ def watch(
     camera: str = "",
     host: str = "127.0.0.1",
     port: int = 8765,
+    stats=None,
+    on_ready=None,
     should_stop=lambda: False,
     sleep=None,
 ):
@@ -170,17 +235,23 @@ def watch(
     )
     streamer = None
     if live:
-        streamer = PlantStreamer(puppet, host=host, port=port)
+        streamer = MujocoStreamer(puppet.model, host=host, port=port)
         print(f"VIEWER_URL {streamer.url}", flush=True)
     period = 1.0 / max(1, fps)
     next_frame = time.monotonic()
     try:
+        if on_ready is not None:
+            on_ready()
         while not should_stop():
-            puppet.pose(plant.latest_state())
-            if recorder is not None:
-                recorder.capture()
-            if streamer is not None:
-                streamer.capture()
+            state = plant.latest_state()
+            if state is not None:
+                puppet.pose(state)
+                if recorder is not None:
+                    recorder.capture()
+                if streamer is not None:
+                    streamer.capture(
+                        puppet.data, status=stats() if stats is not None else None
+                    )
             next_frame += period
             delay = next_frame - time.monotonic()
             if delay > 0:
@@ -196,4 +267,6 @@ def watch(
         "video": str(recorder.path) if recorder else "",
         "frames": recorder.frames if recorder else 0,
         "stream_url": streamer.url if streamer else "",
+        "trajectory_samples": streamer.trajectory_samples if streamer else 0,
+        "path_length_m": streamer.path_length if streamer else 0.0,
     }

@@ -66,6 +66,7 @@ class StubTracker:
         self.publish_failures = 0
         self.crc_errors = 0
         self.hardware_faults = 0
+        self.state_fault_reason = 0
         self.ramp_faults = 0
         self.running = False
         self.control_ticks = 0
@@ -128,7 +129,7 @@ class StubTracker:
             "hardware_faults": self.hardware_faults,
             "watchdog_faults": self.ramp_faults,
             "ramp_faults": self.ramp_faults,
-            "state_fault_reason": 0,
+            "state_fault_reason": self.state_fault_reason,
             "realtime_configured": True,
             "joint_speed_max": self.speed,
             "tracking_error_max": self.error,
@@ -316,6 +317,8 @@ def test_happy_path_hoist_to_standing(tmp_path):
     _run_to_hold(lifecycle, tracker, clock)
     assert tracker.mode == WRITER_HOLD
     assert not tracker.running
+    assert lifecycle.hoisted_ack
+    assert not lifecycle.lowered_ack
     # Pinned for the probe, pinned again at go, released once the blend is in.
     assert tracker.reference_paused == [True, True, False]
 
@@ -378,6 +381,7 @@ def test_operator_acks_gate_precheck_and_lowering():
     assert lifecycle.state is S.POSE_SETTLED
 
     lifecycle.ack_lowered()
+    assert lifecycle.hoisted_ack is False
     assert lifecycle.auto().ok
     assert lifecycle.state is S.PRIMED
     assert hoist.calls == ["hoist", "lower"]
@@ -454,14 +458,18 @@ def test_writer_damp_during_running_is_a_fault():
     lifecycle, tracker, vendor, hoist, clock = _lifecycle()
     assert lifecycle.auto().ok
     assert lifecycle.go().ok
+    assert hoist.calls[-1] == "slack"
     tracker.pending_writer_damp = True
     clock.sleep(0.1)
     lifecycle.poll()
     assert lifecycle.state is S.FAULT
     assert "writer damped" in lifecycle.fault_reason
+    assert hoist.calls[-1] == "hoist"
+    assert lifecycle.hoisted_ack
+    assert lifecycle.log.transitions[-1].values["fault_hoist_requested"] is True
 
 
-def test_damp_then_recover_to_damp_only_releases():
+def test_damp_then_recover_to_damp_keeps_our_writer():
     lifecycle, tracker, vendor, hoist, clock = _lifecycle(end_state="damp")
     assert lifecycle.auto().ok
     assert lifecycle.go().ok
@@ -469,8 +477,32 @@ def test_damp_then_recover_to_damp_only_releases():
     assert lifecycle.state is S.DAMP
     assert tracker.mode == WRITER_DAMP
     assert lifecycle.recover().ok
-    assert lifecycle.state is S.RELEASED
+    assert lifecycle.state is S.DAMP
     assert tracker.restored_with == ""
+
+
+def test_fault_recovery_needs_a_fresh_hoist_ack_before_silencing_the_writer():
+    lifecycle, tracker, vendor, hoist, clock = _lifecycle(
+        auto_ack=False, tracker_kwargs={"planner_fault": 3}
+    )
+    lifecycle.ack_hoisted()
+    assert not lifecycle.auto().ok
+    lifecycle.ack_lowered()
+    assert not lifecycle.auto().ok
+    assert lifecycle.state is S.FAULT
+    assert lifecycle.hoisted_ack is False
+    assert hoist.calls.count("hoist") == 1
+
+    result = lifecycle.recover()
+
+    assert not result.ok and "press H" in result.detail
+    assert lifecycle.state is S.DAMP
+    assert tracker.mode == WRITER_DAMP
+    assert tracker.gate_open
+
+    lifecycle.ack_hoisted()
+    assert lifecycle.recover().ok
+    assert lifecycle.state is S.VENDOR_RESTORED
 
 
 def test_rearm_from_hold_ramps_again_without_the_vendor():
@@ -585,6 +617,29 @@ def test_retake_reruns_the_link_precheck(tmp_path):
     assert "RETAKE_PRECHECK" in states
     # The vendor rows are not repeated: it is still released from episode one.
     assert tracker.calls.count("release_vendor") == 1
+
+
+def test_retake_ignores_a_cleared_historical_hardware_fault():
+    lifecycle, tracker, vendor, hoist, clock = _lifecycle()
+    assert lifecycle.auto().ok
+    _run_to_hold(lifecycle, tracker, clock)
+    tracker.hardware_faults = 1
+    tracker.state_fault_reason = 0
+
+    assert lifecycle.retake().ok
+
+
+def test_retake_refuses_a_current_hardware_fault():
+    lifecycle, tracker, vendor, hoist, clock = _lifecycle()
+    assert lifecycle.auto().ok
+    _run_to_hold(lifecycle, tracker, clock)
+    tracker.hardware_faults = 1
+    tracker.state_fault_reason = 64
+
+    result = lifecycle.retake()
+
+    assert not result.ok and "reason 64" in result.detail
+    assert lifecycle.state is S.HOLD
 
 
 def test_retake_is_refused_when_the_link_is_bad():

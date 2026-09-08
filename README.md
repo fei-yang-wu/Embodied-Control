@@ -61,6 +61,19 @@ pixi run doctor         # check host + dependencies
 The default env is intentionally light (no MuJoCo). The MuJoCo backend lives in
 the `sim` feature env, so eval commands run with `pixi run -e sim ...`.
 
+The Python G1 tracker can expose its MuJoCo state as an interactive browser
+view. `--viewer` prints a `VIEWER_URL`, keeps the pelvis centered by default,
+and paces the otherwise faster-than-real-time rollout to its 50 Hz simulation
+clock. Without the flag, batch evaluation remains unpaced.
+
+```bash
+pixi run -e lowlevel-sim ec lowlevel run /absolute/path/to/job.yaml --viewer
+```
+
+The default URL is `http://127.0.0.1:8765/`. Use `--viewer-port`,
+`--viewer-host`, and `--viewer-fps` to override it; keep the loopback host for
+local work or access it remotely through an SSH port forward.
+
 ### Native G1 tracker
 
 The low-latency G1 path is a separate scikit-build-core package. C++ owns the
@@ -114,6 +127,51 @@ pixi run -e native ec lowlevel mujoco-native /absolute/path/to/bundle \
   --request-slot /ec_g1_request --response-slot /ec_g1_response \
   --connect-slots
 ```
+
+A GR00T head trained to predict latent plans must use matching geometry on
+both processes. The `fsq64_10b` eval-kit head predicts three 64-value latent
+slots, each held for ten control ticks:
+
+```bash
+# Add to planner-worker before the `--` service-command separator:
+--reply latent_plan --z-dim 64 --plan-slots 3 --hold-steps 10
+
+# Add to mujoco-native:
+--latent-plan --plan-slots 3
+```
+
+Add `--viewer` to `mujoco-native` for an interactive browser view. It prints a
+`VIEWER_URL`, follows the pelvis by default, draws the base trajectory, and
+shows live planner latency, fault, deadline, displacement, and path-length
+status. The viewer reads one completed 36-float pose at its own rate and never
+touches the native MuJoCo data or either real-time thread. Use
+`--viewer-host`, `--viewer-port`, and `--viewer-fps` to override the defaults.
+
+For repeatable evaluation of several cached GR00T goals, use the integrated
+runner instead of managing two terminals. It loads the GR00T head once, changes
+the goal on each request, and starts a fresh native MuJoCo episode for every
+goal/repeat pair:
+
+```bash
+pixi run -e native ec lowlevel native-motion-eval \
+  --bundle assets/models/controller/fsq64_10b \
+  --model assets/latent_playkit/model/g1_29dof_rev_1_0.xml \
+  --goal walk_ff_loop_180_R_slow_001_A443 \
+  --goal walk_arc_cw_start_R_slow_001_A443 \
+  --goal crossed_arms_idle_R_001_A456 \
+  --repeats 2 --ticks 500 --output-root artifacts/g1_gr00t_eval -- \
+  pixi run --manifest-path /absolute/path/to/IsaacLab-Imitation/pixi.toml \
+  -e gr00t python -m imitation_experiments.planner.gr00t_chunk_service \
+  --checkpoint assets/models/planner/gr00t_language30_10b/gr00t_head.pt \
+  --goal-features assets/models/planner/gr00t_language30_10b/goal_features.pt \
+  --goal walk_ff_loop_180_R_slow_001_A443 --seed 0
+```
+
+Each run preserves the standard job, resolved job, manifest, validation,
+status, metrics, episodes, and logs artifacts. It also writes per-episode
+native telemetry, `summary.csv`, and a top-down `trajectories.svg`. This command
+is intentionally scoped to the current latent-plan `fsq64_10b` path; it does
+not select or adapt the separate SONIC bundle.
 
 For reference-streaming oracle evaluation, replace the GR00T worker with the
 oracle worker and select the source explicitly. This mode streams a 5 Hz
@@ -293,7 +351,8 @@ choice (`r`). In oracle mode `r` starts the worker too: it memory-maps the
 reference and loads no weights. In VLA mode the planner is yours to start,
 because that worker loads its own checkpoint, several gigabytes on the GPU,
 and a build refuses until it is running rather than launching one.
-`--planner-autostart` starts either. The display shows the
+Pressing `r` after `p` reuses that ready process, so the checkpoint is loaded
+only once. `--planner-autostart` starts either. The display shows the
 ladder, the writer's live numbers, link health (lowstate and lowcmd rates,
 state gaps, planner reply age), a progress bar over the reference trajectory
 in oracle mode, and per-episode tracking summaries. Each episode's telemetry
@@ -360,6 +419,14 @@ pixi run -e native ec lifecycle console examples/lifecycle_sim_hurry_idle.yaml \
 A run ends limp under the vendor (`end_state: vendor_damp`), so the next
 trajectory climbs the whole ladder again. `e` is the one shortcut, and it
 re-reads the link before it drives the robot a second time.
+
+For the native `fsq64_10b` + GR00T path, use
+`examples/lifecycle_sim_gr00t_fsq64.yaml`. Its 30-motion reference catalog
+matches the 30 cached language goals. After an episode reaches HOLD, `m`/`M`
+changes the GR00T goal and `e`, `a`, `g` starts the next motion without
+reloading either GR00T or the tracker. A planner exit while the tracker owns
+the joints immediately enters DAMP/FAULT; a dead planner cannot retake from
+HOLD.
 
 `R` (`/reset-sim`) closes current tracker and planner, then atomically resets
 running MuJoCo plant to configured initial pose (bundle default when absent),
@@ -616,6 +683,15 @@ A few things worth knowing if you touch this container:
   normal image (`frame[::-1]` corrects it — confirmed against LIBERO's own
   `benchmark_scripts/render_single_task.py`, which does the same flip).
   `pixi run smoke-libero-video` renders one.
+- **An optional live browser view uses those same camera observations.** Set
+  `sim.backend_config.live_view: true` (the GR00T example does this) and open
+  `http://127.0.0.1:8766/` while the run is active. The page shows the agent
+  and wrist cameras plus the task, episode, step, and success state. It keeps
+  only the latest JPEG for each camera and serves clients on a background
+  thread, so a slow or disconnected browser cannot hold up the rollout.
+  `live_view_host`, `live_view_port`, and `live_view_fps` override the
+  loopback host, port, and 10 FPS default. Keep the loopback default unless
+  remote access is protected by an SSH port forward.
 - The real run: one `libero_spatial` task ("pick up the black bowl between
   the plate and the ramekin and place it on the plate"), 2 episodes × 200
   steps × 128×128 cameras, both containers, ran in **~50 seconds** end to end

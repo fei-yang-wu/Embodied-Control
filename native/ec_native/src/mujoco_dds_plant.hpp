@@ -147,8 +147,8 @@ class MujocoDdsPlant {
   void publish_low_state() noexcept;
   void apply_vendor_drive() noexcept;
   void apply_hoist() noexcept;
-  // Signed distance from the nearest robot collision geom to the floor.
-  // Runs the kinematics first, so it is valid straight after mj_step.
+  // Physical clearance from the robot to the floor. Active MuJoCo contact is
+  // zero even when its positive contact margin leaves the surfaces apart.
   double measure_floor_gap() noexcept;
 
   std::unique_ptr<Impl> impl_;

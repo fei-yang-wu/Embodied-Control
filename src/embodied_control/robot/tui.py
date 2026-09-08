@@ -9,7 +9,7 @@ is bright and one link's dot can be red while its neighbours stay green;
 `render` flattens the same rows to plain text, which is what the tests read
 and what a pipe gets. Curses only maps a style name to an attribute.
 
-Two rules the layout serves. SPACE reaches the writer before anything else:
+Two rules the layout serves. Ctrl-D reaches the writer before anything else:
 it bypasses the lifecycle lock (a gate may hold it for its whole timeout) and
 stores DAMP straight into the writer. And a key never blocks the screen:
 actions run on one worker thread, one at a time, while the display keeps
@@ -18,6 +18,7 @@ refreshing from a lock-free snapshot.
 
 from __future__ import annotations
 
+import math
 import queue
 import re
 import textwrap
@@ -50,15 +51,21 @@ from embodied_control.robot.lifecycle import (
     LifecycleState,
 )
 
-DISPLAY_ORDER: tuple[LifecycleState, ...] = tuple(LADDER[1:]) + (
+ARMING_STATES: tuple[LifecycleState, ...] = tuple(LADDER[1:])
+EXECUTION_STATES: tuple[LifecycleState, ...] = (
     LifecycleState.BLEND_IN,
     LifecycleState.RUNNING,
     LifecycleState.HOLD,
+)
+RECOVERY_STATES: tuple[LifecycleState, ...] = (
     LifecycleState.DAMP,
     LifecycleState.RELEASED,
     LifecycleState.VENDOR_RESTORED,
     LifecycleState.VENDOR_STAND,
     LifecycleState.STANDING,
+)
+DISPLAY_ORDER: tuple[LifecycleState, ...] = (
+    ARMING_STATES + EXECUTION_STATES + RECOVERY_STATES
 )
 
 HOIST_MODE_NAMES = {0: "slack", 1: "hoisted", 2: "lowered"}
@@ -134,19 +141,12 @@ SPARK = "▁▂▃▄▅▆▇█"
 # Partial blocks: a bar then moves every eighth of a cell, not every cell.
 BLOCKS = " ▏▎▍▌▋▊▉█"
 
-# Anything that has to line up column-wise is ASCII or Latin-1. Dingbats and
-# Geometric Shapes (✓ U+2713, ● U+25CF) are missing from many monospace fonts,
-# and the fallback glyph arrives at a different advance width, which walks the
-# column separator sideways row by row. Blocks and box drawing stay: they are
-# the one non-Latin range a terminal font reliably ships, and they only ever
-# appear at the end of a field.
-# The console targets an English terminal, so any single-cell glyph is fine
-# here. Every row is padded to an exact cell count, and a mark that is not
-# one cell wide would shift the column separator.
-MARK_DONE = "✓"
-MARK_NOW = "▸"
-MARK_TODO = "·"
-MARK_LINK_OK = "•"
+# These marks sit before fixed columns. Font fallback can render Unicode
+# dingbats at a different width than curses counted and leave stale cells.
+MARK_DONE = "+"
+MARK_NOW = ">"
+MARK_TODO = "."
+MARK_LINK_OK = "*"
 MARK_LINK_BAD = "!"
 
 
@@ -378,10 +378,11 @@ def _log_rows(
     if height == 1:
         return [_rule("LOG", width)]
     visible = visual[-(height - 1) :]
-    return [_rule("LOG", width)] + [
+    rows = [_rule("LOG", width)] + [
         pad([Span(f" {line}", LOG_STYLES.get(level, "dim"))], width)
         for line, level in visible
     ]
+    return rows + [pad([], width) for _ in range(height - len(rows))]
 
 
 def sparkline(values: Iterable[float], width: int = 8) -> str:
@@ -441,7 +442,7 @@ def _rule(title: str, width: int, *, style: str = "rule") -> Row:
 def _link(
     name: str, hz: float | None, healthy: bool, trend: Iterable[float], detail: Row
 ) -> Row:
-    if hz is None:
+    if hz is None or not math.isfinite(hz) or hz < 0.0:
         rate = "   -- Hz"
     else:
         # A planner runs at single-digit Hz; a wire runs at hundreds.
@@ -455,12 +456,6 @@ def _link(
         Span(f" {rate} ", "value"),
         Span(sparkline(trend, 6), "accent"),
     ] + detail
-
-
-# Under this width the three links stop sharing a row: a truncated link is
-# worse than a taller panel, because the number that got cut is the one an
-# operator is looking for.
-LINKS_ONE_ROW = 118
 
 
 def comm_rows(
@@ -510,12 +505,7 @@ def comm_rows(
             [Span(f" age {age_text}", "dim")] + count("stale", stale),
         ),
     ]
-    if width < LINKS_ONE_ROW:
-        return links
-    joined: Row = []
-    for index, link in enumerate(links):
-        joined += ([Span("  │", "rule")] if index else []) + link
-    return [joined]
+    return links
 
 
 def comm_lines(snapshot: dict, rates: dict | None) -> list[str]:
@@ -539,15 +529,20 @@ def reference_row(snapshot: dict, width: int) -> Row | None:
     )
     fraction = played / total
     cells = max(12, min(44, width - 46))
-    return [
-        Span(" REFERENCE  ", "label"),
-        Span("[", "rule"),
-        Span(bar_cells(fraction, cells), "accent"),
-        Span("]", "rule"),
-        Span(f" {fraction * 100:3.0f}%", "value"),
-        Span(f"  frame {start + played}/{length}", "dim"),
-        Span(f"  ({played}/{total} played)", "dim"),
-    ]
+    return _fit(
+        [
+            [
+                Span(" REFERENCE  ", "label"),
+                Span("[", "rule"),
+                Span(bar_cells(fraction, cells), "accent"),
+                Span("]", "rule"),
+                Span(f" {fraction * 100:3.0f}%", "value"),
+            ],
+            [Span(f"  frame {start + played}/{length}", "dim")],
+            [Span(f"  ({played}/{total} played)", "dim")],
+        ],
+        width,
+    )
 
 
 def reference_line(snapshot: dict) -> str | None:
@@ -567,12 +562,14 @@ def _state_cell(entry: LifecycleState, current: int, index: int, width: int) -> 
     # it makes the climb legible when every label is dim.
     rung = index < len(LADDER) - 1
     number = f"{index + 1:>2} " if rung else "   "
-    if not rung and index > current:
-        mark, tone = " ", "rule"
     return pad(
         [Span(f" {mark} ", tone), Span(number, "rule"), Span(label, text_style)],
         width,
     )
+
+
+def _phase_cell(label: str, width: int) -> Row:
+    return pad([Span(f" {label}", "section")], width)
 
 
 def _fit(groups: list[Row], width: int) -> Row:
@@ -606,15 +603,21 @@ def _live_rows(snapshot: dict) -> list[Row]:
     # ramp-fault scale, 2 rad/s is twice the init ramp cap.
     track_cells, track_tone = gauge(tracking, 1.0)
     speed_cells, speed_tone = gauge(speed, 2.0)
-    rows = [
-        _metric(
-            "publishes",
-            f"{ws.get('publishes', 0)}",
-            trail=[
-                Span("  fail ", "label"),
-                Span(str(fails), "value" if fails == 0 else "bad"),
-            ],
+    ack_row = [
+        Span(" ack hoist/lower", "label"),
+        Span(
+            "  yes" if snapshot.get("hoisted_ack") else "   no",
+            "ok" if snapshot.get("hoisted_ack") else "dim",
         ),
+        Span("/", "rule"),
+        Span(
+            "yes" if snapshot.get("lowered_ack") else "no",
+            "ok" if snapshot.get("lowered_ack") else "dim",
+        ),
+    ]
+    # Short terminals clip the tail, so ownership and safety evidence stays
+    # ahead of counters and post-run diagnostics.
+    rows = [
         _metric(
             "gate",
             "OPEN" if gate_open else "closed",
@@ -624,9 +627,6 @@ def _live_rows(snapshot: dict) -> list[Row]:
                 Span(str(crc), "value" if crc == 0 else "bad"),
             ],
         ),
-        _metric("control ticks", f"{st.get('control_ticks', 0)}"),
-        _metric("reference", f"{st.get('reference_ticks', 0)}"),
-        _metric("planner replies", f"{st.get('planner_responses', 0)}"),
         [
             Span(" faults hw/wd   ", "label"),
             Span(f"{hardware:>4}", "value" if hardware == 0 else "bad"),
@@ -635,6 +635,23 @@ def _live_rows(snapshot: dict) -> list[Row]:
             Span("  reason ", "label"),
             Span(str(ws.get("state_fault_reason", 0)), "dim"),
         ],
+        ack_row,
+    ]
+    hoist = snapshot.get("hoist")
+    if hoist:
+        owned = bool(hoist.get("owned"))
+        rows.append(
+            [
+                Span(" plant           ", "label"),
+                Span(
+                    HOIST_MODE_NAMES.get(int(hoist.get("hoist_mode", -1)), "?"), "value"
+                ),
+                Span("  vendor ", "label"),
+                Span("owns" if owned else "released", "warn" if owned else "ok"),
+                Span(f"  fsm {hoist.get('fsm_id', '-')}", "dim"),
+            ]
+        )
+    rows += [
         _metric(
             "joint speed",
             f"{speed:.3f}",
@@ -645,6 +662,17 @@ def _live_rows(snapshot: dict) -> list[Row]:
             f"{tracking:.3f}",
             trail=[Span(" rad   ", "dim"), Span(track_cells, track_tone)],
         ),
+        _metric(
+            "publishes",
+            f"{ws.get('publishes', 0)}",
+            trail=[
+                Span("  fail ", "label"),
+                Span(str(fails), "value" if fails == 0 else "bad"),
+            ],
+        ),
+        _metric("control ticks", f"{st.get('control_ticks', 0)}"),
+        _metric("planner replies", f"{st.get('planner_responses', 0)}"),
+        _metric("reference", f"{st.get('reference_ticks', 0)}"),
         _metric(
             "ramp error",
             f"{ramp:.3f}",
@@ -665,33 +693,7 @@ def _live_rows(snapshot: dict) -> list[Row]:
             f"{ws.get('blend_ticks_remaining', 0)}",
             trail=[Span(" ticks", "dim")],
         ),
-        [
-            Span(" ack hoist/lower", "label"),
-            Span(
-                "  yes" if snapshot.get("hoisted_ack") else "   no",
-                "ok" if snapshot.get("hoisted_ack") else "dim",
-            ),
-            Span("/", "rule"),
-            Span(
-                "yes" if snapshot.get("lowered_ack") else "no",
-                "ok" if snapshot.get("lowered_ack") else "dim",
-            ),
-        ],
     ]
-    hoist = snapshot.get("hoist")
-    if hoist:
-        owned = bool(hoist.get("owned"))
-        rows.append(
-            [
-                Span(" plant           ", "label"),
-                Span(
-                    HOIST_MODE_NAMES.get(int(hoist.get("hoist_mode", -1)), "?"), "value"
-                ),
-                Span("  vendor ", "label"),
-                Span("owns" if owned else "released", "warn" if owned else "ok"),
-                Span(f"  fsm {hoist.get('fsm_id', '-')}", "dim"),
-            ]
-        )
     return rows
 
 
@@ -831,6 +833,11 @@ def _session_rows(snapshot: dict, width: int) -> list[Row]:
     rows = [_rule("SESSION", width)]
     built = bool(session.get("built"))
     planner = str(session.get("planner", "?"))
+    planner_running = session.get("planner_running")
+    if planner_running is None:
+        planner_running = planner.endswith(" running") and not planner.startswith(
+            "not "
+        )
     # Whole fields, so a narrow terminal drops the last one instead of
     # cutting a word in half. The first three are the selection an operator
     # is about to run, and they never drop.
@@ -843,7 +850,7 @@ def _session_rows(snapshot: dict, width: int) -> list[Row]:
         # narrow terminal cannot drop it.
         [
             Span("   planner ", "label"),
-            Span(planner, "ok" if "running" in planner else "warn"),
+            Span(planner, "ok" if planner_running else "warn"),
         ],
         [
             Span("   TRACKER ", "label"),
@@ -917,40 +924,105 @@ def _session_rows(snapshot: dict, width: int) -> list[Row]:
 def _body_rows(snapshot: dict, width: int) -> list[Row]:
     state = str(snapshot.get("state", "?"))
     try:
-        current = DISPLAY_ORDER.index(LifecycleState(state))
+        active_state = LifecycleState(state)
+    except ValueError:
+        active_state = None
+    try:
+        current = DISPLAY_ORDER.index(active_state) if active_state is not None else -1
     except ValueError:
         current = -1
     live = _live_rows(snapshot)
     rows: list[Row] = []
     wide = width >= 96
     ladder_width = min(62, max(54, width - 40)) if wide else 34
-    columns = 2 if wide else 1
-    per_column = (len(DISPLAY_ORDER) + columns - 1) // columns
-    cell_width = (ladder_width - 1) // columns
+    panel_title = "LIFECYCLE"
+    if not wide:
+        if active_state in ARMING_STATES or active_state is LifecycleState.IDLE:
+            panel_title = "ARMING"
+        elif active_state in EXECUTION_STATES:
+            panel_title = "EXECUTION"
+        elif active_state in RECOVERY_STATES:
+            panel_title = "RECOVERY"
+        elif active_state is LifecycleState.FAULT:
+            panel_title = "FAULT / RECOVERY"
     rows.append(
         pad(
-            pad(_rule("LIFECYCLE", ladder_width - 1), ladder_width - 1)
+            pad(_rule(panel_title, ladder_width - 1), ladder_width - 1)
             + [Span("│", "rule")]
             + _rule("TELEMETRY", width - ladder_width),
             width,
         )
     )
-    for index in range(max(per_column, len(live))):
-        left: Row = []
-        for column in range(columns):
-            entry_index = index + column * per_column
-            room = (
-                cell_width
-                if column + 1 < columns
-                else ladder_width - 1 - cell_width * column
+
+    lifecycle_width = ladder_width - 1
+    if wide:
+        first_width = (lifecycle_width - 1) // 2
+        second_width = lifecycle_width - first_width - 1
+        divider = [Span("│", "rule")]
+        left_rows = [
+            _phase_cell("ARMING", first_width)
+            + divider
+            + _phase_cell("EXECUTION", second_width)
+        ]
+        right: list[LifecycleState | str | None] = [
+            *EXECUTION_STATES,
+            "RECOVERY",
+            *RECOVERY_STATES,
+            None,
+        ]
+        for index, entry in enumerate(ARMING_STATES):
+            global_index = DISPLAY_ORDER.index(entry)
+            first = _state_cell(entry, current, global_index, first_width)
+            other = right[index]
+            if isinstance(other, LifecycleState):
+                other_index = DISPLAY_ORDER.index(other)
+                second = _state_cell(
+                    other, current, other_index, second_width
+                )
+            elif other is None:
+                second = pad([], second_width)
+            else:
+                second = _phase_cell(other, second_width)
+            left_rows.append(first + divider + second)
+    elif active_state in EXECUTION_STATES:
+        left_rows = [_phase_cell("ARMING (collapsed)", lifecycle_width)]
+        left_rows.extend(
+            _state_cell(
+                entry,
+                current,
+                DISPLAY_ORDER.index(entry),
+                lifecycle_width,
             )
-            # `index` runs past per_column when telemetry is the longer side;
-            # without the first test the tail of column one repeats column two.
-            left += (
-                _state_cell(DISPLAY_ORDER[entry_index], current, entry_index, room)
-                if index < per_column and entry_index < len(DISPLAY_ORDER)
-                else pad([], room)
+            for entry in EXECUTION_STATES
+        )
+        left_rows.append(_phase_cell("RECOVERY follows", lifecycle_width))
+    elif active_state in RECOVERY_STATES or active_state is LifecycleState.FAULT:
+        left_rows = [
+            _phase_cell("ARMING (collapsed)", lifecycle_width),
+            _phase_cell("EXECUTION (collapsed)", lifecycle_width),
+        ]
+        left_rows.extend(
+            _state_cell(
+                entry,
+                current,
+                DISPLAY_ORDER.index(entry),
+                lifecycle_width,
             )
+            for entry in RECOVERY_STATES
+        )
+    else:
+        left_rows = [
+            _state_cell(
+                entry,
+                current,
+                DISPLAY_ORDER.index(entry),
+                lifecycle_width,
+            )
+            for entry in ARMING_STATES
+        ]
+
+    for index in range(max(len(left_rows), len(live))):
+        left = left_rows[index] if index < len(left_rows) else pad([], lifecycle_width)
         right = live[index] if index < len(live) else []
         rows.append(pad(left + [Span("│", "rule")] + right, width))
     return rows
@@ -967,6 +1039,7 @@ def _key_hint(key: str, label: str) -> Row:
 #: bottom row falls off and the prompt lands inside the key legend. Reserving
 #: the row costs one line and keeps every frame the same shape.
 PROMPT_ROWS = 2
+LOG_PANEL_ROWS = 4
 
 
 def _prompt_rows(line: "CommandLine | None", width: int) -> list[Row]:
@@ -1020,12 +1093,11 @@ def _footer_rows(
     groups: list[Row] = [[Span(" ^D DAMP ", "pill.bad")]]
     groups += [_key_hint(key, label) for key, label in (("/", "commands"), ("?", "help"))]
     groups.append([Span("  │", "rule")])
+    groups += [_key_hint("o", "mode"), _key_hint("t/T", "tracker")]
+    groups.append(_key_hint("m", "motion"))
     groups += [
         _key_hint(key, label)
         for key, label in (
-            ("o", "mode"),
-            ("t/T", "tracker"),
-            ("m/M", "motion"),
             ("f/F", "frame"),
             ("p", "planner"),
             ("r", "rebuild"),
@@ -1074,6 +1146,67 @@ def _footer_rows(
     return rows
 
 
+def _motion_picker_rows(
+    snapshot: dict,
+    width: int,
+    height: int,
+    options: tuple[str, ...],
+    cursor: int,
+) -> list[Row]:
+    session = snapshot.get("session", {})
+    selected = str(session.get("motion", ""))
+    cursor = max(0, min(len(options) - 1, cursor))
+    title: Row = [
+        Span(" ▌EMBODIED-CONTROL", "bar"),
+        Span("  MOTION SELECTOR ", "bar.dim"),
+    ]
+    position = [Span(f" {cursor + 1}/{len(options)} ", "pill.accent")]
+    rows = [
+        pad(title + [Span(" " * max(0, width - _len(title) - _len(position)), "bar.dim")]
+            + position, width, "bar.dim"),
+        pad(
+            [
+                Span(" current ", "label"),
+                Span(selected or "none", "value"),
+                Span("   choose one; press r afterwards to build it", "dim"),
+            ],
+            width,
+        ),
+        _rule("MOTIONS", width),
+    ]
+    footer = [
+        _rule("SELECT", width),
+        pad(
+            [
+                Span(" ↑/↓ ", "key"),
+                Span("move  ", "dim"),
+                Span(" ENTER ", "key"),
+                Span("choose  ", "dim"),
+                Span(" ESC ", "key"),
+                Span("back  ", "dim"),
+                Span(" ^D DAMP ", "pill.bad"),
+            ],
+            width,
+        ),
+    ]
+    room = max(0, height - len(rows) - len(footer))
+    start = max(0, min(cursor - room // 2, len(options) - room))
+    for index in range(start, min(len(options), start + room)):
+        option = options[index]
+        here = index == cursor
+        current = option == selected
+        row: Row = [
+            Span(f" {MARK_NOW if here else ' '} ", "accent" if here else "text"),
+            Span(f"{index + 1:>3} ", "rule"),
+            Span(option, "state.now" if here else "text"),
+        ]
+        if current:
+            row += [Span("  current", "ok")]
+        rows.append(pad(row, width))
+    rows += [pad([], width) for _ in range(room - min(room, len(options)))]
+    return (rows + footer)[:height]
+
+
 def render_rows(
     snapshot: dict,
     bindings: list[KeyBinding],
@@ -1086,6 +1219,7 @@ def render_rows(
     trends: dict | None = None,
     command: "CommandLine | str | None" = None,
     help_open: bool = False,
+    motion_picker: tuple[tuple[str, ...], int] | None = None,
     assistant: list[str] | None = None,
     agent_label: str = "off",
 ) -> list[Row]:
@@ -1094,6 +1228,9 @@ def render_rows(
     line = CommandLine() if isinstance(command, str) else command
     if isinstance(command, str):
         line.text, line.cursor = command, len(command)
+    if motion_picker is not None:
+        options, cursor = motion_picker
+        return _motion_picker_rows(snapshot, width, height, options, cursor)
     if help_open:
         return _help_rows(bindings, width, height, agent_label)
 
@@ -1138,14 +1275,14 @@ def render_rows(
 
     footer = _footer_rows(snapshot, width, busy, line)
     log_lines = _visual_log_lines(notes, width)
-    log_height = min(8, len(log_lines) + 1)
-    room = max(0, height - len(rows) - len(footer) - log_height)
+    available = max(0, height - len(rows) - len(footer))
+    log_height = min(LOG_PANEL_ROWS, available)
+    room = max(0, available - log_height)
     # A lone panel header helps nobody; below three rows the ladder is out.
-    if room >= 3:
-        rows += _body_rows(snapshot, width)[:room]
+    body = _body_rows(snapshot, width)[:room] if room >= 3 else []
+    rows += body + [pad([], width) for _ in range(room - len(body))]
     rows += footer
-    if len(rows) < height:
-        rows += _log_rows(notes, width, height - len(rows), log_lines)
+    rows += _log_rows(notes, width, min(log_height, height - len(rows)), log_lines)
     return rows[:height]
 
 
@@ -1232,7 +1369,10 @@ class LifecycleTui:
         self.refresh_seconds = refresh_seconds
         self.notes: deque[str] = deque(maxlen=200)
         self._queue: queue.Queue[KeyBinding | None] = queue.Queue()
+        self._action_lock = threading.Lock()
         self._busy = ""
+        self._pending = ""
+        self._damp_requested = threading.Event()
         self._quit = threading.Event()
         self._clock = clock
         self._t0 = clock()
@@ -1244,6 +1384,8 @@ class LifecycleTui:
         }
         self._line: CommandLine | None = None
         self._help_open = False
+        self._motion_options: tuple[str, ...] | None = None
+        self._motion_index = 0
         self._history: list[str] = []
         self._diagnose = diagnose
         # Called once on each console thread: the display and the key handler
@@ -1276,10 +1418,24 @@ class LifecycleTui:
             # is never text and never waits.
             self._line = None
             self._help_open = False
+            self._motion_options = None
+            with self._action_lock:
+                first_request = not self._damp_requested.is_set()
+                self._damp_requested.set()
+                if first_request:
+                    while True:
+                        try:
+                            self._queue.get_nowait()
+                        except queue.Empty:
+                            break
+                    binding = self.bindings[KEY_DAMP]
+                    self._pending = binding.label
+                    self._queue.put(binding)
             self.lifecycle.emergency_damp()
             self.note("^D: damp stored in the writer", "damp")
-            self._queue.put(self.bindings[KEY_DAMP])
             return True
+        if self._motion_options is not None:
+            return self._handle_motion_picker(key)
         if self._line is not None:
             return self._handle_command_key(key)
         if key == "/":
@@ -1296,19 +1452,86 @@ class LifecycleTui:
         if key == KEY_SPACE:
             self.note("SPACE does nothing here; damp is Ctrl-D")
             return True
+        if key == "m" and self._open_motion_picker():
+            return True
         if key == "q":
-            if self._busy:
-                self.note("busy: wait for the action to finish, or SPACE")
+            current = self._current_action()
+            if current:
+                self.note(
+                    "busy: wait for the action to finish, or press Ctrl-D to damp"
+                )
                 return True
             return False
         binding = self.bindings.get(key)
         if binding is None:
             return True
-        if self._busy:
-            self.note(f"busy with '{self._busy}'; '{key}' ignored")
+        current = self._current_action()
+        if current:
+            self.note(f"busy with '{current}'; '{key}' ignored")
             return True
-        self._queue.put(binding)
+        if not self._enqueue(binding):
+            current = self._current_action()
+            self.note(f"busy with '{current}'; '{key}' ignored")
         return True
+
+    def _open_motion_picker(self) -> bool:
+        session = self.lifecycle.snapshot().get("session", {})
+        options = tuple(str(item) for item in session.get("motions", ()))
+        if not options:
+            return False
+        current = self._current_action()
+        if current:
+            self.note(f"busy with '{current}'; 'm' ignored")
+            return True
+        selected = str(session.get("motion", ""))
+        self._motion_options = options
+        self._motion_index = options.index(selected) if selected in options else 0
+        self._help_open = False
+        self.assistant.clear()
+        return True
+
+    def _handle_motion_picker(self, key: str) -> bool:
+        assert self._motion_options is not None
+        options = self._motion_options
+        if key in {KEY_ESCAPE, "\x1b"}:
+            self._motion_options = None
+            return True
+        if key == KEY_UP:
+            self._motion_index = (self._motion_index - 1) % len(options)
+            return True
+        if key == KEY_DOWN:
+            self._motion_index = (self._motion_index + 1) % len(options)
+            return True
+        if key not in {KEY_ENTER, "\r", "\n"}:
+            return True
+        motion = options[self._motion_index]
+        self._motion_options = None
+        select = getattr(self.lifecycle, "select_motion", None)
+        if select is None:
+            self.note("motion selection is unavailable", "fail")
+            return True
+
+        def apply_selection() -> None:
+            result = select(motion)
+            if not result.ok:
+                raise RuntimeError(result.detail)
+
+        binding = KeyBinding("m", f"select motion {motion}", apply_selection, "select")
+        if not self._enqueue(binding):
+            self.note(f"busy with '{self._current_action()}'; motion selection ignored")
+        return True
+
+    def _current_action(self) -> str:
+        with self._action_lock:
+            return self._busy or self._pending
+
+    def _enqueue(self, binding: KeyBinding) -> bool:
+        with self._action_lock:
+            if self._busy or self._pending or self._damp_requested.is_set():
+                return False
+            self._pending = binding.label
+            self._queue.put(binding)
+            return True
 
     def _handle_command_key(self, key: str) -> bool:
         assert self._line is not None
@@ -1352,13 +1575,14 @@ class LifecycleTui:
                     "with --diagnostic-agent"
                 )
                 return True
-            if self._busy:
-                self.note(f"busy with '{self._busy}'; /{command} ignored")
-                return True
             self.assistant.clear()
-            self._queue.put(
-                KeyBinding("", f"diagnosing with {self.agent_label}", self._run_diagnosis)
+            binding = KeyBinding(
+                "", f"diagnosing with {self.agent_label}", self._run_diagnosis
             )
+            if not self._enqueue(binding):
+                self.note(
+                    f"busy with '{self._current_action()}'; /{command} ignored"
+                )
             return True
         key = SLASH_KEYS.get(command)
         if key is None or (key != "q" and key not in self.bindings):
@@ -1392,7 +1616,14 @@ class LifecycleTui:
                 continue
             if binding is None:
                 return
-            self._busy = binding.label
+            with self._action_lock:
+                if self._damp_requested.is_set() and binding.key != KEY_DAMP:
+                    if self._pending == binding.label:
+                        self._pending = ""
+                    continue
+                if self._pending == binding.label:
+                    self._pending = ""
+                self._busy = binding.label
             try:
                 binding.action()
             except ConsoleQuit:
@@ -1400,7 +1631,10 @@ class LifecycleTui:
             except Exception as exc:  # the console outlives any one refusal
                 self.note(f"!! {type(exc).__name__}: {exc}", "fail")
             finally:
-                self._busy = ""
+                with self._action_lock:
+                    self._busy = ""
+                    if binding.key == KEY_DAMP:
+                        self._damp_requested.clear()
 
     def rates(self, snapshot: dict) -> dict:
         """Per-second rates from counter deltas, refreshed every 0.5 s."""
@@ -1416,6 +1650,14 @@ class LifecycleTui:
             self._last_sample = (now, counters)
             return self._rates
         then, previous = self._last_sample
+        if now < then or any(
+            counters[name] < previous[name] for name in counters
+        ):
+            self._last_sample = (now, counters)
+            self._rates = {}
+            for values in self._trends.values():
+                values.clear()
+            return self._rates
         dt = now - then
         if dt >= 0.5:
             self._rates = {
@@ -1437,13 +1679,15 @@ class LifecycleTui:
             snapshot,
             self.ordered,
             list(self.notes),
-            busy=self._busy,
+            busy=self._current_action(),
             width=width,
             height=height,
             rates=self.rates(snapshot),
             trends={name: list(values) for name, values in self._trends.items()},
             command=self._line,
             help_open=self._help_open,
+            motion_picker=(self._motion_options, self._motion_index)
+            if self._motion_options is not None else None,
             assistant=self.assistant,
             agent_label=self.agent_label,
         )
@@ -1477,10 +1721,25 @@ class LifecycleTui:
         screen.keypad(True)  # arrows, Home/End and Backspace arrive as codes
         screen.nodelay(True)
         screen.timeout(int(self.refresh_seconds * 1000))
+        last_layout = None
         while True:
             height, width = screen.getmaxyx()
-            screen.erase()
             rows = self.frame_rows(width - 1, height)
+            layout = (
+                height,
+                width,
+                tuple(
+                    (index, span.text)
+                    for index, row in enumerate(rows)
+                    for span in row
+                    if span.style == "section"
+                ),
+            )
+            if layout == last_layout:
+                screen.erase()
+            else:
+                screen.clear()
+                last_layout = layout
             paint_rows(screen, rows, width - 1, height, styles, curses.error)
             try:
                 curses.curs_set(1 if self._line is not None else 0)
@@ -1498,7 +1757,8 @@ class LifecycleTui:
             if code == -1:
                 continue
             if code == curses.KEY_RESIZE:
-                screen.erase()
+                last_layout = None
+                screen.clear()
                 continue
             key = decode_key(curses, code)
             if key is None:

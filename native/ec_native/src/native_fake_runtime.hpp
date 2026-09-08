@@ -159,6 +159,7 @@ class NativeFakeRuntime {
   std::vector<std::int32_t> reference_frames() const;
   std::vector<float> joint_position_log() const;
   std::vector<float> anchor_pose_log() const;
+  bool latest_pose(std::span<float> destination) const noexcept;
   RobotState state() const;
   double backend_time() const;
   double base_height() const;

@@ -437,6 +437,12 @@ void NativeFakeRuntime::read_response() noexcept {
   static_cast<void>(sender_stamp);
   last_response_sequence_ = sequence;
   planner_responses_.fetch_add(1, std::memory_order_relaxed);
+  if (request_slot_ && outstanding_request_sequence_ == 0) {
+    // stop() can leave a planner request in flight. If its reply lands before
+    // the next run publishes a request, it belongs to the previous episode.
+    stale_responses_.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
   if (request_slot_ && sequence < outstanding_request_sequence_) {
     // A reply to a request from before the last stop(): the planner stays up
     // across episodes and answers whatever was in flight when the control
@@ -1027,6 +1033,26 @@ std::vector<float> NativeFakeRuntime::joint_position_log() const {
 std::vector<float> NativeFakeRuntime::anchor_pose_log() const {
   const std::size_t count = static_cast<std::size_t>(ticks_.load());
   return {anchor_pose_log_.begin(), anchor_pose_log_.begin() + count * 7};
+}
+
+bool NativeFakeRuntime::latest_pose(
+    std::span<float> destination) const noexcept {
+  if (destination.size() != 7 + kJointCount) {
+    return false;
+  }
+  // A released tick owns an immutable log row, so the viewer can read one
+  // completed pose without sharing mjData or blocking either real-time loop.
+  const std::size_t count =
+      static_cast<std::size_t>(ticks_.load(std::memory_order_acquire));
+  if (count == 0) {
+    return false;
+  }
+  const std::size_t row = count - 1;
+  std::copy_n(anchor_pose_log_.begin() + row * 7, 7, destination.begin());
+  std::copy_n(joint_position_log_.begin() + row * kJointCount, kJointCount,
+              destination.begin() + 7);
+  return std::all_of(destination.begin(), destination.end(),
+                     [](float value) { return std::isfinite(value); });
 }
 
 RobotState NativeFakeRuntime::state() const {

@@ -75,6 +75,14 @@ def run_delegated_rollout(
     config_path = store.generated_dir / "sim_config.json"
     config_path.write_text(json.dumps(config, indent=2))
     logger.event("sim.delegated.config_written", phase="sim_launch", path=str(config_path))
+    if job.sim.backend == "libero" and config.get("live_view"):
+        live_host = str(config.get("live_view_host", "127.0.0.1"))
+        live_port = int(config.get("live_view_port", 8766))
+        logger.event(
+            "sim.live_view.requested",
+            phase="sim_launch",
+            url=f"http://{live_host}:{live_port}/",
+        )
 
     rt = job.sim.runtime
     log_path = str(store.logs_dir / "sim.log")

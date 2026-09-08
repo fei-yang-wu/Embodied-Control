@@ -66,6 +66,13 @@ sim:
     camera_height: 256
     camera_width: 256
     health_timeout_s: 120
+    # Live, non-blocking views of agentview + wrist cameras. The evaluator
+    # container uses host networking, so this loopback URL opens directly on
+    # the host while the run is active: http://127.0.0.1:8766/
+    live_view: true
+    live_view_host: 127.0.0.1
+    live_view_port: 8766
+    live_view_fps: 10
 
 policy:
   endpoint:
