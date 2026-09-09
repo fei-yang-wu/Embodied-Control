@@ -207,7 +207,7 @@ from embodied_control.lowlevel.native_core import NativePlantClient
 robot = load_plant_config(sys.argv[1])
 plant = NativeDdsPlant(
     robot, sys.argv[2], "lo", dds_domain=95, vendor=True, hoist=True,
-    hoist_clearance=0.10,
+    hoist_clearance=0.10, state_log_capacity=10000,
 )
 try:
     assert abs(plant.stats()["foot_clearance"] - 0.10) < 0.005, plant.stats()
@@ -215,6 +215,14 @@ try:
     time.sleep(0.5)
     hanging = plant.stats()
     assert hanging["foot_clearance"] > 0.03, hanging
+    import numpy as np
+    points = plant.hoist_attachment_points()
+    assert points.shape == (2, 3)
+    assert np.all(points[:, 2] > 0.24)
+    assert points[0, 1] > 0 and points[1, 1] < 0
+    history = plant.hoist_log()
+    assert np.all(history[:, 7:] >= 0)
+    assert history[:, 7:].sum(axis=1).max() > 100
     client = NativePlantClient("lo", dds_domain=95)
     client.lower()
     deadline = time.monotonic() + 10.0
@@ -226,6 +234,11 @@ try:
     assert landed["foot_clearance"] <= 0.01, landed
     assert landed["base_height"] < hanging["base_height"] - 0.05, (hanging, landed)
     assert client.status()["foot_clearance"] <= 0.01
+    client.slack()
+    time.sleep(3.5)
+    history = plant.hoist_log()
+    assert history[-1, 6] == 0
+    assert np.all(history[-1, 7:] == 0)
 finally:
     plant.stop()
     plant.wait_for_stop()
@@ -336,6 +349,13 @@ def test_plant_serves_lowstate_alone(tmp_path):
     assert process.returncode == 0
     assert report["publishes"] > 100
     assert report["commands_received"] == 0
+    assert report["state_log_complete"] is True
+    with np.load(report["states_path"]) as states:
+        assert str(states["root_pose_source"]) == "simulator_ground_truth"
+        assert states["root_pos"].shape == (report["publishes"], 3)
+        assert states["joint_pos"].shape == (report["publishes"], 29)
+        assert np.isfinite(states["root_pos"]).all()
+        assert np.max(np.abs(states["root_pos"][:, 2] - report["base_height"])) < 0.1
     assert report["crc_errors"] == 0
     assert report["holding"] is True
     assert report["physics_fault"] is False

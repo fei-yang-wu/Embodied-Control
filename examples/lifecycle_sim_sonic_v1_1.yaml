@@ -10,7 +10,7 @@
 #         --model assets/latent_playkit/model/g1_29dof_rev_1_0.xml --network lo \
 #         --vendor --hoist --dds-domain 51 --report artifacts/lifecycle_sonic/plant.json
 #   T1  pixi run -e native ec lowlevel oracle-worker assets/models/controller/sonic_v1_1 \
-#         --reference-root assets/models/reference/root_qpos_v1 \
+#         --reference-root assets/models/reference/bones \
 #         --motion hurry_idle_001_A277 --request-slot /ec_g1_request \
 #         --response-slot /ec_g1_response --create-slots
 #   T2  pixi run -e native ec lifecycle run examples/lifecycle_sim_sonic_v1_1.yaml \
@@ -35,13 +35,13 @@ request_slot: /ec_g1_request
 response_slot: /ec_g1_response
 connect_slots: true
 command_source: oracle
-reference_root: ../assets/models/reference/root_qpos_v1
+reference_root: ../assets/models/reference/bones
 motion: hurry_idle_001_A277
 start_frame: 0
 fixed_initial_anchor: true
 start_pose: motion
 ramp_seconds: 3.0
-ticks: 504
+ticks: auto
 blend_ticks: 250
 end_state: vendor_damp
 sim_hoist: true

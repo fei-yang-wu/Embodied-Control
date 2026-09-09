@@ -139,6 +139,14 @@ class NativeDdsPlant:
         configured[:, 7:] = rows[:, 7:][:, self._joint_to_sdk]
         return configured
 
+    def hoist_log(self) -> np.ndarray:
+        """Rows of spreader endpoints (6), release gain, and strap tensions (2)."""
+        return np.asarray(self._plant.hoist_log(), dtype=np.float32).reshape(-1, 9)
+
+    def hoist_attachment_points(self) -> np.ndarray:
+        """Shoulder buckle locations in torso_link coordinates."""
+        return np.asarray(self._plant.hoist_attachment_points(), dtype=np.float64)
+
     def reset(self) -> None:
         self._plant.reset()
 

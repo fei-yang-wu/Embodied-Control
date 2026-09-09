@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Literal
 
@@ -80,8 +81,13 @@ class LifecycleJob(JobModel):
     # `start_frame`, a list is an explicit 29-value Isaac-order qpos.
     start_pose: Literal["default", "motion"] | list[float] = "default"
     ramp_seconds: float = Field(default=3.0, gt=0.0)
-    ticks: int = Field(default=500, ge=1)
+    ticks: int | Literal["auto"] = 500
     blend_ticks: int = Field(default=250, ge=0)
+    # Arming engages the policy on the reference's first frame and stops there;
+    # the motion plays on a second, separate request, after this countdown.
+    play_countdown_seconds: float = Field(default=3.0, ge=0.0)
+    arm_timeout_seconds: float = Field(default=60.0, gt=0.0)
+    stand_hold_seconds: float = Field(default=0.0, ge=0.0)
     lead_ticks: int = Field(default=4, ge=0)
     command_stale_ms: float = Field(default=500.0, gt=0.0)
     state_absent_ms: float = Field(default=500.0, gt=0.0)
@@ -119,6 +125,14 @@ class LifecycleJob(JobModel):
 
     @model_validator(mode="after")
     def validate_sources(self) -> "LifecycleJob":
+        if not self.pin_reference:
+            raise ValueError("arm/play requires pin_reference=true")
+        if self.stand_hold_seconds > 0 and (self.command_source != "oracle" or self.ticks != "auto"):
+            raise ValueError("stand_hold_seconds requires oracle playback with ticks=auto")
+        if isinstance(self.ticks, int) and self.ticks < 1:
+            raise ValueError("ticks must be positive or auto")
+        if self.ticks == "auto" and self.command_source != "oracle":
+            raise ValueError("ticks=auto requires oracle playback")
         if self.command_source == "oracle":
             if not self.reference_root or not self.motion:
                 raise ValueError(
@@ -139,6 +153,17 @@ class LifecycleJob(JobModel):
             self.thresholds.pose_tolerance_rad
         ) != 29:
             raise ValueError("pose_tolerance_rad list needs 29 values")
+        manifest_path = Path(self.reference_root) / "reference_arrays_manifest.json"
+        if self.reference_root and self.motion and manifest_path.is_file():
+            manifest = json.loads(manifest_path.read_text())
+            info = manifest["traj_info"]
+            names = [entry[1] for entry in info["ordered_traj_list"]]
+            if self.motion not in names:
+                raise ValueError(f"motion {self.motion!r} not in reference tree {self.reference_root}")
+            index = names.index(self.motion)
+            length = info["end_index"][index] - info["start_index"][index]
+            if self.start_frame >= length - 1:
+                raise ValueError("start_frame must leave at least one reference transition")
         return self
 
 
@@ -147,14 +172,13 @@ def load_lifecycle_job(path: str | Path) -> LifecycleJob:
     raw = yaml.safe_load(source.read_text()) or {}
     if not isinstance(raw, dict):
         raise ValueError(f"{source} is not a mapping")
-    job = LifecycleJob.model_validate(raw)
     base = source.resolve().parent
     for name in ("bundle", "reference_root", "artifacts_dir", "mjcf", "rehearsal_root"):
-        value = getattr(job, name)
+        value = raw.get(name)
         if value and not Path(value).is_absolute():
-            setattr(job, name, str((base / value).resolve()))
-    job.trackers = {
+            raw[name] = str((base / value).resolve())
+    raw["trackers"] = {
         name: str((base / value).resolve()) if not Path(value).is_absolute() else value
-        for name, value in job.trackers.items()
+        for name, value in raw.get("trackers", {}).items()
     }
-    return job
+    return LifecycleJob.model_validate(raw)

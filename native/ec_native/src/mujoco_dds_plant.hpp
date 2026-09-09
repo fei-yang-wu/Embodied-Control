@@ -112,6 +112,8 @@ class MujocoDdsPlant {
   // Optional start pose: [root pos 3 | root quat XYZW 4 | joints 29 SDK order].
   // Rows x 36, SDK motor order. Copied off the physics thread.
   std::vector<float> state_log() const;
+  std::vector<float> hoist_log() const;
+  std::array<double, 6> hoist_attachment_points() const;
   std::size_t state_log_rows() const noexcept {
     return state_log_rows_.load(std::memory_order_acquire);
   }
@@ -164,6 +166,9 @@ class MujocoDdsPlant {
   std::array<int, kJointCount> qpos_address_{};
   std::array<int, kJointCount> dof_address_{};
   int pelvis_body_id_ = -1;
+  int hoist_body_id_ = -1;
+  std::vector<double> hoist_jacobian_;
+  std::array<std::array<double, 3>, 2> hoist_spreader_offsets_{};
   double timestep_ = 0.002;
   std::uint8_t mode_machine_ = 5;
   int physics_cpu_ = -1;
@@ -187,7 +192,7 @@ class MujocoDdsPlant {
   // ownership gate on rt/lowcmd. Null when the plant runs bare.
   std::unique_ptr<PlantVendor> vendor_;
   bool previous_owned_ = false;
-  // A 6-DoF spring-damper on the pelvis standing in for the gantry. Released
+  // Shoulder suspension releases gradually rather than dropping the load
   // over hoist_release_seconds_ so the feet take the load gradually, the way
   // an operator pays out a strap.
   bool hoist_enabled_ = false;
@@ -195,7 +200,7 @@ class MujocoDdsPlant {
   double hoist_release_seconds_ = 3.0;
   // The hang height the strap holds, and how far below the captured pose it
   // pays out when lowering: past the clearance by a margin, so the feet
-  // reach the floor and the one-sided z term then goes slack under the
+  // reach the floor and the tension-only straps then go slack under the
   // robot's own weight. The strap moves at a winch's pace, never in a jump:
   // a target that teleports 10 cm down is a free fall onto the ankles.
   double hoist_clearance_ = kDefaultHoistClearanceMeters;
@@ -211,7 +216,6 @@ class MujocoDdsPlant {
   std::uint64_t hoist_generation_seen_ = 0;
   std::uint64_t reset_generation_seen_ = 0;
   std::array<double, 3> hoist_target_position_{};
-  std::array<double, 4> hoist_target_quaternion_wxyz_{1.0, 0.0, 0.0, 0.0};
   std::atomic<float> hoist_gain_reported_{0.0F};
   std::array<float, kJointCount> zero_gains_{};
   std::array<float, kJointCount> vendor_damp_kd_{};
@@ -220,6 +224,8 @@ class MujocoDdsPlant {
   // Rows are [pos 3 | quat XYZW 4 | joint q 29] in SDK motor order.
   std::array<std::atomic<float>, 7 + kJointCount> live_state_{};
   std::vector<float> state_log_;
+  std::vector<float> hoist_log_;
+  std::array<double, 2> hoist_tensions_{};
   std::size_t state_log_capacity_ = 0;
   std::atomic<std::size_t> state_log_rows_{0};
   std::uint64_t noise_state_ = 0;  // physics thread only

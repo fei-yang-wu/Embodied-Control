@@ -2,7 +2,7 @@
 
 Status: software v1 implemented; hardware ladder pending
 Audience: embodied-control developers, G1 rig operators
-Last updated: 2026-09-02
+Last updated: 2026-09-09
 Depends on: `docs/design/robot_runtime_interface.md` (vendor axis, decided:
 `MotionSwitcherClient::ReleaseMode` + `rt/lowcmd`)
 
@@ -61,11 +61,13 @@ starting values, tuned during the hardware ladder in §6.
 | 4 | `START_POSE_RAMP` | ramp current → start pose over T s (0.5 rad/s cap, existing) | ramp complete; **new guard**: any joint with tracking error > 0.3 rad for > 50 ms → `FAULT` (blocked joint / collision) | writer + lowstate | identical |
 | 5 | `POSE_SETTLED` | hold start pose (WAIT) | ‖q − q*‖∞ < 0.05 rad and ‖q̇‖∞ < 0.1 rad/s for 500 ms | lowstate | identical |
 | 6 | `LOWERED` **new** | operator lowers the hoist while the tracker holds the pose | operator ack on hardware; joint speed settles again (< 0.1 rad/s for 500 ms) after the load change | operator + lowstate | plant pays the strap out at 0.05 m/s to past the hang height; the gate waits for measured clearance ≤ 2 mm before it grades the settle |
-| 7 | `POSE_MATCH_VERIFIED` **new** | capture the fixed anchor, write `pose_match.json` | ‖q_hw − q_sim_start‖∞ < per-joint tolerance (0.05 rad legs, 0.1 rad arms); projected-gravity tilt vs reference frame 0 < 5°; base height plausible (IMU-only, so tilt is the real check) | lowstate + reference | identical; sim additionally has ground-truth root pose to grade the IMU check |
+| 7 | `POSE_MATCH_VERIFIED` **new** | capture the fixed anchor, write `pose_match.json` | valid finite joint/IMU state; pose and reference-relative tilt tolerances are diagnostics, not refusals | lowstate + reference | identical; sim additionally has ground-truth root pose to grade the IMU check |
 | 8 | `POLICY_COMMAND_FRESH` | planner warm-up: N ≥ 20 inferences, p99 latency < 60 % of the tick | command age < `command_stale_ms`; sequence advancing; **first-action consistency**: ‖a₀ − q_hold‖∞ < 0.2 rad | command slot + planner stats | identical |
 | 9 | `PRIMED` | `engage_control` | immediate | backend | identical |
 | 10 | `BLEND_IN` **new** | target and gains blend held → policy, weight 0 → 1 over 250 writer ticks (0.5 s); `last_action` reports the blended action; the reference clock stays on frame 0 until the blend is done | blend complete, no watchdog trip | writer + control thread | identical |
-| 11 | `RUNNING` | serve | operator `hold` / `damp`, tick budget, or any watchdog | existing | identical |
+| 10a | `ARMED` **new (2026-09-09)** | nothing: the policy owns the joints with the reference clock pinned; a composed stance prefix is required for a stationary encoder window | writer in CONTROL, no runtime fault, valid joint/IMU state; tilt is diagnostic; then an explicit `play` | writer + lowstate | identical; the strap is still `lowered` here |
+| 11 | `RUNNING` | strap paid out, countdown announced, reference clock released | operator `hold` / `damp`, reference frames played out, tick budget, or any watchdog | existing | identical |
+| 11a | `STAND_HOLD` | composed reference reaches its stationary suffix; pin the clock and keep policy control | operator hoists and damps, configured timeout enters HOLD, or runtime fault damps | reference progress + writer | identical |
 | 12 | `HOLD` **new** | freeze on the last commanded target; in sim the strap takes the load on entry | operator takes the load on the hoist, then `damp` | operator | plant re-welds on `hoist` |
 | 13 | `DAMP` | kd-only frames | always reachable; `FAULT_DAMP` is the same frame with a recorded reason | writer | identical |
 | 14 | `RELEASED` **new** | write gate closed, publisher silent | writer publishes 0 for 200 ms | writer stats | identical |
@@ -84,12 +86,29 @@ Why the five additions:
 - **`LOWERED`** because the ramp and the settle both happen with the feet in
   the air; the loaded pose differs, and the policy was trained standing on the
   ground. Without it the pose-match check verifies the wrong configuration.
-- **`POSE_MATCH_VERIFIED`** is the actual "match the sim setup" requirement.
-  Settled is not the same as correct: a joint can settle on a limit, and the
-  IMU tilt is the only observable that ties the robot's frame to the reference.
+- **`POSE_MATCH_VERIFIED`** retains its historical state name for artifact
+  compatibility. It records pose error and reference-relative tilt, but only
+  invalid state blocks this step. Matching the reference's first pose is not
+  a prerequisite for a tracking policy to start.
 - **`BLEND_IN`** because the first policy action is a step function against a
   held pose. A weight ramp of half a second removes the one discontinuity the
   policy never saw in training.
+- **`ARMED`** because engaging the policy and playing a motion are two
+  decisions, and one key used to do both: `go` blended in and released the
+  reference clock in the same call, so on hardware (where there is no gantry
+  status to wait for) the motion began about half a second after the keypress,
+  with the operator still within reach of the robot. Arming leaves the robot
+  tracking a paused reference. A raw clip may still encode future movement;
+  use a rehearsed stance prefix when a stationary encoder window is needed.
+  SONIC's prerecorded-motion console uses `]` to start the policy and `T` to
+  play the selected motion; it does not guarantee a separate standing reference;
+  their `R` pauses at the first frame without terminating the policy, which is
+  the same pinned-reference state. `play` displays a countdown with terminal bell cues before it
+  releases the clock. The armed stand is bounded by `arm_timeout_seconds`
+  (60 s): past it the run goes to `HOLD`, never into a motion nobody is
+  standing by for. The tick budget is padded by the same allowance, so an
+  armed stand is not paid out of the frames the operator asked for, and the
+  episode ends on reference exhaustion instead.
 - **`HOLD`** because damping a standing robot is a fall. Freezing on the last
   target gives the operator a stable robot to take the load from.
 - **`RELEASED`** because `SelectMode` with our writer still publishing is two
@@ -660,3 +679,68 @@ would have reached hardware otherwise.
   robot on the floor re-damped a DISABLED writer and blocked `close_gate`;
   the latch no longer touches a disabled writer, and PRECHECK clears it so
   the next episode can start.
+
+## Reference deployment update (2026-09-09)
+
+See [reference_deployment.md](reference_deployment.md) for the implemented
+unified BONES collection, endpoint screening, derived stance/bridge references,
+`arm`/`play` split, final `STAND_HOLD`, content-based rehearsal matching, and
+measured simulation results. A pinned raw frame is not proof of balance; the
+new examples use a stationary prefix covering the encoder window.
+
+
+### Startup gate revision (2026-09-09)
+
+The pose and tilt tolerances now label diagnostics, rather than refusing
+policy activation or playback. Active-policy playback no longer waits for
+all joints to remain within 0.03 rad for 0.5 seconds. PD settling during
+preparation is unchanged, as are vendor ownership, state validity, runtime
+faults, first-action checks, hoist handling, and operator countdown.
+
+This follows inspection of upstream SONIC commit
+`087f9ac01d46f6d8e4d0b73c01ae64799f292a38`: `InitControl` ramps to default angles
+for three seconds; `WAIT_FOR_CONTROL` checks state freshness and waits for
+operator start; the keyboard `play_motion` handler enables playback without
+checking first-frame pose error or joint quietness. This is a comparison of
+startup behavior, not a claim that 50b has SONIC's recovery capability.
+
+The deployment identity includes `diagnostic_pose_operator_play_v1`, so old
+rehearsals cannot qualify the revised contract. New experiments use default
+stance and remain separate from the previous motion-pose initialization runs.
+Lifecycle completion and tracking quality must be reported separately.
+
+The rehearsal identity also includes planner lookahead (`lead_ticks`). A
+retained runtime fault disqualifies a rehearsal even if recovery restored the
+vendor without any failed transition. Arming rechecks active control after
+its sampling window, so a fault during sampling cannot be reported as ARMED.
+
+
+### G1 shoulder-strap hoist (2026-09-09)
+
+The previous pelvis spring and pelvis orientation servo are replaced by two
+tension-only straps attached to `torso_link`, beside the neck at the upper
+shoulder/back buckles. Unitree's G1 user manual describes two shoulder
+suspension buckles; deployment photographs show two straps and a spreader
+above the head. This does not model a rope around the neck.
+
+The attachment coordinates are approximate model-frame positions in metres:
+`(-0.035, +0.08, 0.30)` and `(-0.035, -0.08, 0.30)`. They are not manufacturer
+measurements. Each strap has a 0.50 m unloaded length. A level spreader moves
+at the existing winch speed. Only positive extension produces tension; the
+damper uses attachment-point velocity relative to the moving spreader. Forces
+act on the torso with their physical moments about its centre of mass. There
+is no pelvis wrench or independent orientation servo. The articulated waist
+and legs respond to the suspension naturally.
+
+Lowering pays the spreader down so the feet take the load. Slack still releases
+tension over three seconds. Plant state recordings now include spreader
+positions, release gain, strap tensions, and attachment locations, allowing
+videos to draw the support at the actual simulated attachment points.
+The straight strap segments in replay represent the suspension line of action;
+unloaded straps are not a cloth simulation.
+
+The rehearsal identity includes `g1_shoulder_straps_v1`; old pelvis-supported
+campaigns cannot qualify this revised setup. They remain historical results.
+
+Sources: [Unitree G1 user manual](https://www.manualslib.com/manual/3693046/Unitree-G1.html)
+and [photograph of the shoulder attachments](https://qiita.com/ShibataRyoichi/items/94c1948dbf91959c359e).

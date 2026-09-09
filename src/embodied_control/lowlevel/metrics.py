@@ -51,6 +51,8 @@ def render_oracle_comparison_video(
     height: int = 360,
 ) -> dict:
     """Render full-horizon reference-left / policy-right native telemetry."""
+    if str(telemetry.get("anchor_pose_source", "unknown")) == "controller_fixed_translation_imu_orientation":
+        raise ValueError("DDS controller anchors are not physical root poses; render the plant states recording")
     if sys.platform.startswith("linux"):
         os.environ.setdefault("MUJOCO_GL", "egl")
     import imageio.v2 as imageio

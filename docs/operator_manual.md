@@ -70,13 +70,20 @@ end up, not rungs to climb.
 | 5 | `START_POSE_RAMP` | the joints reached the start pose without one lagging behind |
 | 6 | `POSE_SETTLED` | the robot stopped moving there |
 | 7 | `LOWERED` | you lowered it and it settled again with the feet loaded |
-| 8 | `POSE_MATCH_VERIFIED` | the pose and the pelvis tilt match the sim start frame |
+| 8 | `POSE_MATCH_VERIFIED` | pose and pelvis tilt diagnostics recorded; valid state required |
 | 9 | `POLICY_COMMAND_FRESH` | the planner answers in time and its first action is sane |
 | 10 | `PRIMED` | everything is verified and the robot is waiting for you |
 
-Then `/go` blends the policy in over half a second and runs the
-episode. `/hold` freezes on the last target when you want to stop
-early; the budget ends it otherwise.
+Then the episode is two keys, not one. `/arm` blends the policy in
+over half a second and stops there: the policy owns the joints and
+keeps the reference clock paused. Use a rehearsed composed stance
+reference: pausing a raw clip does not establish standing balance.
+`/play` releases the reference clock and the motion runs, after a
+visible countdown with terminal bell cues (if enabled). The policy
+continues making balancing corrections while armed. `Ctrl-D` still
+damps at any point, and `/hold` freezes on the last target when you
+want to stop early. Do not stay armed indefinitely: past
+`arm_timeout_seconds` the run goes to `HOLD` instead of playing.
 
 ## Ending a run
 
@@ -90,7 +97,10 @@ it comes back.
 
 Recovery is available from DAMP, FAULT, HOLD, RELEASED, VENDOR_RESTORED, VENDOR_STAND.
 `/stand` takes it further, to the vendor's balance stand, when you want
-the robot on its feet. Our controller never stands the robot itself.
+the robot on its feet under vendor control. With a composed reference
+and `stand_hold_seconds`, playback ends in `STAND_HOLD`: the tracker
+keeps the final stance reference pinned until you hoist and damp or
+the configured timeout enters the existing PD `HOLD` state.
 
 ## Every key
 
@@ -126,7 +136,8 @@ the robot on its feet. Our controller never stands the robot itself.
 
 | Key | Command | What it does |
 |---|---|---|
-| `g` | `/go` | go: PRIMED -> BLEND_IN -> RUNNING |
+| `g` | `/arm` | arm: blend in, policy stands on frame 0 |
+| `G` | `/play` | play: release the reference, motion starts |
 | `h` | `/hold` | hold: freeze on the last target |
 | `e` | `/retake` | retake: HOLD -> link precheck -> ramp |
 
@@ -190,8 +201,10 @@ log to a read-only coding agent, which can explain but cannot act.
 | `LOWERED` | /next |
 | `POSE_MATCH_VERIFIED` | /next |
 | `POLICY_COMMAND_FRESH` | /next |
-| `PRIMED` | /go |
+| `PRIMED` | /arm |
 | `BLEND_IN` | wait |
+| `ARMED` | /play once everyone is clear |
+| `STAND_HOLD` | /hoisted, then /damp |
 | `RUNNING` | /hold |
 | `HOLD` | /hoisted, then /damp |
 | `DAMP` | /hoisted, then /damp |

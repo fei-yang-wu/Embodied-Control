@@ -11,14 +11,14 @@ request_slot: /ec_g1_request
 response_slot: /ec_g1_response
 connect_slots: true
 command_source: oracle
-reference_root: ../assets/models/reference/root_qpos_v1
+reference_root: ../assets/models/reference/bones
 motion: Neutral_stoop_down_001_A057
 start_frame: 0
 lead_ticks: 0
 fixed_initial_anchor: true
 start_pose: motion
 ramp_seconds: 3.0
-ticks: 339
+ticks: auto
 blend_ticks: 250
 end_state: vendor_damp
 sim_hoist: true

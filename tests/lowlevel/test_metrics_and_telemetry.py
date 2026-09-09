@@ -197,3 +197,20 @@ def test_telemetry_drain_thread_logs_and_exits(tmp_path):
     assert name == "telemetry.sample"
     assert fields["ticks"] == 6
     assert fields["base_height"] == pytest.approx(0.76)
+
+
+@pytest.mark.parametrize('source', [None, 'controller_fixed_translation_imu_orientation'])
+def test_episode_mpjpe_rejects_unmeasured_root(tmp_path, source):
+    from types import SimpleNamespace
+    from embodied_control.cli import _episode_mpjpe
+    values = {} if source is None else {'anchor_pose_source': np.asarray(source)}
+    np.savez(tmp_path / 'telemetry.npz', **values)
+    grade = _episode_mpjpe(SimpleNamespace(mjcf='unused.xml', reference_root='unused'), None)
+    assert grade(tmp_path, SimpleNamespace(mode='oracle')) is None
+
+
+def test_comparison_renderer_rejects_controller_root_estimate():
+    from embodied_control.lowlevel.metrics import render_oracle_comparison_video
+    with pytest.raises(ValueError, match='not physical root poses'):
+        render_oracle_comparison_video(None, 'unused.xml', None,
+            {'anchor_pose_source': np.asarray('controller_fixed_translation_imu_orientation')}, 'unused.mp4')

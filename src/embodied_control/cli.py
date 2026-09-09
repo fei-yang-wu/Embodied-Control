@@ -351,6 +351,13 @@ def _cmd_lowlevel_verify_bundle(args) -> int:
 
     try:
         report = verify_bundle(args.bundle, atol=args.atol)
+        if args.reference_root:
+            from embodied_control.lowlevel.bundle import PolicyBundle
+            from embodied_control.lowlevel.reference import ReferenceArrays
+            from embodied_control.lowlevel.reference_catalog import reference_compatibility
+            report["reference"] = reference_compatibility(
+                PolicyBundle.load(args.bundle), ReferenceArrays(args.reference_root)
+            )
     except (
         KeyError,
         RuntimeError,
@@ -1038,6 +1045,32 @@ def _tracker_for(job, args, bundle, selection):
     network = args.network or job.network
     fixed_anchor = None
     if selection.mode == "oracle":
+        from embodied_control.lowlevel.reference import ReferenceArrays
+        from embodied_control.lowlevel.reference_deploy import classify_motion
+        from embodied_control.robot.rehearsal import SIM_NETWORKS
+        reference = ReferenceArrays(job.reference_root)
+        from embodied_control.lowlevel.reference_catalog import reference_compatibility
+        reference_compatibility(bundle, reference)
+        selected_motion = reference.motion(selection.motion)
+        metadata = reference.manifest.get("motions", {}).get(selection.motion, {})
+        if job.stand_hold_seconds > 0:
+            hold_frames = int(metadata.get("hold_frames", 0))
+            lookahead = bundle.manifest.command.horizon_steps * bundle.manifest.command.macro_frame_stride
+            if hold_frames <= lookahead or selection.start_frame != 0:
+                raise ValueError("final policy hold requires a composed stance reference covering this encoder's lookahead")
+            import numpy as np
+            for segment in (slice(0, hold_frames), slice(-hold_frames, None)):
+                for array in (selected_motion.joint_qpos, selected_motion.anchor_pos_w, selected_motion.anchor_quat_w):
+                    if not np.allclose(array[segment], array[segment][0], atol=1e-6):
+                        raise ValueError("composed stance segment is not stationary")
+                if selected_motion.joint_qvel is None or not np.allclose(selected_motion.joint_qvel[segment], 0, atol=1e-6):
+                    raise ValueError("composed stance segment has nonzero joint velocity")
+        if network not in SIM_NETWORKS:
+            if selection.start_frame != 0:
+                raise ValueError("hardware playback requires a screened start at frame 0")
+            verdict = classify_motion(selected_motion, fps=reference.fps)
+            if not verdict.deployable:
+                raise ValueError("reference fails deployment endpoint screening: " + "; ".join(verdict.reasons))
         fixed_anchor, displacement, available = _unitree_stationary_anchor(
             bundle,
             job.reference_root,
@@ -1046,9 +1079,11 @@ def _tracker_for(job, args, bundle, selection):
             job.fixed_anchor_max_displacement,
         )
         # A later start frame leaves fewer frames; the episode budget follows.
-        ticks = min(int(job.ticks), int(available))
+        ticks = int(available) if job.ticks == "auto" else min(int(job.ticks), int(available))
         print(f"Fixed initial anchor: max reference displacement {displacement:.4f} m; budget {ticks} ticks")
     else:
+        if job.ticks == "auto":
+            raise ValueError("ticks=auto requires oracle playback")
         ticks = int(job.ticks)
     start_pose = None
     reference_gravity = None
@@ -1098,31 +1133,60 @@ def _rehearsal_root(job) -> str:
     return str(Path(job.artifacts_dir).parent) if job.artifacts_dir else ""
 
 
-def _run_identity(job, bundle, network: str) -> dict:
+def _run_identity(job, bundle, network: str, selection=None, ticks=None) -> dict:
     from embodied_control.robot.rehearsal import run_identity
 
     source = bundle.manifest.source or {}
+    motion = selection.motion if selection is not None else job.motion
+    start_frame = selection.start_frame if selection is not None else job.start_frame
+    mode = selection.mode if selection is not None else job.command_source
+    reference_sha = ""
+    if job.reference_root and motion:
+        from embodied_control.lowlevel.reference import ReferenceArrays
+        from embodied_control.lowlevel.reference_catalog import motion_sha256
+        reference_sha = motion_sha256(ReferenceArrays(job.reference_root), motion)
+    import hashlib
+    deployment = {key: getattr(job, key) for key in (
+        "start_pose", "fixed_initial_anchor", "pin_reference", "ramp_seconds", "lead_ticks",
+        "blend_ticks", "play_countdown_seconds", "arm_timeout_seconds", "stand_hold_seconds",
+    )}
+    deployment["rehearsal_hoist_contract"] = "g1_shoulder_straps_v1"
+    deployment["startup_contract"] = "diagnostic_pose_operator_play_v1"
+    deployment["thresholds"] = job.thresholds.model_dump()
+    deployment["bundle_manifest"] = bundle.manifest.model_dump(mode="json")
+    deployment_sha = hashlib.sha256(json.dumps(deployment, sort_keys=True).encode()).hexdigest()
     return run_identity(
         bundle_sha=str(source.get("checkpoint_sha256", "")),
-        bundle_name=Path(job.bundle).name,
-        motion=job.motion,
-        command_source=job.command_source,
+        deployment_sha=deployment_sha,
+        bundle_name=bundle.root.name,
+        motion=motion,
+        reference_sha=reference_sha,
+        command_source=mode,
         network=network,
-        start_frame=job.start_frame,
-        ticks=job.ticks,
+        start_frame=start_frame,
+        ticks=int(ticks if ticks is not None else (0 if job.ticks == "auto" else job.ticks)),
     )
 
 
-def _lifecycle_config(job, args, bundle, start_pose, reference_gravity, ticks=None):
+def _lifecycle_config(job, args, bundle, start_pose, reference_gravity, ticks=None, selection=None):
     from embodied_control.robot.lifecycle import LifecycleConfig
 
     thresholds = job.thresholds
+    terminal_hold_frames = 0
+    if job.stand_hold_seconds > 0:
+        manifest = json.loads((Path(job.reference_root) / "reference_arrays_manifest.json").read_text())
+        motion = selection.motion if selection is not None else job.motion
+        terminal_hold_frames = int(manifest["motions"][motion]["hold_frames"])
     return LifecycleConfig(
         start_pose=start_pose,
         reference_gravity=reference_gravity,
         ramp_seconds=job.ramp_seconds,
         ticks=int(job.ticks if ticks is None else ticks),
         blend_ticks=job.blend_ticks,
+        play_countdown_seconds=job.play_countdown_seconds,
+        arm_timeout_seconds=job.arm_timeout_seconds,
+        stand_hold_seconds=job.stand_hold_seconds,
+        terminal_hold_frames=terminal_hold_frames,
         end_state=job.end_state,
         damp_hands_back=job.damp_hands_back,
         retake_precheck=job.retake_precheck,
@@ -1214,7 +1278,7 @@ def _build_lifecycle(args):
     selection = _lifecycle_selection(job)
     runtime, start_pose, reference_gravity, ticks = _tracker_for(job, args, bundle, selection)
     vendor, hoist = _lifecycle_peers(job, args)
-    config = _lifecycle_config(job, args, bundle, start_pose, reference_gravity, ticks)
+    config = _lifecycle_config(job, args, bundle, start_pose, reference_gravity, ticks, selection)
     artifacts = args.artifacts or job.artifacts_dir or None
     lifecycle = Lifecycle(
         runtime,
@@ -1222,7 +1286,7 @@ def _build_lifecycle(args):
         config,
         hoist=hoist,
         auto_ack=bool(job.sim_hoist or args.auto_ack),
-        identity=_run_identity(job, bundle, args.network or job.network),
+        identity=_run_identity(job, bundle, args.network or job.network, selection, ticks),
         log=LifecycleLog(artifacts),
         note=lambda msg: print(f"  -- {msg}", flush=True),
     )
@@ -1244,6 +1308,10 @@ def _episode_mpjpe(job, bundle_for):
         if selection.mode != "oracle":
             return None
         telemetry = np.load(directory / "telemetry.npz")
+        if str(telemetry.get("anchor_pose_source", "unknown")) not in {
+            "simulator_ground_truth", "measured_root",
+        }:
+            return None
         joint = telemetry["joint_position_log"]
         anchor = telemetry["anchor_pose_log"]
         frames = telemetry["reference_frames"]
@@ -1353,12 +1421,12 @@ def _build_session(args):
     def tracker_factory(selection):
         bundle = bundle_for(selection)
         runtime, start_pose, reference_gravity, ticks = _tracker_for(job, args, bundle, selection)
-        pending["config"] = _lifecycle_config(job, args, bundle, start_pose, reference_gravity, ticks)
+        pending["config"] = _lifecycle_config(job, args, bundle, start_pose, reference_gravity, ticks, selection)
         # The console can switch bundle and motion between episodes, so the
         # identity is rebuilt with the tracker rather than read once.
         pending["identity"] = _run_identity(
-            job, bundle, args.network or job.network
-        ) | {"motion": selection.motion or job.motion}
+            job, bundle, args.network or job.network, selection, ticks
+        )
         return runtime
 
     def lifecycle_factory(tracker, selection, session):
@@ -1504,11 +1572,12 @@ def _cmd_lifecycle_run(args) -> int:
             failed = True
             print(f"FAIL at {lifecycle.state}: {result.detail}")
         elif args.go and lifecycle.state is LifecycleState.PRIMED:
+            # Unattended: arm and play in one call. The console splits the two.
             result = lifecycle.go()
             if not result.ok:
                 failed = True
                 print(f"FAIL at {lifecycle.state}: {result.detail}")
-            while runtime.running and lifecycle.state is LifecycleState.RUNNING:
+            while runtime.running and lifecycle.state in {LifecycleState.RUNNING, LifecycleState.STAND_HOLD}:
                 lifecycle.poll()
                 time.sleep(0.01)
             lifecycle.poll()
@@ -1550,6 +1619,10 @@ def _cmd_lowlevel_plant(args) -> int:
     from embodied_control.sim.dds_plant import NativeDdsPlant
 
     robot = load_plant_config(args.robot)
+    states_output = args.states or (
+        str(Path(args.report).with_suffix(".states.npz"))
+        if args.report and args.seconds > 0 else ""
+    )
     plant = NativeDdsPlant(
         robot,
         args.model,
@@ -1575,7 +1648,7 @@ def _cmd_lowlevel_plant(args) -> int:
         hoist_clearance=args.hoist_clearance,
         # One row per publish; the plant serves at 1 / timestep.
         state_log_capacity=(
-            int(args.seconds / args.timestep) + 1024 if args.states else 0
+            int(args.seconds / args.timestep) + 1024 if states_output else 0
         ),
     )
     if args.initial_pose:
@@ -1617,9 +1690,10 @@ def _cmd_lowlevel_plant(args) -> int:
         plant.wait_for_stop()
     report = plant.stats()
     report.update(view)
-    if args.states:
+    if states_output:
         rows = plant.state_log()
-        states_path = Path(args.states).resolve()
+        hoist_rows = plant.hoist_log()
+        states_path = Path(states_output).resolve()
         states_path.parent.mkdir(parents=True, exist_ok=True)
         np.savez(
             states_path,
@@ -1628,9 +1702,20 @@ def _cmd_lowlevel_plant(args) -> int:
             joint_pos=rows[:, 7:],
             joint_names=np.asarray(robot.joint_names),
             publish_hz=np.asarray(1.0 / args.timestep, dtype=np.float64),
+            root_pose_source=np.asarray("simulator_ground_truth"),
+            hoist_attachment_body=np.asarray("torso_link"),
+            hoist_attachment_points=plant.hoist_attachment_points(),
+            hoist_hook_pos=hoist_rows[:, :6].reshape(-1, 2, 3),
+            hoist_gain=hoist_rows[:, 6],
+            hoist_tension=hoist_rows[:, 7:9],
+            sample_period_seconds=np.asarray(args.timestep, dtype=np.float64),
         )
         report["states_path"] = str(states_path)
         report["state_rows"] = int(rows.shape[0])
+        report["hoist_contract"] = "g1_shoulder_straps_v1"
+        report["hoist_attachment_body"] = "torso_link"
+        report["hoist_attachment_points"] = plant.hoist_attachment_points().tolist()
+        report["state_log_complete"] = int(rows.shape[0]) == int(report["publishes"])
     if args.report:
         output = Path(args.report).resolve()
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -1692,6 +1777,7 @@ def build_parser() -> argparse.ArgumentParser:
     lver = lows.add_parser("verify-bundle", help="replay a bundle's golden traces")
     lver.add_argument("bundle")
     lver.add_argument("--atol", type=float, default=1e-5)
+    lver.add_argument("--reference-root", default="", help="also validate the reference consumer contract")
     lver.set_defaults(func=_cmd_lowlevel_verify_bundle)
     lnver = lows.add_parser(
         "verify-native-bundle", help="replay golden traces in C++ ONNX Runtime"
@@ -1902,7 +1988,8 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             ".npz for the plant's TRUE state trajectory (pos, quat XYZW, "
             "joints in plant-config order, with joint_names). The DDS wire carries no root pose, so "
-            "this is the only ground truth for MPJPE on this tier."
+            "this is the only ground truth for MPJPE on this tier. Bounded runs "
+            "with --report save <report>.states.npz automatically."
         ),
     )
     lplant.add_argument(
@@ -1926,7 +2013,7 @@ def build_parser() -> argparse.ArgumentParser:
     lplant.add_argument(
         "--hoist",
         action="store_true",
-        help="hang the pelvis from a virtual gantry until `lower` is requested",
+        help="suspend the upper torso from two shoulder straps until `lower` is requested",
     )
     lplant.add_argument(
         "--hoist-clearance",

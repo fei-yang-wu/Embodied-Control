@@ -1,0 +1,39 @@
+# Build the composed reference using docs/design/reference_deployment.md first.
+api_version: ec.lifecycle/v1alpha1
+bundle: ../assets/models/controller/sonic_v1_1
+trackers:
+  combo-50b: ../assets/models/controller/combo_50b
+  # Every pinned controller bundle is selectable with `t`/`T`; the console
+  # restarts the oracle worker for the bundle it switches to, so the encoder
+  # contract (SONIC v1.1 is stride 5 over qvel, the fsq64 bundles stride 1)
+  # follows the selection instead of being fixed at startup.
+  sonic_v1_1: ../assets/models/controller/sonic_v1_1
+  fsq64_sonic_4500m: ../assets/models/controller/fsq64_sonic_4500m
+  fsq64_10b: ../assets/models/controller/fsq64_10b
+  rollout24_gamma097_3500m: ../assets/models/controller/rollout24_gamma097_3500m
+network: ""
+dds_domain: 0
+request_slot: /ec_g1_request
+response_slot: /ec_g1_response
+connect_slots: true
+command_source: oracle
+reference_root: ../assets/models/reference/bones_hurry_stand
+motion: hurry_idle_001_A277__stand_f42c00b9b413
+start_frame: 0
+fixed_initial_anchor: true
+start_pose: default
+ramp_seconds: 3.0
+ticks: auto
+blend_ticks: 250
+end_state: vendor_damp
+sim_hoist: false
+artifacts_dir: ../artifacts/lifecycle_hardware_stance_hurry
+mjcf: ../assets/latent_playkit/model/g1_29dof_rev_1_0.xml
+thresholds:
+  settle_timeout_seconds: 15.0
+
+# Keep policy control during hoist recovery after the final stance.
+stand_hold_seconds: 60.0
+
+require_rehearsal: true
+rehearsal_root: ../artifacts

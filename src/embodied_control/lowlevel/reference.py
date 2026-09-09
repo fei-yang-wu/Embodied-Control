@@ -50,6 +50,9 @@ class ReferenceArrays:
                 "reader understands version 1"
             )
         self.manifest = manifest
+        self.fps = float(manifest.get("fps", 50.0))
+        if not np.isfinite(self.fps) or self.fps <= 0:
+            raise ValueError("reference fps must be positive and finite")
         key = manifest["key"]
         self.joint_names: list[str] = list(key["joint_names"])
         self.anchor_body: str = key["anchor_body"]

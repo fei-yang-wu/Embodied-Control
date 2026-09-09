@@ -977,6 +977,20 @@ class MujocoDdsPlantBinding {
     return out;
   }
 
+  py::array_t<float> hoist_log() const {
+    const auto values = plant_.hoist_log();
+    py::array_t<float> out({static_cast<py::ssize_t>(values.size() / 9), static_cast<py::ssize_t>(9)});
+    std::copy(values.begin(), values.end(), out.mutable_data());
+    return out;
+  }
+
+  py::array_t<double> hoist_attachment_points() const {
+    const auto values = plant_.hoist_attachment_points();
+    py::array_t<double> out({static_cast<py::ssize_t>(2), static_cast<py::ssize_t>(3)});
+    std::copy(values.begin(), values.end(), out.mutable_data());
+    return out;
+  }
+
   py::dict stats() const {
     const ec_native::PlantStats values = plant_.stats();
     py::dict result;
@@ -1446,6 +1460,8 @@ PYBIND11_MODULE(_ec_native, m) {
            py::arg("pose"))
       .def("latest_state", &MujocoDdsPlantBinding::latest_state)
       .def("state_log", &MujocoDdsPlantBinding::state_log)
+      .def("hoist_log", &MujocoDdsPlantBinding::hoist_log)
+      .def("hoist_attachment_points", &MujocoDdsPlantBinding::hoist_attachment_points)
       .def("stats", &MujocoDdsPlantBinding::stats);
 
   py::class_<ec_native::PlantClient>(m, "PlantClient")

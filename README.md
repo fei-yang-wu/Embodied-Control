@@ -260,11 +260,18 @@ bundle-based plant command. `--initial-pose` joint values follow the plant
 configuration's joint list. `--states` includes `joint_names` in its NPZ;
 use those names to map plant state into a controller or reference ordering.
 
+The lifecycle examples use one generated BONES collection (`assets/models/reference/bones`)
+and `ticks: auto`. Build it once from the two existing exports; see
+[reference deployment](docs/design/reference_deployment.md) for commands,
+per-motion screening, and the new stance/bridge examples. Existing source
+exports and remote pins remain available.
+
 `ec lifecycle` drives the whole hardware session as a gated state machine
 (`docs/design/robot_lifecycle.md`): vendor damp, our damp frames on the wire,
 `ReleaseMode`, ramp to the start pose, settle, lower, pose match against the
-sim start frame, planner fresh, engage, blend in, run, hold, and back to the
-vendor standing still. The same object runs against the MuJoCo plant when
+sim start frame, planner fresh, arm with the reference paused, explicit play
+with a countdown, and hoisted recovery to vendor damp. Composed stance
+references can keep policy control active during final hoist recovery. The same object runs against the MuJoCo plant when
 the plant serves the vendor (`--vendor`) and a virtual gantry (`--hoist`,
 hanging the robot `--hoist-clearance` metres clear of the floor, 0.10 by
 default, so the ramp to a start pose never pushes the feet through it):
@@ -276,7 +283,7 @@ pixi run -e native ec lowlevel plant examples/g1_plant.yaml \
   --vendor --hoist --dds-domain 51
 # T1: the planner (stays up across episodes, owns the slots)
 pixi run -e native ec lowlevel oracle-worker assets/models/controller/sonic_v1_1 \
-  --reference-root assets/models/reference/root_qpos_v1 \
+  --reference-root assets/models/reference/bones \
   --motion hurry_idle_001_A277 --request-slot /ec_g1_request \
   --response-slot /ec_g1_response --create-slots
 # T2: the lifecycle, scripted (or `console` for the single-key operator shell)
@@ -298,7 +305,7 @@ ladder, the writer's live numbers, link health (lowstate and lowcmd rates,
 state gaps, planner reply age), a progress bar over the reference trajectory
 in oracle mode, and per-episode tracking summaries. Each episode's telemetry
 lands under `episodes/` in the artifacts directory with a `summary.json`
-(joint MAE, and MPJPE when the job names an `mjcf`). Lifecycle keys: `Ctrl-D` damp, `n` next state, `a` auto to PRIMED, `g` go, `h`
+(joint MAE, and MPJPE when the job names an `mjcf`). Lifecycle keys: `Ctrl-D` damp, `n` next state, `a` auto to PRIMED, `g` arm, `G` play, `h`
 hold, `H`/`l` hoist/lowered acknowledgements, `s` recover to vendor stand,
 `d` to vendor damp, `e` retake from HOLD, `x` abort, `q` quit. Every
 transition lands in `lifecycle.jsonl` with its evidence; the pose check
@@ -307,7 +314,8 @@ writes `pose_match.json`. Against the robot the job changes `network`,
 `--confirm ENABLE_G1_LOWLEVEL` without `--allow-non-realtime`.
 
 **Rehearse before hardware.** With a non-loopback interface, `PRECHECK`
-refuses to pass until a run of the same bundle and motion has reached the end
+refuses to pass until a run matching the bundle, reference content, motion,
+start frame, duration, and deployment settings has reached the end
 of the ladder against the plant, cleanly, within `rehearsal_max_age_days`. It
 reads the `lifecycle.json` those runs already write under `rehearsal_root`.
 Set `require_rehearsal: false` to run without one, deliberately and in the
@@ -350,7 +358,7 @@ pixi run -e native ec lifecycle console examples/lifecycle_sim_hurry_idle.yaml \
 | 1 | `o` `t`/`T` `m`/`M` `f`/`F` | pick command source, tracker, motion, start frame |
 | 2 | `r` | build the tracker, and the oracle worker with it (`p` first in VLA mode) |
 | 3 | `a` | climb to PRIMED: vendor damp, our damp frames, ReleaseMode, ramp, settle, lower, pose match, planner probe |
-| 4 | `g` | blend in over 0.5 s, then run the episode |
+| 4 | `g`, then `G` | arm with reference paused; once clear, play after countdown |
 | 5 | `h` | freeze on the last target when you want to stop early |
 | 6 | `H` | tell the console the hoist is hooked and carrying |
 | 7 | `Ctrl-D` | damp: kd-only frames now, then the joints go back to the vendor's own damp |
@@ -835,3 +843,31 @@ gRPC transport for *our own* protocol (not needed — HTTP/JSON payloads are
 small at 128×128), JPEG/compressed image encoding (raw is small enough for
 now), Apptainer/HPC, IsaacLab-Arena, CI-based image builds, and cross-run
 comparison reporting. See the design doc for the sequencing.
+
+
+Startup gate update (2026-09-09): first-frame joint mismatch and pelvis tilt
+are reported as diagnostics, not playback refusals. The active policy no
+longer needs to satisfy the static PD joint-quietness check. Invalid state,
+runtime faults, first-action checks, ownership, hoist handling, and countdown
+remain enforced. `POSE_MATCH_VERIFIED` is retained as a historical state name;
+its report can have `ok: false` for the diagnostic while the lifecycle proceeds.
+A successful DDS lifecycle does not by itself establish tracking quality.
+
+
+DDS plant recordings: a bounded `ec lowlevel plant` run with `--report`
+automatically saves a sibling `.states.npz` containing simulator ground-truth
+root position, root orientation, and joints. The report states whether the
+recording covers every publish. Render it with
+`pixi run -e sim python scripts/render_dds_plant.py <plant.states.npz> <video.mp4>`.
+These states are evaluation evidence, not extra observations sent to the
+controller. The controller's fixed-translation/IMU-orientation anchor is
+explicitly labelled in episode telemetry and cannot be used for MPJPE or
+physical-pose comparison videos. Old unlabelled episode telemetry is also
+excluded from automatic DDS MPJPE scoring.
+
+
+The G1 simulated hoist now uses two tension-only straps on the upper torso,
+beside the neck/shoulder buckles, rather than a pelvis spring. Their model
+coordinates are approximate. Recorded plant states include strap geometry and
+tension for replay; earlier pelvis-supported rehearsals do not qualify the
+new `g1_shoulder_straps_v1` setup. See `docs/design/robot_lifecycle.md`.

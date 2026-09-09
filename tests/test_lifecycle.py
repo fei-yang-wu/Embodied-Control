@@ -436,18 +436,117 @@ def test_first_action_far_from_hold_is_refused_without_fault():
     assert tracker.mode == WRITER_WAIT
 
 
-def test_pose_mismatch_is_refused_and_reported(tmp_path):
+def test_pose_mismatch_is_diagnostic_and_reported(tmp_path):
     wrong = list(POSE)
     wrong[3] += 0.3
     lifecycle, tracker, vendor, hoist, clock = _lifecycle(
         tmp_path, tracker_kwargs={"measured_pose": wrong}
     )
     result = lifecycle.auto()
-    assert not result.ok
-    assert lifecycle.state is S.LOWERED
+    assert result.ok
+    assert lifecycle.state is S.PRIMED
     report = json.loads((tmp_path / "pose_match.json").read_text())
     assert report["ok"] is False
     assert report["pose"]["worst_joint"] == 3
+
+
+def test_arm_stands_the_policy_up_and_play_starts_the_motion(tmp_path):
+    """Two keys, not one: the operator lets go while the policy stands, and
+    only then does the reference clock run."""
+    notes: list[str] = []
+    lifecycle, tracker, vendor, hoist, clock = _lifecycle(
+        tmp_path, play_countdown_seconds=3.0
+    )
+    lifecycle._note = notes.append
+    assert lifecycle.auto().ok
+
+    assert lifecycle.arm().ok, lifecycle.last_result
+
+    assert lifecycle.state is S.ARMED
+    assert tracker.mode == WRITER_CONTROL
+    assert tracker.running
+    # The policy owns the joints, the reference has not moved.
+    assert tracker.reference_paused == [True, True]
+    assert "holding the first frame" in lifecycle.last_result.detail
+
+    assert lifecycle.play().ok, lifecycle.last_result
+
+    assert lifecycle.state is S.RUNNING
+    assert tracker.reference_paused == [True, True, False]
+    assert [note for note in notes if "motion starts in" in note]
+
+
+def test_play_needs_arming_first_and_arm_is_refused_when_armed():
+    lifecycle, tracker, vendor, hoist, clock = _lifecycle()
+    assert lifecycle.auto().ok
+
+    assert not lifecycle.play().ok
+    assert lifecycle.state is S.PRIMED
+
+    assert lifecycle.arm().ok
+    assert not lifecycle.arm().ok
+    assert lifecycle.state is S.ARMED
+
+
+def test_arming_reports_reference_tilt_without_refusing():
+    lifecycle, tracker, vendor, hoist, clock = _lifecycle(
+        tilt_tolerance_degrees=5.0
+    )
+    assert lifecycle.auto().ok
+    tracker.projected_gravity = lambda: [0.6, 0.0, -0.8]
+
+    result = lifecycle.arm()
+
+    assert result.ok and "IMU tilt" in result.detail
+    assert result.values["tilt_within_tolerance"] is False
+    assert lifecycle.state is S.ARMED
+
+
+def test_holding_from_armed_freezes_without_playing():
+    lifecycle, tracker, vendor, hoist, clock = _lifecycle()
+    assert lifecycle.auto().ok
+    assert lifecycle.arm().ok
+
+    assert lifecycle.hold().ok, lifecycle.last_result
+
+    assert lifecycle.state is S.HOLD
+    assert tracker.reference_paused == [True, True]
+
+
+def test_an_armed_stand_that_is_never_played_holds_instead():
+    """The tick budget is padded for the armed stand; running past it must not
+    play a motion nobody is standing by for."""
+    lifecycle, tracker, vendor, hoist, clock = _lifecycle(arm_timeout_seconds=5.0)
+    assert lifecycle.auto().ok
+    assert lifecycle.arm().ok
+
+    for _ in range(60):
+        clock.sleep(0.1)
+        lifecycle.poll()
+
+    assert lifecycle.state is S.HOLD
+    assert tracker.reference_paused == [True, True]
+
+
+def test_the_episode_ends_when_the_reference_frames_run_out():
+    """The budget carries the strap and arm allowances, so the frames the
+    operator asked for are what ends the run."""
+    lifecycle, tracker, vendor, hoist, clock = _lifecycle(
+        control_hz=50.0, arm_timeout_seconds=30.0
+    )
+    assert lifecycle.auto().ok
+    assert lifecycle.go().ok
+    assert tracker.running
+
+    for _ in range(40):
+        clock.sleep(0.1)
+        lifecycle.poll()
+        if lifecycle.state is S.HOLD:
+            break
+
+    # 100 ticks at 50 Hz is 2 s of reference, not the 32 s of padded budget.
+    assert lifecycle.state is S.HOLD
+    assert clock.now() < 20.0
 
 
 def test_writer_damp_during_running_is_a_fault():
@@ -688,7 +787,7 @@ def test_a_plant_run_does_not_gate_on_its_own_rehearsal():
     assert lifecycle.advance().ok
 
 
-def test_the_strap_pays_out_during_the_blend_and_the_reference_waits(tmp_path):
+def test_the_strap_pays_out_on_play_and_the_reference_waits(tmp_path):
     """A translating motion cannot be tracked against a taut strap, so the
     reference clock stays on frame 0 until the gantry reports gain 0."""
     lifecycle, tracker, vendor, hoist, clock = _lifecycle(
@@ -698,19 +797,18 @@ def test_the_strap_pays_out_during_the_blend_and_the_reference_waits(tmp_path):
 
     assert lifecycle.go().ok, lifecycle.last_result
 
-    # slack was requested at blend-in, not at RUNNING.
+    # The strap holds the robot through the blend and the armed stand; it is
+    # paid out only when the motion is about to play.
     assert hoist.calls[-1] == "slack"
-    blend = next(
+    running = next(
         json.loads(line)
         for line in (tmp_path / "lifecycle.jsonl").read_text().splitlines()
-        if json.loads(line)["to_state"] == "BLEND_IN"
+        if json.loads(line)["to_state"] == "RUNNING"
     )
-    assert blend["values"]["hoist_gain"] == 0.0
-    # The strap started paying out before the blend, so the wait after the
-    # blend is the release window less the blend itself.
-    assert blend["values"]["slack_seconds"] >= 2.5
-    # Pinned for the probe, pinned again at go, released once the strap is
-    # slack: never released while the strap still held the pelvis.
+    assert running["values"]["hoist_gain"] == 0.0
+    assert running["values"]["slack_seconds"] >= 3.0
+    # Pinned for the probe, pinned again at the blend, released once the strap
+    # is slack: never released while the strap still held the pelvis.
     assert tracker.reference_paused == [True, True, False]
     assert hoist.status()["hoist_gain"] == 0.0
 
@@ -724,7 +822,9 @@ def test_a_strap_that_never_slackens_refuses_to_start_the_motion():
     result = lifecycle.go()
 
     assert not result.ok and "strap still at gain" in result.detail
-    assert lifecycle.state is S.PRIMED
+    # The policy already owns the joints and is standing on frame 0; only the
+    # motion was refused.
+    assert lifecycle.state is S.ARMED
     # The reference was never released against a taut strap.
     assert tracker.reference_paused[-1] is True
 
@@ -733,9 +833,135 @@ def test_the_tick_budget_grows_by_the_strap_release():
     """`ticks` is reference frames the operator asked for; the strap wait
     must not be paid out of it."""
     lifecycle, tracker, vendor, hoist, clock = _lifecycle(
-        strap_release_seconds=3.0, hoist_release_seconds=3.0, control_hz=50.0
+        strap_release_seconds=3.0,
+        hoist_release_seconds=3.0,
+        control_hz=50.0,
+        arm_timeout_seconds=4.0,
     )
     assert lifecycle.auto().ok
     assert lifecycle.go().ok, lifecycle.last_result
-    # 100 asked for, plus ceil(3.0 s * 50 Hz) for the strap.
-    assert "start(250)" in tracker.calls, tracker.calls[-6:]
+    # 100 asked for, plus ceil(3.0 s * 50 Hz) for the strap and ceil(4.0 s *
+    # 50 Hz) the armed stand may spend before the motion plays.
+    assert tracker.budget >= 450
+
+
+def test_play_rechecks_invalid_state_after_operator_steps_clear():
+    lifecycle, tracker, _, _, _ = _lifecycle(tilt_tolerance_degrees=5.0)
+    assert lifecycle.auto().ok
+    assert lifecycle.arm().ok
+    tracker.projected_gravity = lambda: [float("nan"), 0.0, -0.8]
+    assert not lifecycle.play().ok
+    assert tracker.reference_paused[-1] is True
+
+
+def test_emergency_damp_interrupts_countdown_without_releasing_reference():
+    lifecycle, tracker, _, _, clock = _lifecycle(play_countdown_seconds=3.0)
+    assert lifecycle.auto().ok
+    assert lifecycle.arm().ok
+    deadline = clock.now() + 1.0
+    clock.listeners.append(lambda now, dt: lifecycle.emergency_damp() if now >= deadline else None)
+    assert not lifecycle.play().ok
+    assert tracker.reference_paused[-1] is True
+    assert tracker.mode == WRITER_DAMP
+
+
+def test_expired_arm_cannot_play_without_poll():
+    lifecycle, tracker, _, _, clock = _lifecycle(arm_timeout_seconds=2.0)
+    assert lifecycle.auto().ok
+    assert lifecycle.arm().ok
+    clock.sleep(2.0)
+    assert not lifecycle.play().ok
+    assert tracker.reference_paused[-1] is True
+
+
+def test_reference_counter_controls_completion_even_when_wall_clock_is_late():
+    lifecycle, tracker, _, _, clock = _lifecycle()
+    assert lifecycle.auto().ok
+    assert lifecycle.go().ok
+    original = tracker.stats
+    tracker.stats = lambda: {**original(), 'reference_ticks': 99}
+    clock.sleep(3.0)
+    lifecycle.poll()
+    assert lifecycle.state is S.RUNNING
+    tracker.stats = lambda: {**original(), 'reference_ticks': 100}
+    lifecycle.poll()
+    assert lifecycle.state is S.HOLD
+
+
+def test_composed_motion_ends_in_policy_hold_before_pd_hold():
+    lifecycle, tracker, _, _, clock = _lifecycle(stand_hold_seconds=2.0)
+    assert lifecycle.auto().ok
+    assert lifecycle.go().ok
+    clock.sleep(2.1)
+    lifecycle.poll()
+    assert lifecycle.state is S.STAND_HOLD
+    assert tracker.running and tracker.mode == WRITER_CONTROL
+    assert tracker.reference_paused[-1] is True
+    clock.sleep(2.1)
+    lifecycle.poll()
+    assert lifecycle.state is S.HOLD
+
+
+def test_arm_refuses_disabled_reference_pinning():
+    lifecycle, tracker, _, _, _ = _lifecycle(pin_reference=False)
+    assert lifecycle.auto().ok
+    assert not lifecycle.arm().ok
+    assert tracker.mode == WRITER_WAIT
+
+
+def test_final_stance_pauses_before_oracle_prefetch_exhausts_reference():
+    lifecycle, tracker, _, _, _ = _lifecycle(stand_hold_seconds=2.0, terminal_hold_frames=20)
+    assert lifecycle.auto().ok
+    assert lifecycle.go().ok
+    original = tracker.stats
+    tracker.stats = lambda: {**original(), 'reference_ticks': 81}
+    lifecycle.poll()
+    assert lifecycle.state is S.STAND_HOLD
+    assert tracker.reference_paused[-1] is True
+
+
+@pytest.mark.parametrize('gravity', [[float('nan'), 0., -1.], [0., 0., 0.]])
+def test_invalid_imu_cannot_release_reference(gravity):
+    lifecycle, tracker, _, _, _ = _lifecycle()
+    assert lifecycle.auto().ok
+    assert lifecycle.arm().ok
+    tracker.projected_gravity = lambda: gravity
+    assert not lifecycle.play().ok
+    assert tracker.reference_paused[-1] is True
+
+
+def test_play_accepts_joint_motion_and_reports_tilt():
+    lifecycle, tracker, _, _, clock = _lifecycle(tilt_tolerance_degrees=5.0)
+    assert lifecycle.auto().ok
+    assert lifecycle.arm().ok
+    tracker.projected_gravity = lambda: [0.6, 0.0, -0.8]
+    tracker.joint_position = lambda: [v + 0.1 * clock.now() for v in POSE]
+    result = lifecycle.play()
+    assert result.ok
+    assert result.values["tilt_within_tolerance"] is False
+    assert tracker.reference_paused[-1] is False
+
+
+@pytest.mark.parametrize("joints,gravity", [
+    ([], [0., 0., -1.]), ([0.] * 28, [0., 0., -1.]),
+    ([float("nan")] * 29, [0., 0., -1.]), ([0.] * 29, [0., 0., 0.]),
+])
+def test_invalid_state_is_not_a_pose_diagnostic(joints, gravity):
+    lifecycle, tracker, _, _, _ = _lifecycle()
+    assert lifecycle.auto().ok
+    tracker.joint_position = lambda: joints
+    tracker.projected_gravity = lambda: gravity
+    assert not lifecycle.arm().ok
+
+
+def test_arming_rechecks_runtime_after_sampling_state():
+    lifecycle, tracker, _, _, clock = _lifecycle()
+    assert lifecycle.auto().ok
+    original = lifecycle._sampled_state
+    def sample_then_damp():
+        sample = original()
+        tracker.mode = WRITER_DAMP
+        return sample
+    lifecycle._sampled_state = sample_then_damp
+    assert not lifecycle.arm().ok
+    assert lifecycle.state is S.BLEND_IN

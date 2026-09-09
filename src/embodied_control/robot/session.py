@@ -492,7 +492,7 @@ class ExperimentSession:
             return
         if transition.to_state not in {str(LifecycleState.HOLD), str(LifecycleState.FAULT), str(LifecycleState.DAMP)}:
             return
-        if transition.from_state not in {str(LifecycleState.RUNNING), str(LifecycleState.BLEND_IN)}:
+        if transition.from_state not in {str(LifecycleState.RUNNING), str(LifecycleState.BLEND_IN), str(LifecycleState.ARMED), str(LifecycleState.STAND_HOLD)}:
             return
         # The lifecycle counts episodes per build; the session counts them
         # for the afternoon, so directories never collide across rebuilds.
@@ -538,6 +538,7 @@ class ExperimentSession:
                     reference_frames=np.asarray(frames, dtype=np.int32),
                     reference_joint_mae=np.asarray(mae, dtype=np.float32),
                     anchor_pose_log=np.asarray(rows_of(tracker.anchor_pose_log(), 7), dtype=np.float32),
+                    anchor_pose_source=np.asarray("controller_fixed_translation_imu_orientation"),
                     tick_durations_ns=np.asarray(tracker.tick_durations_ns(), dtype=np.uint64),
                 )
             except ImportError:
@@ -628,6 +629,12 @@ class ExperimentSession:
 
     def auto(self, until: LifecycleState = LifecycleState.PRIMED) -> GateResult:
         return self._current().auto(until)
+
+    def arm(self) -> GateResult:
+        return self._current().arm()
+
+    def play(self) -> GateResult:
+        return self._current().play()
 
     def go(self) -> GateResult:
         return self._current().go()

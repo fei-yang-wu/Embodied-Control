@@ -5,7 +5,7 @@
 # operator has confirmed FSM behavior and settle thresholds on real motors.
 #
 #   T0  pixi run -e native ec lowlevel oracle-worker assets/models/controller/sonic_v1_1 \
-#         --reference-root assets/models/reference/root_qpos_v1 \
+#         --reference-root assets/models/reference/bones \
 #         --motion hurry_idle_001_A277 --request-slot /ec_g1_request \
 #         --response-slot /ec_g1_response --create-slots
 #   T1  pixi run -e native ec lifecycle console examples/lifecycle_hardware_hurry_idle.yaml \
@@ -30,19 +30,21 @@ trackers:
   fsq64_sonic_4500m: ../assets/models/controller/fsq64_sonic_4500m
   fsq64_10b: ../assets/models/controller/fsq64_10b
   rollout24_gamma097_3500m: ../assets/models/controller/rollout24_gamma097_3500m
+  combo-50b: ../assets/models/controller/combo_50b
+
 network: ""
 dds_domain: 0
 request_slot: /ec_g1_request
 response_slot: /ec_g1_response
 connect_slots: true
 command_source: oracle
-reference_root: ../assets/models/reference/root_qpos_v1
+reference_root: ../assets/models/reference/bones
 motion: hurry_idle_001_A277
 start_frame: 0
 fixed_initial_anchor: true
 start_pose: motion
 ramp_seconds: 3.0
-ticks: 504
+ticks: auto
 blend_ticks: 250
 # An episode rests limp under the vendor and the next one climbs PRECHECK
 # again. `s` in the console still recovers to a vendor stand.

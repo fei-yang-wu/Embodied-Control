@@ -32,6 +32,8 @@ def run_identity(
     motion: str,
     command_source: str,
     network: str,
+    reference_sha: str = "",
+    deployment_sha: str = "",
     start_frame: int = 0,
     ticks: int = 0,
 ) -> dict:
@@ -39,6 +41,8 @@ def run_identity(
     return {
         "bundle_sha": str(bundle_sha),
         "bundle_name": str(bundle_name),
+        "reference_sha": str(reference_sha),
+        "deployment_sha": str(deployment_sha),
         "motion": str(motion),
         "command_source": str(command_source),
         "network": str(network),
@@ -54,7 +58,7 @@ def is_simulated(identity: dict) -> bool:
 def _matches(candidate: dict, identity: dict) -> bool:
     if not is_simulated(candidate):
         return False
-    for key in ("bundle_sha", "motion", "command_source"):
+    for key in ("bundle_sha", "motion", "command_source", "reference_sha", "deployment_sha", "start_frame", "ticks"):
         if str(candidate.get(key, "")) != str(identity.get(key, "")):
             return False
     return True
@@ -109,13 +113,15 @@ def rehearsal_evidence(
     newest = same_bundle[0]
     values["rehearsal_path"] = newest.get("_path", "")
     values["rehearsal_state"] = newest.get("state", "")
+    values["rehearsal_fault_reason"] = newest.get("fault_reason", "")
     reached = str(newest.get("state", ""))
     failed = int(newest.get("failed_transitions", 0))
-    if reached not in ACCEPTED_END_STATES or failed:
+    if reached not in ACCEPTED_END_STATES or failed or newest.get("fault_reason"):
         return GateResult(
             False,
             f"the newest rehearsal ended in {reached or 'nothing'} with "
-            f"{failed} failed transition(s); it has to reach the end of the "
+            f"{failed} failed transition(s), fault {newest.get('fault_reason') or 'none'}; "
+            "it has to reach the end of the "
             "ladder cleanly",
             values,
         )

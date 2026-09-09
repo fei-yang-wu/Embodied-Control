@@ -138,3 +138,44 @@ def test_unreadable_runs_are_skipped_not_fatal(tmp_path):
 
     assert len(find_rehearsals(tmp_path)) == 1
     assert rehearsal_evidence(tmp_path, _identity()).ok
+
+
+@pytest.mark.parametrize('changed', [dict(reference_sha='b'*64), dict(start_frame=2), dict(ticks=100)])
+def test_different_reference_content_or_playback_range_needs_new_rehearsal(tmp_path, changed):
+    _write_run(tmp_path / 'sim', _identity(network='lo', reference_sha='a'*64))
+    assert not rehearsal_evidence(tmp_path, _identity(**({'reference_sha': 'a'*64} | changed))).ok
+
+
+def test_legacy_rehearsal_cannot_vouch_for_hashed_reference(tmp_path):
+    _write_run(tmp_path / 'sim', _identity(network='lo'))
+    assert not rehearsal_evidence(tmp_path, _identity(reference_sha='a'*64)).ok
+
+
+def test_identity_follows_selected_tracker_mode_and_start_frame():
+    from pathlib import Path
+    from types import SimpleNamespace
+    from embodied_control.cli import _run_identity
+    from embodied_control.robot.lifecycle_job import LifecycleJob
+    job = LifecycleJob(bundle='/models/default')
+    manifest = SimpleNamespace(source={'checkpoint_sha256': SHA}, model_dump=lambda **kwargs: {'files': {'policy.onnx': SHA}})
+    bundle = SimpleNamespace(root=Path('/models/selected'), manifest=manifest)
+    selection = SimpleNamespace(motion='selected_motion', start_frame=7, mode='oracle')
+    identity = _run_identity(job, bundle, 'lo', selection, 13)
+    assert identity['bundle_name'] == 'selected'
+    assert identity['motion'] == 'selected_motion'
+    assert identity['command_source'] == 'oracle'
+    assert identity['start_frame'] == 7
+    assert identity['ticks'] == 13
+    changed_timing = job.model_copy(update={'lead_ticks': job.lead_ticks + 1})
+    assert _run_identity(changed_timing, bundle, 'lo', selection, 13)['deployment_sha'] != identity['deployment_sha']
+    changed = job.model_copy(update={'start_pose': 'motion'})
+    assert _run_identity(changed, bundle, 'lo', selection, 13)['deployment_sha'] != identity['deployment_sha']
+
+
+def test_recovery_does_not_clear_a_runtime_fault(tmp_path):
+    directory = _write_run(tmp_path / "sim", _identity(network="lo"))
+    path = directory / "lifecycle.json"
+    run = json.loads(path.read_text())
+    run["fault_reason"] = "command stale"
+    path.write_text(json.dumps(run))
+    assert not rehearsal_evidence(tmp_path, _identity()).ok

@@ -50,6 +50,8 @@ class LifecycleState(StrEnum):
     POLICY_COMMAND_FRESH = "POLICY_COMMAND_FRESH"
     PRIMED = "PRIMED"
     BLEND_IN = "BLEND_IN"
+    ARMED = "ARMED"
+    STAND_HOLD = "STAND_HOLD"
     RUNNING = "RUNNING"
     HOLD = "HOLD"
     DAMP = "DAMP"
@@ -110,6 +112,8 @@ OWNING_STATES = frozenset(
         LifecycleState.POLICY_COMMAND_FRESH,
         LifecycleState.PRIMED,
         LifecycleState.BLEND_IN,
+        LifecycleState.ARMED,
+        LifecycleState.STAND_HOLD,
         LifecycleState.RUNNING,
         LifecycleState.HOLD,
     }
@@ -253,6 +257,15 @@ class LifecycleConfig:
     pin_reference: bool = True
     ticks: int = 500
     blend_ticks: int = 250
+    # A separate play request gives the operator time to step clear after
+    # engaging the policy. A pinned raw clip is not a standing reference.
+    play_countdown_seconds: float = 0.0
+    # How long the policy may hold the armed stand. The tick budget is padded
+    # by this, so a long arm does not eat the episode; running past it takes
+    # the robot to HOLD rather than into a motion nobody is standing by for.
+    arm_timeout_seconds: float = 60.0
+    stand_hold_seconds: float = 0.0
+    terminal_hold_frames: int = 0
     # Where a run rests. An episode ends with the robot limp under the
     # vendor's own damp, so the next one has to climb PRECHECK again; a
     # vendor stand is the explicit `s` request, never the default.
@@ -281,8 +294,8 @@ class LifecycleConfig:
     settle_timeout_seconds: float = 10.0
     # "Quiet" is position drift over the window, not joint speed: the wire
     # carries SONIC-scale velocity noise (0.5 rad/s half-range on the plant),
-    # so a limp robot never reads as still by velocity, while encoder
-    # position noise is 0.01 rad.
+    # position noise is 0.01 rad. This gate applies only to PD preparation;
+    # active-policy balance is not joint stillness.
     drift_rad: float = 0.03
     # Optional tracking-error bound while settling. Off by default: under the
     # policy's own PD gains a held pose sags under gravity (0.4 rad on a
@@ -402,6 +415,9 @@ class Lifecycle:
         self.lowered_ack = False
         self.episode = 0
         self.last_result: GateResult | None = None
+        self.armed_at: float | None = None
+        self.stand_hold_at: float | None = None
+        self.reference_deadline: float | None = None
         # Called after every recorded transition; the session uses it to
         # write an episode's telemetry the moment RUNNING ends.
         self.on_transition: Callable[[Transition], None] | None = None
@@ -432,19 +448,41 @@ class Lifecycle:
                     return result
             return result
 
-    def go(self) -> GateResult:
-        """PRIMED -> BLEND_IN -> RUNNING."""
+    def arm(self) -> GateResult:
+        """PRIMED -> BLEND_IN -> ARMED. The policy stands; nothing plays yet."""
         with self._lock:
             if self.state is not LifecycleState.PRIMED:
-                return self._refuse(f"go needs PRIMED, not {self.state}")
+                return self._refuse(f"arm needs PRIMED, not {self.state}")
+            if not self.config.pin_reference or not callable(getattr(self.tracker, "set_reference_paused", None)):
+                return self._refuse("arming requires a pausable reference clock")
             result = self._attempt(LifecycleState.BLEND_IN)
             if not result.ok:
                 return result
+            return self._attempt(LifecycleState.ARMED)
+
+    def play(self) -> GateResult:
+        """ARMED -> RUNNING: release the reference clock after the countdown."""
+        with self._lock:
+            if self.state is not LifecycleState.ARMED:
+                return self._refuse(f"play needs ARMED, not {self.state}")
             return self._attempt(LifecycleState.RUNNING)
+
+    def go(self) -> GateResult:
+        """arm, then play. One call, for an unattended rehearsal."""
+        with self._lock:
+            result = self.arm()
+            if not result.ok:
+                return result
+            return self.play()
 
     def hold(self) -> GateResult:
         with self._lock:
-            if self.state not in {LifecycleState.RUNNING, LifecycleState.BLEND_IN}:
+            if self.state not in {
+                LifecycleState.RUNNING,
+                LifecycleState.BLEND_IN,
+                LifecycleState.ARMED,
+                LifecycleState.STAND_HOLD,
+            }:
                 return self._refuse(f"hold needs RUNNING, not {self.state}")
             return self._attempt(LifecycleState.HOLD)
 
@@ -638,9 +676,38 @@ class Lifecycle:
         with self._lock:
             if self.state in {LifecycleState.RUNNING, LifecycleState.BLEND_IN}:
                 writer_mode = int(self.tracker.unitree_mode)
-                if writer_mode == WRITER_DAMP:
+                if writer_mode == WRITER_DAMP or int(self.tracker.stats().get("fault", 0)):
                     self._fault("writer damped during " + str(self.state))
                 elif not self.tracker.running:
+                    self._attempt(LifecycleState.HOLD)
+                elif (
+                    self.state is LifecycleState.RUNNING
+                    and self._reference_finished()
+                ):
+                    # The tick budget is padded by the arm allowance, so the
+                    # frames the operator asked for run out before it does.
+                    self._note("reference frames played out")
+                    self._attempt(LifecycleState.STAND_HOLD if self.config.stand_hold_seconds > 0 else LifecycleState.HOLD)
+            elif self.state is LifecycleState.STAND_HOLD:
+                if int(self.tracker.unitree_mode) != WRITER_CONTROL or int(self.tracker.stats().get("fault", 0)):
+                    self._fault("control fault during final stance hold")
+                elif not self.tracker.running or self._now() - self.stand_hold_at >= self.config.stand_hold_seconds:
+                    self._attempt(LifecycleState.HOLD)
+            elif self.state is LifecycleState.ARMED:
+                if int(self.tracker.unitree_mode) != WRITER_CONTROL or int(self.tracker.stats().get("fault", 0)):
+                    self._fault("writer damped during " + str(self.state))
+                elif not self.tracker.running:
+                    self._attempt(LifecycleState.HOLD)
+                elif (
+                    self.armed_at is not None
+                    and self._now() - self.armed_at
+                    >= self.config.arm_timeout_seconds
+                ):
+                    self._note(
+                        "armed for "
+                        f"{self.config.arm_timeout_seconds:.0f}s without a play; "
+                        "holding"
+                    )
                     self._attempt(LifecycleState.HOLD)
             elif self.state in OWNING_STATES and self.state is not LifecycleState.HOLD:
                 if int(self.tracker.unitree_mode) == WRITER_DAMP:
@@ -842,6 +909,7 @@ class Lifecycle:
         window: float,
         timeout: float,
         damp_is_fault: bool = True,
+        check: Callable[[], GateResult] | None = None,
     ) -> GateResult:
         """Hold for `window` seconds with the pose drifting less than drift_rad
         and, when position_tol is given, the writer's tracking error under it."""
@@ -851,6 +919,10 @@ class Lifecycle:
         worst_drift = 0.0
         worst_error = 0.0
         while True:
+            if check is not None:
+                checked = check()
+                if not checked.ok:
+                    return checked
             ws = self.tracker.writer_stats()
             error = float(ws.get("tracking_error_max", 0.0))
             worst_error = max(worst_error, error)
@@ -1189,6 +1261,9 @@ class Lifecycle:
         if self.config.start_pose is None:
             return GateResult(True, "no start pose given: skipped")
         measured, gravity = self._sampled_state()
+        valid = self._state_validity(measured, gravity)
+        if not valid.ok:
+            return valid
         tolerance = self.config.pose_tolerance_rad
         if isinstance(tolerance, (int, float)):
             tolerance = [float(tolerance)] * len(measured)
@@ -1215,7 +1290,8 @@ class Lifecycle:
             report["ok"] = result.ok
             report["detail"] = result.detail
         self.log.write_json("pose_match.json", report)
-        return result
+        return GateResult(True, f"pose diagnostic: {result.detail}",
+                          {**result.values, "pose_within_tolerance": result.ok})
 
     def _pin_reference(self, paused: bool) -> None:
         if not self.config.pin_reference:
@@ -1323,9 +1399,22 @@ class Lifecycle:
             return 0
         return int(math.ceil(self.config.hoist_release_seconds * self.config.control_hz))
 
+    def _arm_allowance_ticks(self) -> int:
+        """Control ticks the armed stand may spend before the motion plays."""
+        return int(
+            math.ceil(self.config.arm_timeout_seconds * self.config.control_hz)
+        )
+
     def _enter_blend_in(self) -> GateResult:
         self._pin_reference(True)
-        self.tracker.start(self.config.ticks + self._strap_allowance_ticks(), paced=True)
+        self.tracker.start(
+            self.config.ticks
+            + self._strap_allowance_ticks()
+            + self._arm_allowance_ticks()
+            + math.ceil((self.config.play_countdown_seconds + self.config.stand_hold_seconds + self.config.settle_timeout_seconds
+                         + self.config.blend_ticks / 500.0 + 1.0) * self.config.control_hz),
+            paced=True,
+        )
         fresh = self._wait_until(
             lambda: int(self.tracker.stats().get("control_ticks", 0)) > 0
             or int(self.tracker.stats().get("fault", 0)) != 0,
@@ -1339,10 +1428,6 @@ class Lifecycle:
             self.tracker.wait()
             self._fault(f"policy did not produce a fresh command at go (fault {st.get('fault')})")
             raise LifecycleError("no fresh command at go")
-        # The policy is taking the joints now: let the strap go so that by the
-        # time the reference starts moving nothing else holds the pelvis.
-        if self.hoist is not None and self.auto_ack and self.config.slack_on_run:
-            self.hoist.slack()
         self.tracker.engage_control(self.config.blend_ticks)
         ok = self._wait_until(
             lambda: int(self.tracker.writer_stats().get("blend_ticks_remaining", 0)) == 0
@@ -1356,16 +1441,39 @@ class Lifecycle:
             raise LifecycleError("blend-in interrupted")
         if not ok:
             return GateResult(False, "blend did not complete", self._writer_snapshot())
-        strap = self._wait_for_slack_strap()
-        if not strap.ok:
-            return strap
-        self._pin_reference(False)
-        values = {**self._writer_snapshot(), **strap.values}
         return GateResult(
             True,
-            f"blended in over {self.config.blend_ticks} ticks; {strap.detail}; "
-            "reference released",
-            values,
+            f"blended in over {self.config.blend_ticks} ticks; reference held "
+            "at the first frame",
+            self._writer_snapshot(),
+        )
+
+    def _enter_armed(self) -> GateResult:
+        """Keep the reference pinned until the operator requests playback."""
+        if int(self.tracker.unitree_mode) != WRITER_CONTROL:
+            return GateResult(False, "writer is not in CONTROL", self._writer_snapshot())
+        fault = int(self.tracker.stats().get("fault", 0))
+        if fault != 0:
+            return GateResult(False, f"runtime fault {fault}", self._writer_snapshot())
+        joints, gravity = self._sampled_state()
+        valid = self._state_validity(joints, gravity)
+        if not valid.ok:
+            return valid
+        checked = self._play_check()
+        if not checked.ok:
+            return checked
+        upright = self.config.reference_gravity or [0.0, 0.0, -1.0]
+        tilt = tilt_match(
+            gravity, list(upright), self.config.tilt_tolerance_degrees
+        )
+        self.armed_at = self._now()
+        countdown = self.config.play_countdown_seconds
+        return GateResult(
+            True,
+            f"armed: the policy is holding the first frame; {tilt.detail}; "
+            "stand clear, then play"
+            + (f" ({countdown:.0f}s countdown)" if countdown > 0.0 else ""),
+            {**self._writer_snapshot(), **tilt.values, "tilt_within_tolerance": tilt.ok},
         )
 
     def _wait_for_slack_strap(self) -> GateResult:
@@ -1406,13 +1514,97 @@ class Lifecycle:
                 )
             self._sleep(self.config.poll_seconds)
 
+    def _reference_finished(self) -> bool:
+        stats = self.tracker.stats()
+        if "reference_ticks" in stats:
+            terminal = self.config.ticks
+            if self.config.stand_hold_seconds > 0 and self.config.terminal_hold_frames:
+                # Stop inside the verified stationary suffix, before a future
+                # oracle request can pass the end and kill the worker.
+                terminal -= self.config.terminal_hold_frames - 1
+            return int(stats["reference_ticks"]) >= terminal
+        return self.reference_deadline is not None and self._now() >= self.reference_deadline
+
+    def _play_check(self) -> GateResult:
+        if int(self.tracker.unitree_mode) != WRITER_CONTROL or not self.tracker.running:
+            return GateResult(False, "writer is not in active CONTROL", self._writer_snapshot())
+        if int(self.tracker.stats().get("fault", 0)):
+            return GateResult(False, "runtime fault before playback", self._writer_snapshot())
+        if self.armed_at is not None and self._now() - self.armed_at >= self.config.arm_timeout_seconds:
+            return GateResult(False, "armed timeout; hold and re-arm")
+        gravity = [float(v) for v in self.tracker.projected_gravity()]
+        joints = [float(v) for v in self.tracker.joint_position()]
+        valid = self._state_validity(joints, gravity)
+        if not valid.ok:
+            return valid
+        tilt = tilt_match(gravity, [0.0, 0.0, -1.0], self.config.tilt_tolerance_degrees)
+        return GateResult(True, f"upright diagnostic: {tilt.detail}",
+                          {**tilt.values, "tilt_within_tolerance": tilt.ok})
+
+    @staticmethod
+    def _state_validity(joints: list[float], gravity: list[float]) -> GateResult:
+        if (len(joints) != 29 or len(gravity) != 3
+                or not all(math.isfinite(v) for v in joints + gravity)
+                or sum(v*v for v in gravity) == 0):
+            return GateResult(False, "invalid robot state before playback")
+        return GateResult(True, "robot state valid")
+
     def _enter_running(self) -> GateResult:
-        if int(self.tracker.unitree_mode) != WRITER_CONTROL:
-            return GateResult(False, "writer is not in CONTROL", self._writer_snapshot())
-        # The strap was paid out during the blend-in and the reference clock
-        # waited for it, so the motion starts on a free robot.
-        return GateResult(True, f"policy driving, budget {self.config.ticks} ticks"
-                          + ("; strap slack" if self.config.slack_on_run else "; strap kept"))
+        checked = self._play_check()
+        if not checked.ok:
+            return checked
+        # Let the strap go first: by the time the reference moves, nothing else
+        # holds the pelvis. A translating motion cannot be tracked against the
+        # 20 kN/m lateral spring.
+        if self.hoist is not None and self.auto_ack and self.config.slack_on_run:
+            self.hoist.slack()
+        strap = self._wait_for_slack_strap()
+        if not strap.ok:
+            return strap
+        feet = self._wait_for_feet_down()
+        if not feet.ok:
+            return feet
+        counted = self._countdown()
+        if not counted.ok:
+            return counted
+        checked = self._play_check()
+        if not checked.ok:
+            return checked
+        self._pin_reference(False)
+        self.armed_at = None
+        self.reference_deadline = (
+            self._now() + self.config.ticks / self.config.control_hz
+        )
+        return GateResult(
+            True,
+            f"policy driving, budget {self.config.ticks} ticks; {strap.detail}"
+            + ("; strap slack" if self.config.slack_on_run else "; strap kept"),
+            {**strap.values, **checked.values},
+        )
+
+    def _countdown(self) -> GateResult:
+        """Announce the start, so nobody is still within reach of the robot."""
+        remaining = float(self.config.play_countdown_seconds)
+        if remaining <= 0.0:
+            return GateResult(True, "no countdown")
+        while remaining > 0.0:
+            if math.ceil(remaining) != math.ceil(remaining + self.config.poll_seconds) or remaining == self.config.play_countdown_seconds:
+                self._note(f"\a motion starts in {math.ceil(remaining)}s — stand clear (^D damps)")
+            step = min(self.config.poll_seconds, remaining)
+            self._sleep(step)
+            remaining -= step
+            checked = self._play_check()
+            if not checked.ok:
+                return checked
+        return GateResult(
+            True, f"counted down {self.config.play_countdown_seconds:.0f}s"
+        )
+
+    def _enter_stand_hold(self) -> GateResult:
+        self._pin_reference(True)
+        self.stand_hold_at = self._now()
+        self.hoisted_ack = False
+        return GateResult(True, "reference complete; policy holds final stance, hoist then damp")
 
     def _enter_hold(self) -> GateResult:
         writer_mode = int(self.tracker.unitree_mode)

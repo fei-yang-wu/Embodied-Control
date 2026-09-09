@@ -42,14 +42,16 @@ constexpr float kVendorDampKd = 8.0F;
 // Gantry spring: ~2 cm sag under a 35 kg robot, critically damped.
 constexpr double kHoistKpPosition = 20000.0;
 constexpr double kHoistKdPosition = 1600.0;
-constexpr double kHoistKpRotation = 600.0;
-constexpr double kHoistKdRotation = 40.0;
+// Approximate shoulder-buckle locations in torso_link coordinates, metres.
+// The support passes beside the neck, not through the articulated pelvis.
+constexpr std::array<std::array<double, 3>, 2> kHoistAttachments{{
+    {-0.035, 0.08, 0.30}, {-0.035, -0.08, 0.30}}};
+constexpr double kHoistStrapLength = 0.50;
 // Lowered: the strap target drops past the hang height by this margin, so
 // the feet reach the floor and take the weight whatever the leg pose is; the
-// rope then only catches a fall (one-sided in z) and steadies the tilt at
-// reduced gain, like a harness on a slack gantry.
+// straps then carry tension only if stretched; they cannot push or impose
+// a target torso orientation.
 constexpr double kHoistLowerMarginMeters = 0.05;
-constexpr double kHoistLoweredLateralGain = 0.5;
 // The strap moves at a winch's pace. Dropping the target 15 cm in one step
 // is a free fall onto the ankles at 1.4 m/s; an operator pays it out.
 constexpr double kHoistRateMetersPerSecond = 0.05;
@@ -160,6 +162,7 @@ MujocoDdsPlant::MujocoDdsPlant(
   // Preallocated once, outside the physics thread: the log never allocates
   // while the plant is running.
   state_log_.assign(state_log_capacity_ * kPlantStateRow, 0.0F);
+  hoist_log_.assign(state_log_capacity_ * 9, 0.0F);
   if (network_interface.empty() || sdk_joint_names.size() != kJointCount ||
       default_joint_position.size() != kJointCount ||
       armature.size() != kJointCount || effort_limit.size() != kJointCount ||
@@ -203,6 +206,13 @@ MujocoDdsPlant::MujocoDdsPlant(
     throw std::runtime_error("MuJoCo data allocation failed");
   }
   mjModel* model = impl_->model;
+  if (hoist_enabled_) {
+    hoist_body_id_ = mj_name2id(model, mjOBJ_BODY, "torso_link");
+    if (hoist_body_id_ < 0) {
+      throw std::runtime_error("G1 shoulder hoist requires torso_link");
+    }
+    hoist_jacobian_.resize(3 * model->nv);
+  }
   pelvis_body_id_ = mj_name2id(model, mjOBJ_BODY, "pelvis");
   if (pelvis_body_id_ < 0) {
     throw std::runtime_error("MuJoCo model has no pelvis body");
@@ -431,13 +441,12 @@ void MujocoDdsPlant::reset_data(bool while_running) {
   mode_machine_rejections_.store(0, std::memory_order_relaxed);
   hoist_generation_seen_ = 0;
   hoist_gain_ = 0.0;
+  hoist_tensions_ = {};
   previous_hoist_mode_ = -1;
   hoist_goal_z_ = data->qpos[2];
   clearance_countdown_ = 0;
   hoist_gain_reported_.store(0.0F, std::memory_order_relaxed);
-  for (std::size_t index = 0; index < 6; ++index) {
-    data->xfrc_applied[6 * pelvis_body_id_ + index] = 0.0;
-  }
+  mju_zero(data->xfrc_applied, 6 * impl_->model->nbody);
 }
 
 void MujocoDdsPlant::low_cmd_handler(const void* message) noexcept {
@@ -596,6 +605,16 @@ std::vector<float> MujocoDdsPlant::state_log() const {
           state_log_.begin() + static_cast<std::ptrdiff_t>(rows * kPlantStateRow)};
 }
 
+std::array<double, 6> MujocoDdsPlant::hoist_attachment_points() const {
+  return {kHoistAttachments[0][0], kHoistAttachments[0][1], kHoistAttachments[0][2],
+          kHoistAttachments[1][0], kHoistAttachments[1][1], kHoistAttachments[1][2]};
+}
+
+std::vector<float> MujocoDdsPlant::hoist_log() const {
+  const std::size_t rows = state_log_rows_.load(std::memory_order_acquire);
+  return {hoist_log_.begin(), hoist_log_.begin() + static_cast<std::ptrdiff_t>(rows * 9)};
+}
+
 void MujocoDdsPlant::publish_low_state() noexcept {
   const mjData* data = impl_->data;
   LowState& message = impl_->state_message;
@@ -632,6 +651,16 @@ void MujocoDdsPlant::publish_low_state() noexcept {
       row[7 + actuator_to_sdk_[actuator]] =
           static_cast<float>(data->qpos[qpos_address_[actuator]]);
     }
+    float* hoist_row = hoist_log_.data() + logged_rows * 9;
+    for (std::size_t strap = 0; strap < 2; ++strap) {
+      for (std::size_t axis = 0; axis < 3; ++axis) {
+        hoist_row[3 * strap + axis] = static_cast<float>(
+            hoist_target_position_[axis] + hoist_spreader_offsets_[strap][axis]
+            + (axis == 2 ? kHoistStrapLength : 0.0));
+      }
+      hoist_row[7 + strap] = static_cast<float>(hoist_tensions_[strap]);
+    }
+    hoist_row[6] = static_cast<float>(hoist_gain_);
     state_log_rows_.store(logged_rows + 1, std::memory_order_release);
   }
   for (std::size_t actuator = 0; actuator < kJointCount; ++actuator) {
@@ -770,9 +799,21 @@ double MujocoDdsPlant::measure_floor_gap() noexcept {
 
 void MujocoDdsPlant::apply_hoist() noexcept {
   mjData* data = impl_->data;
-  double* wrench = data->xfrc_applied + 6 * pelvis_body_id_;
-  const double* position = data->xpos + 3 * pelvis_body_id_;
-  const double* quaternion = data->xquat + 4 * pelvis_body_id_;
+  const mjModel* model = impl_->model;
+  double* wrench = data->xfrc_applied + 6 * hoist_body_id_;
+  mju_zero(wrench, 6);
+  hoist_tensions_ = {};
+  const double* body_position = data->xpos + 3 * hoist_body_id_;
+  const double* rotation = data->xmat + 9 * hoist_body_id_;
+  double points[2][3];
+  double position[3] = {};
+  for (std::size_t strap = 0; strap < 2; ++strap) {
+    mju_mulMatVec(points[strap], rotation, kHoistAttachments[strap].data(), 3, 3);
+    mju_addTo3(points[strap], body_position);
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+      position[axis] += 0.5 * points[strap][axis];
+    }
+  }
   if (clearance_countdown_ == 0) {
     floor_gap_ = measure_floor_gap();
     foot_clearance_.store(static_cast<float>(floor_gap_),
@@ -788,15 +829,11 @@ void MujocoDdsPlant::apply_hoist() noexcept {
     for (std::size_t index = 0; index < 3; ++index) {
       hoist_target_position_[index] = position[index];
     }
-    // A strap holds the pelvis where it is but lets it hang level: keep the
-    // heading, drop the roll and pitch. Capturing a leaning robot's full
-    // orientation carried an 8 deg tilt from one episode into the next.
-    const double w = quaternion[0];
-    const double x = quaternion[1];
-    const double y = quaternion[2];
-    const double z = quaternion[3];
-    const double yaw = std::atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z));
-    hoist_target_quaternion_wxyz_ = {std::cos(0.5 * yaw), 0.0, 0.0, std::sin(0.5 * yaw)};
+    for (std::size_t strap = 0; strap < 2; ++strap) {
+      for (std::size_t axis = 0; axis < 3; ++axis) {
+        hoist_spreader_offsets_[strap][axis] = axis == 2 ? 0.0 : points[strap][axis] - position[axis];
+      }
+    }
     hoist_generation_seen_ = generation;
     hoist_gain_ = 1.0;
     // Hooking the strap onto a robot standing on the floor takes the load
@@ -818,8 +855,8 @@ void MujocoDdsPlant::apply_hoist() noexcept {
     previous_hoist_mode_ = mode;
   }
   const double travel = hoist_rate_ * timestep_;
-  hoist_target_position_[2] +=
-      std::clamp(hoist_goal_z_ - hoist_target_position_[2], -travel, travel);
+  const double hook_step = std::clamp(hoist_goal_z_ - hoist_target_position_[2], -travel, travel);
+  hoist_target_position_[2] += hook_step;
   if (mode == PlantVendor::kHoistSlack) {
     if (hoist_gain_ > 0.0) {
       hoist_gain_ =
@@ -839,39 +876,37 @@ void MujocoDdsPlant::apply_hoist() noexcept {
     }
     return;
   }
-  const bool lowered = mode == PlantVendor::kHoistLowered;
-  const double lateral_gain = lowered ? kHoistLoweredLateralGain : 1.0;
-  const double target_z = hoist_target_position_[2];
-  // Linear: spring to the captured pose, damper on the world-frame velocity.
-  for (std::size_t index = 0; index < 2; ++index) {
-    wrench[index] =
-        hoist_gain_ * lateral_gain *
-        (kHoistKpPosition * (hoist_target_position_[index] - position[index]) -
-         kHoistKdPosition * data->qvel[index]);
+  for (std::size_t strap = 0; strap < 2; ++strap) {
+    double direction[3];
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+      const double hook = hoist_target_position_[axis] + hoist_spreader_offsets_[strap][axis]
+                          + (axis == 2 ? kHoistStrapLength : 0.0);
+      direction[axis] = points[strap][axis] - hook;
+    }
+    const double length = mju_normalize3(direction);
+    const double extension = length - kHoistStrapLength;
+    if (extension <= 0.0) {
+      continue;
+    }
+    // Point Jacobians include the articulated waist and the attachment lever
+    // arm. A free-joint velocity is not the shoulder's world velocity.
+    mj_jac(model, data, hoist_jacobian_.data(), nullptr, points[strap], hoist_body_id_);
+    double velocity[3];
+    mju_mulMatVec(velocity, hoist_jacobian_.data(), data->qvel, 3, model->nv);
+    velocity[2] -= hook_step / timestep_;
+    const double tension = hoist_gain_ * std::max(0.0,
+        0.5 * kHoistKpPosition * extension
+        + 0.5 * kHoistKdPosition * mju_dot3(velocity, direction));
+    hoist_tensions_[strap] = tension;
+    double force[3];
+    mju_scl3(force, direction, -tension);
+    mju_addTo3(wrench, force);
+    double arm[3], torque[3];
+    mju_sub3(arm, points[strap], data->xipos + 3 * hoist_body_id_);
+    mju_cross(torque, arm, force);
+    mju_addTo3(wrench + 3, torque);
   }
-  double vertical = kHoistKpPosition * (target_z - position[2]) -
-                    kHoistKdPosition * data->qvel[2];
-  if (lowered && vertical < 0.0) {
-    // A rope cannot push.
-    vertical = 0.0;
-  }
-  wrench[2] = hoist_gain_ * vertical;
-  // Angular: small-angle error of q_target * conj(q), damped on the world
-  // angular velocity (the free joint's qvel is body-frame).
-  double conjugate[4] = {quaternion[0], -quaternion[1], -quaternion[2],
-                         -quaternion[3]};
-  double error_quaternion[4];
-  mju_mulQuat(error_quaternion, hoist_target_quaternion_wxyz_.data(),
-              conjugate);
-  const double sign = error_quaternion[0] < 0.0 ? -1.0 : 1.0;
-  double omega_world[3];
-  mju_rotVecQuat(omega_world, data->qvel + 3, quaternion);
-  for (std::size_t index = 0; index < 3; ++index) {
-    wrench[3 + index] =
-        hoist_gain_ * lateral_gain *
-        (kHoistKpRotation * 2.0 * sign * error_quaternion[1 + index] -
-         kHoistKdRotation * omega_world[index]);
-  }
+
 }
 
 void MujocoDdsPlant::physics_loop() noexcept {
