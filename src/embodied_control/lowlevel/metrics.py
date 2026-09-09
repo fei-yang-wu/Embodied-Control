@@ -269,13 +269,27 @@ def _aligned_oracle_kinematics(
     model_path: str | Path,
     motion: ReferenceMotion,
     telemetry: dict,
+    start_frame: int = 0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Reference frames the rollout tracked, plus the matching robot kinematics.
+
+    `telemetry["reference_frames"]` is the controller's own 0-based counter.
+    The oracle worker adds its `start_frame` on the producing side
+    (`NativeOracleWorker._build_response`), so the scorer must add the same
+    offset or it reads the wrong rows of the motion. Pass the worker's
+    `provenance["start_frame"]`; the default 0 keeps the frame-0 protocol.
+    """
     if motion.body_pos_w is None or not motion.body_names:
         raise ValueError(
             "the reference tree carries no tracked-body positions; MPJPE needs "
             "body_pos_w — re-prepare the reference arrays with body tracking"
         )
+    start_frame = int(start_frame)
+    if start_frame < 0:
+        raise ValueError("start_frame must be non-negative")
     frames = np.asarray(telemetry["reference_frames"])
+    # Ticks with no reference are marked negative; leave them for the mask.
+    frames = np.where(frames >= 0, frames + start_frame, frames)
     joint_pos = np.asarray(telemetry["joint_position_log"])
     anchor = np.asarray(telemetry["anchor_pose_log"])
     valid = (
@@ -298,10 +312,11 @@ def oracle_tracking_metrics(
     model_path: str | Path,
     motion: ReferenceMotion,
     telemetry: dict,
+    start_frame: int = 0,
 ) -> dict:
     """MPJPE-L/G for an oracle run, aligned by the recorded reference frames."""
     frames, anchor, robot_bodies, valid = _aligned_oracle_kinematics(
-        action, model_path, motion, telemetry
+        action, model_path, motion, telemetry, start_frame
     )
     result = compute_mpjpe(
         robot_bodies,
@@ -327,12 +342,17 @@ def sonic_success_metrics(
     model_path: str | Path,
     motion: ReferenceMotion,
     telemetry: dict,
+    start_frame: int = 0,
 ) -> dict:
     """Score a full EC rollout with the SONIC release success criterion."""
     frames, anchor, robot_bodies, _ = _aligned_oracle_kinematics(
-        action, model_path, motion, telemetry
+        action, model_path, motion, telemetry, start_frame
     )
-    expected_frames = np.arange(motion.length - 1, dtype=frames.dtype)
+    # A complete run covers start_frame .. length-2; it never re-tracks the
+    # frames the episode started past.
+    expected_frames = np.arange(
+        int(start_frame), motion.length - 1, dtype=frames.dtype
+    )
     complete = np.array_equal(frames, expected_frames)
     result = compute_sonic_success(
         robot_bodies,

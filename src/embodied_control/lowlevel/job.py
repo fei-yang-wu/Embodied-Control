@@ -85,6 +85,11 @@ class RolloutSpec(JobModel):
     # Log per-tick joint positions + anchor pose to `states_ep{i}.npz` for
     # post-hoc tracking metrics (MPJPE via `eval_mpjpe`).
     record_states: bool = False
+    # Optional 36-value `.npy` start pose ([pos 3 | quat XYZW 4 | joints 29]),
+    # applied after every episode reset. A planner rehearsal that must start ON
+    # a reference frame needs this; without it the robot starts at the bundle's
+    # default stance and the row is not comparable with one that does.
+    start_pose: str | None = None
 
 
 class SafetySpec(JobModel):

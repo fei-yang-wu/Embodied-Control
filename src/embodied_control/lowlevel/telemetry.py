@@ -57,6 +57,8 @@ class TelemetryRecorder:
                 stats = self.runtime.stats()
             except Exception:
                 return
+            # `base_height` throws while the loop is running; the per-tick log does not.
+            heights = self.runtime.base_heights()
             self.logger.event(
                 "telemetry.sample",
                 phase="rollout",
@@ -65,9 +67,7 @@ class TelemetryRecorder:
                 fault=int(stats.get("fault", 0)),
                 deadline_misses=int(stats.get("deadline_misses", 0)),
                 wake_late_ns_max=int(stats.get("wake_late_ns_max", 0)),
-                base_height=float(
-                    base() if callable(base := getattr(self.runtime, "base_height", 0.0)) else base
-                ),
+                base_height=float(heights[-1]) if len(heights) else float("nan"),
             )
             if not self.runtime.running():
                 return

@@ -1,0 +1,34 @@
+# G1 rehearsal plant calibration. Fixed independently of the selected controller.
+# Preserves the existing simulator parameters; these are not vendor firmware gains.
+# Array poses and state logs follow this list order. motor_id is the DDS wire index.
+api_version: ec.plant/v1alpha1
+joints:
+  - {"name": "left_hip_pitch_joint", "motor_id": 0, "nominal_position": -0.312, "armature": 0.025101925, "effort_limit": 139.0, "vendor_stiffness": 99.09842777666113, "vendor_damping": 6.3088018534966395}
+  - {"name": "left_hip_roll_joint", "motor_id": 1, "nominal_position": 0.0, "armature": 0.025101925, "effort_limit": 139.0, "vendor_stiffness": 99.09842777666113, "vendor_damping": 6.3088018534966395}
+  - {"name": "left_hip_yaw_joint", "motor_id": 2, "nominal_position": 0.0, "armature": 0.01017752, "effort_limit": 88.0, "vendor_stiffness": 40.17923847137318, "vendor_damping": 2.5578897650279457}
+  - {"name": "left_knee_joint", "motor_id": 3, "nominal_position": 0.669, "armature": 0.025101925, "effort_limit": 139.0, "vendor_stiffness": 99.09842777666113, "vendor_damping": 6.3088018534966395}
+  - {"name": "left_ankle_pitch_joint", "motor_id": 4, "nominal_position": -0.363, "armature": 0.00721945, "effort_limit": 50.0, "vendor_stiffness": 28.50124619574858, "vendor_damping": 1.814445686584846}
+  - {"name": "left_ankle_roll_joint", "motor_id": 5, "nominal_position": 0.0, "armature": 0.00721945, "effort_limit": 50.0, "vendor_stiffness": 28.50124619574858, "vendor_damping": 1.814445686584846}
+  - {"name": "right_hip_pitch_joint", "motor_id": 6, "nominal_position": -0.312, "armature": 0.025101925, "effort_limit": 139.0, "vendor_stiffness": 99.09842777666113, "vendor_damping": 6.3088018534966395}
+  - {"name": "right_hip_roll_joint", "motor_id": 7, "nominal_position": 0.0, "armature": 0.025101925, "effort_limit": 139.0, "vendor_stiffness": 99.09842777666113, "vendor_damping": 6.3088018534966395}
+  - {"name": "right_hip_yaw_joint", "motor_id": 8, "nominal_position": 0.0, "armature": 0.01017752, "effort_limit": 88.0, "vendor_stiffness": 40.17923847137318, "vendor_damping": 2.5578897650279457}
+  - {"name": "right_knee_joint", "motor_id": 9, "nominal_position": 0.669, "armature": 0.025101925, "effort_limit": 139.0, "vendor_stiffness": 99.09842777666113, "vendor_damping": 6.3088018534966395}
+  - {"name": "right_ankle_pitch_joint", "motor_id": 10, "nominal_position": -0.363, "armature": 0.00721945, "effort_limit": 50.0, "vendor_stiffness": 28.50124619574858, "vendor_damping": 1.814445686584846}
+  - {"name": "right_ankle_roll_joint", "motor_id": 11, "nominal_position": 0.0, "armature": 0.00721945, "effort_limit": 50.0, "vendor_stiffness": 28.50124619574858, "vendor_damping": 1.814445686584846}
+  - {"name": "waist_yaw_joint", "motor_id": 12, "nominal_position": 0.0, "armature": 0.01017752, "effort_limit": 88.0, "vendor_stiffness": 40.17923847137318, "vendor_damping": 2.5578897650279457}
+  - {"name": "waist_roll_joint", "motor_id": 13, "nominal_position": 0.0, "armature": 0.00721945, "effort_limit": 50.0, "vendor_stiffness": 28.50124619574858, "vendor_damping": 1.814445686584846}
+  - {"name": "waist_pitch_joint", "motor_id": 14, "nominal_position": 0.0, "armature": 0.00721945, "effort_limit": 50.0, "vendor_stiffness": 28.50124619574858, "vendor_damping": 1.814445686584846}
+  - {"name": "left_shoulder_pitch_joint", "motor_id": 15, "nominal_position": 0.2, "armature": 0.003609725, "effort_limit": 25.0, "vendor_stiffness": 14.25062309787429, "vendor_damping": 0.907222843292423}
+  - {"name": "left_shoulder_roll_joint", "motor_id": 16, "nominal_position": 0.2, "armature": 0.003609725, "effort_limit": 25.0, "vendor_stiffness": 14.25062309787429, "vendor_damping": 0.907222843292423}
+  - {"name": "left_shoulder_yaw_joint", "motor_id": 17, "nominal_position": 0.0, "armature": 0.003609725, "effort_limit": 25.0, "vendor_stiffness": 14.25062309787429, "vendor_damping": 0.907222843292423}
+  - {"name": "left_elbow_joint", "motor_id": 18, "nominal_position": 0.6, "armature": 0.003609725, "effort_limit": 25.0, "vendor_stiffness": 14.25062309787429, "vendor_damping": 0.907222843292423}
+  - {"name": "left_wrist_roll_joint", "motor_id": 19, "nominal_position": 0.0, "armature": 0.003609725, "effort_limit": 25.0, "vendor_stiffness": 14.25062309787429, "vendor_damping": 0.907222843292423}
+  - {"name": "left_wrist_pitch_joint", "motor_id": 20, "nominal_position": 0.0, "armature": 0.00425, "effort_limit": 5.0, "vendor_stiffness": 16.77832748089279, "vendor_damping": 1.06814150219}
+  - {"name": "left_wrist_yaw_joint", "motor_id": 21, "nominal_position": 0.0, "armature": 0.00425, "effort_limit": 5.0, "vendor_stiffness": 16.77832748089279, "vendor_damping": 1.06814150219}
+  - {"name": "right_shoulder_pitch_joint", "motor_id": 22, "nominal_position": 0.2, "armature": 0.003609725, "effort_limit": 25.0, "vendor_stiffness": 14.25062309787429, "vendor_damping": 0.907222843292423}
+  - {"name": "right_shoulder_roll_joint", "motor_id": 23, "nominal_position": -0.2, "armature": 0.003609725, "effort_limit": 25.0, "vendor_stiffness": 14.25062309787429, "vendor_damping": 0.907222843292423}
+  - {"name": "right_shoulder_yaw_joint", "motor_id": 24, "nominal_position": 0.0, "armature": 0.003609725, "effort_limit": 25.0, "vendor_stiffness": 14.25062309787429, "vendor_damping": 0.907222843292423}
+  - {"name": "right_elbow_joint", "motor_id": 25, "nominal_position": 0.6, "armature": 0.003609725, "effort_limit": 25.0, "vendor_stiffness": 14.25062309787429, "vendor_damping": 0.907222843292423}
+  - {"name": "right_wrist_roll_joint", "motor_id": 26, "nominal_position": 0.0, "armature": 0.003609725, "effort_limit": 25.0, "vendor_stiffness": 14.25062309787429, "vendor_damping": 0.907222843292423}
+  - {"name": "right_wrist_pitch_joint", "motor_id": 27, "nominal_position": 0.0, "armature": 0.00425, "effort_limit": 5.0, "vendor_stiffness": 16.77832748089279, "vendor_damping": 1.06814150219}
+  - {"name": "right_wrist_yaw_joint", "motor_id": 28, "nominal_position": 0.0, "armature": 0.00425, "effort_limit": 5.0, "vendor_stiffness": 16.77832748089279, "vendor_damping": 1.06814150219}

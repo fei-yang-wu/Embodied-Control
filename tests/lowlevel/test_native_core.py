@@ -30,6 +30,7 @@ from embodied_control.lowlevel.native_core import (  # noqa: E402
 )
 from embodied_control.lowlevel.publishers.native_pull import (  # noqa: E402
     NativeChunkWorker,
+    NativeLatentPlanWorker,
 )
 from embodied_control.lowlevel.publishers.native_oracle import (  # noqa: E402
     NativeOracleWorker,
@@ -38,7 +39,73 @@ from embodied_control.lowlevel.maths import (  # noqa: E402
     rotate_inverse,
     rot6d_from_quat,
     subtract_frame,
+    quat_mul,
+    quat_to_mat,
 )
+
+
+def _axis_quaternion(axis, degrees):
+    half = np.radians(degrees) / 2
+    result = np.zeros(4, dtype=np.float32)
+    result[axis], result[3] = np.sin(half), np.cos(half)
+    return result
+
+
+@pytest.mark.parametrize("start_yaw", [-179.0, -90.0, 0.0, 88.0, 179.0])
+@pytest.mark.parametrize("turn", [0.0, 35.0])
+def test_reference_heading_preserves_tilt_and_relative_turn(start_yaw, turn):
+    ref_heading = _axis_quaternion(2, 47)
+    ref_start = quat_mul(ref_heading, _axis_quaternion(1, -8))
+    initial = quat_mul(_axis_quaternion(2, start_yaw), _axis_quaternion(0, 12))
+    current = quat_mul(
+        _axis_quaternion(2, start_yaw + turn), _axis_quaternion(1, 19)
+    )
+    aligned = ec_native.align_heading_to_reference(initial, ref_start, current)
+    expected = quat_mul(_axis_quaternion(2, 47 + turn), _axis_quaternion(1, 19))
+    np.testing.assert_allclose(quat_to_mat(aligned), quat_to_mat(expected), atol=1e-6)
+    np.testing.assert_allclose(
+        ec_native.projected_gravity_from_xyzw(aligned),
+        ec_native.projected_gravity_from_xyzw(current), atol=1e-6,
+    )
+    opposite_sign = ec_native.align_heading_to_reference(-initial, -ref_start, -current)
+    np.testing.assert_allclose(quat_to_mat(opposite_sign), quat_to_mat(expected), atol=1e-6)
+
+    # A forward offset in the reference must give the same encoder input
+    # regardless of the IMU world's arbitrary starting yaw.
+    origin = np.array([2.0, -3.0, 0.76], dtype=np.float32)
+    raw = np.zeros((10, 36), dtype=np.float32)
+    raw[:, 29:32] = origin + quat_to_mat(ref_heading) @ [0.2, 0.0, 0.03]
+    raw[:, 32:36] = ref_start
+    packed = ec_native.reexpress_root_qpos_window(raw, origin, aligned)
+    expected_pos, expected_ori = subtract_frame(origin, expected, raw[0, 29:32], ref_start)
+    np.testing.assert_allclose(packed[:, 29:32], np.tile(expected_pos, (10, 1)), atol=1e-6)
+    np.testing.assert_allclose(packed[:, 32:38], np.tile(rot6d_from_quat(expected_ori), (10, 1)), atol=1e-6)
+    joint_raw = np.zeros((10, 62), dtype=np.float32)
+    joint_raw[:, 58:62] = ref_start
+    np.testing.assert_allclose(
+        ec_native.pack_joint_qpos_qvel_anchor_ori_window(joint_raw, 0, 10, 1, aligned),
+        ec_native.pack_joint_qpos_qvel_anchor_ori_window(joint_raw, 0, 10, 1, expected),
+        atol=1e-6,
+    )
+
+
+@pytest.mark.parametrize("bad", [[0, 0, 0, 0], [float("nan"), 0, 0, 1], [1, 0, 0, 0]])
+def test_reference_heading_rejects_undefined_initial_heading(bad):
+    with pytest.raises(RuntimeError, match="heading alignment quaternion is invalid"):
+        ec_native.align_heading_to_reference(bad, [0, 0, 0, 1], [0, 0, 0, 1])
+
+
+def _g1_mjcf_path() -> Path:
+    mjcf = (
+        Path(__file__).resolve().parents[2]
+        / "assets/latent_playkit/model/g1_29dof_rev_1_0.xml"
+    )
+    if not mjcf.is_file():
+        pytest.skip(
+            "G1 MJCF is absent; run ./scripts/setup_latent_lab.sh "
+            f"(expected {mjcf})"
+        )
+    return mjcf
 
 
 class _FirstActionTerms(torch.nn.Module):
@@ -692,15 +759,9 @@ def test_native_mujoco_loop_runs_independent_physics_schedule(
     manifest = latent_manifest.model_copy(update={"action": action})
     bundle = _native_bundle(tmp_path, manifest)
     response_name = _shm_name("mujoco")
-    repo_root = Path(__file__).resolve().parents[4]
-    model_path = (
-        repo_root
-        / "source/isaaclab_imitation/isaaclab_imitation/assets/unitree"
-        / "g1_description/g1_29dof_rev_1_0.xml"
-    )
     loop = NativeMujocoLoop(
         bundle,
-        str(model_path),
+        str(_g1_mjcf_path()),
         response_slot=response_name,
         lead_ticks=2,
         command_stale_ms=1000.0,
@@ -742,7 +803,7 @@ def test_native_mujoco_loop_runs_independent_physics_schedule(
     with pytest.raises(RuntimeError, match="timestep times decimation"):
         NativeMujocoLoop(
             bundle,
-            str(model_path),
+            str(_g1_mjcf_path()),
             response_slot=_shm_name("bad_rate"),
             control_hz=100,
             lead_ticks=2,
@@ -819,3 +880,394 @@ def test_unitree_writer_stays_closed_before_initialization(tmp_path, latent_mani
     loop.force_damp()
     time.sleep(0.05)
     assert loop.writer_stats()["publishes"] == 0
+
+
+# --------------------------------------------------------------------------
+# Latent plan: one planner reply covers `plan_slots` holds. The controller
+# walks the plan without calling the planner again, which is the cadence the
+# Isaac board's leading row uses (30 slots, hold 1).
+# --------------------------------------------------------------------------
+
+
+class _PlanServer:
+    """Answer native planner requests with a fixed-size latent plan.
+
+    Slot k of every plan is filled with the constant `k + 1`, so a rollout's
+    joint targets show one plateau per consumed slot.
+    """
+
+    REQUEST_TAG = 10
+    PLAN_TAG = 4
+
+    def __init__(
+        self,
+        request_slot,
+        response_slot,
+        *,
+        slots,
+        z_dim,
+        reply_delay_s=0.0,
+        max_replies=None,
+    ):
+        self._request = ec_native.ShmCommandSlot(request_slot, False)
+        self._response = ec_native.ShmCommandSlot(response_slot, False)
+        self.slots = int(slots)
+        self.z_dim = int(z_dim)
+        self.reply_delay_s = float(reply_delay_s)
+        self.max_replies = max_replies
+        self.replies = 0
+        self._last_sequence = 0
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self):
+        self._thread.start()
+        return self
+
+    def stop(self):
+        self._stop.set()
+        self._thread.join(timeout=5)
+
+    def _plan(self):
+        plan = np.zeros((self.slots, self.z_dim), dtype=np.float32)
+        for slot in range(self.slots):
+            plan[slot, :] = float(slot + 1)
+        return plan.reshape(-1)
+
+    def _run(self):
+        while not self._stop.is_set():
+            raw = self._request.snapshot(self._last_sequence)
+            if raw is None:
+                self._stop.wait(0.001)
+                continue
+            sequence, tag, _, _, _ = raw
+            if int(sequence) <= self._last_sequence or int(tag) != self.REQUEST_TAG:
+                self._stop.wait(0.001)
+                continue
+            self._last_sequence = int(sequence)
+            if self.max_replies is not None and self.replies >= self.max_replies:
+                continue
+            if self.reply_delay_s > 0.0:
+                self._stop.wait(self.reply_delay_s)
+            self._response.publish(
+                int(sequence), self.PLAN_TAG, self._plan(), time.monotonic()
+            )
+            self.replies += 1
+
+
+def test_native_latent_plan_serves_every_slot_from_one_reply(
+    tmp_path, latent_manifest
+):
+    bundle = _native_bundle(tmp_path, latent_manifest)
+    response_name = _shm_name("plan_response")
+    request_name = _shm_name("plan_request")
+    slots, hold, plans = 4, 5, 3
+    ticks = slots * hold * plans
+    loop = NativeFakeLoop(
+        bundle,
+        response_slot=response_name,
+        request_slot=request_name,
+        hold_steps=hold,
+        lead_ticks=2,
+        plan_slots=slots,
+        latent_plan=True,
+        command_stale_ms=5000.0,
+    )
+    server = _PlanServer(
+        request_name, response_name, slots=slots, z_dim=latent_manifest.command.z_dim
+    ).start()
+    try:
+        loop.start(ticks, paced=True)
+        loop.wait()
+    finally:
+        server.stop()
+
+    stats = loop.stats()
+    assert stats["fault"] == 0
+    assert stats["deadline_misses"] == 0
+    assert stats["plan_late_starts"] == 0
+    # Most holds are served from a plan already in hand, so the planner is
+    # called about once per plan instead of once per hold.
+    assert stats["plan_slot_advances"] >= (slots - 1) * (plans - 1)
+    assert stats["planner_requests"] <= plans + 1
+    assert stats["planner_requests"] < ticks // hold
+
+    # Slot k drives the tracker for `hold` ticks, so the first joint target
+    # holds one value per slot and steps up as the plan is walked.
+    # The log is flat (ticks x joints); take joint 0 of every tick.
+    joint_log = np.asarray(loop.joint_position_log()).reshape(-1, 29)[:, 0]
+    plateaus = [joint_log[0]]
+    for value in joint_log[1:]:
+        if not np.isclose(value, plateaus[-1]):
+            plateaus.append(value)
+    assert len(plateaus) >= slots
+
+
+def test_native_latent_plan_allows_a_lead_longer_than_one_hold(
+    tmp_path, latent_manifest
+):
+    bundle = _native_bundle(tmp_path, latent_manifest)
+    # The lead counts down to plan exhaustion, so it may span several holds.
+    loop = NativeFakeLoop(
+        bundle,
+        response_slot=_shm_name("plan_long_lead"),
+        request_slot=_shm_name("plan_long_lead_req"),
+        hold_steps=5,
+        lead_ticks=12,
+        plan_slots=4,
+        latent_plan=True,
+    )
+    assert loop.tracker.command_width == bundle.manifest.command.z_dim + 2
+    # Without a plan the historical rule still holds: the lead must fit inside
+    # the single hold that one reply covers.
+    with pytest.raises(RuntimeError):
+        NativeFakeLoop(
+            bundle,
+            response_slot=_shm_name("plan_bad_lead"),
+            request_slot=_shm_name("plan_bad_lead_req"),
+            hold_steps=5,
+            lead_ticks=12,
+            plan_slots=1,
+            latent_plan=True,
+        )
+
+
+def test_native_latent_plan_holds_the_last_slot_on_a_deadline_miss(
+    tmp_path, latent_manifest
+):
+    bundle = _native_bundle(tmp_path, latent_manifest)
+    response_name = _shm_name("plan_miss_response")
+    request_name = _shm_name("plan_miss_request")
+    slots, hold = 2, 5
+    loop = NativeFakeLoop(
+        bundle,
+        response_slot=response_name,
+        request_slot=request_name,
+        hold_steps=hold,
+        lead_ticks=2,
+        plan_slots=slots,
+        latent_plan=True,
+        command_stale_ms=5000.0,
+    )
+    # One plan only: after it is walked the planner is silent, and the
+    # controller must hold the last command and count the miss, not fault.
+    server = _PlanServer(
+        request_name,
+        response_name,
+        slots=slots,
+        z_dim=latent_manifest.command.z_dim,
+        max_replies=1,
+    ).start()
+    try:
+        loop.start(slots * hold * 3, paced=True)
+        loop.wait()
+    finally:
+        server.stop()
+    stats = loop.stats()
+    assert stats["fault"] == 0
+    assert stats["deadline_misses"] > 0
+    assert stats["control_ticks"] > slots * hold
+
+
+def test_native_latent_plan_time_aligns_a_late_reply(tmp_path, latent_manifest):
+    bundle = _native_bundle(tmp_path, latent_manifest)
+    response_name = _shm_name("plan_late_response")
+    request_name = _shm_name("plan_late_request")
+    slots, hold = 2, 5
+    loop = NativeFakeLoop(
+        bundle,
+        response_slot=response_name,
+        request_slot=request_name,
+        hold_steps=hold,
+        lead_ticks=2,
+        plan_slots=slots,
+        latent_plan=True,
+        command_stale_ms=5000.0,
+    )
+    # A reply that lands after the whole plan's window has passed is used at
+    # its last slot and recorded, never replayed from slot 0.
+    server = _PlanServer(
+        request_name,
+        response_name,
+        slots=slots,
+        z_dim=latent_manifest.command.z_dim,
+        reply_delay_s=(slots * hold + 2) / 50.0,
+    ).start()
+    try:
+        loop.start(slots * hold * 2, paced=True)
+        loop.wait()
+    finally:
+        server.stop()
+    stats = loop.stats()
+    assert stats["fault"] == 0
+    assert stats["plan_late_starts"] >= 1
+    assert stats["last_chunk_offset_steps"] >= slots * hold
+
+
+def test_native_latent_plan_worker_drives_the_controller(tmp_path, latent_manifest):
+    """The worker + controller pair: one head call per plan, no encoder."""
+    bundle = _native_bundle(tmp_path, latent_manifest)
+    response_name = _shm_name("plan_worker_response")
+    request_name = _shm_name("plan_worker_request")
+    slots, hold = 3, 5
+    z_dim = int(latent_manifest.command.z_dim)
+    calls = []
+
+    def _head(history, context):
+        assert history.shape == (930,)
+        calls.append(context)
+        plan = np.zeros((slots, z_dim), dtype=np.float32)
+        for slot in range(slots):
+            plan[slot, :] = float(slot + 1)
+        return plan
+
+    loop = NativeFakeLoop(
+        bundle,
+        response_slot=response_name,
+        request_slot=request_name,
+        hold_steps=hold,
+        lead_ticks=4,
+        plan_slots=slots,
+        latent_plan=True,
+        command_stale_ms=5000.0,
+    )
+    worker = NativeLatentPlanWorker(
+        request_name,
+        response_name,
+        _head,
+        z_dim=z_dim,
+        plan_slots=slots,
+        hold_steps=hold,
+        lead_ticks=4,
+    )
+    worker.start()
+    try:
+        loop.start(slots * hold * 2, paced=True)
+        loop.wait()
+    finally:
+        worker.close()
+
+    stats = loop.stats()
+    assert worker.last_error is None
+    assert stats["fault"] == 0
+    assert stats["deadline_misses"] == 0
+    assert stats["plan_slot_advances"] >= slots - 1
+    # One call per plan, not one per hold.
+    assert 0 < worker.requests <= 3
+    assert len(calls) == worker.requests
+
+
+def test_native_latent_plan_keeps_requesting_at_hold_one(tmp_path, latent_manifest):
+    """Hold 1 with a 30-slot plan: the leading Isaac row's cadence.
+
+    The countdown to plan exhaustion steps 1 -> 0 at hold 1, so a scheduler
+    that waits for the lead EXACTLY never asks for another plan and starves
+    the controller after the first one.
+    """
+    bundle = _native_bundle(tmp_path, latent_manifest)
+    response_name = _shm_name("plan_hold1_response")
+    request_name = _shm_name("plan_hold1_request")
+    slots, hold, lead = 30, 1, 5
+    ticks = slots * 4
+    loop = NativeFakeLoop(
+        bundle,
+        response_slot=response_name,
+        request_slot=request_name,
+        hold_steps=hold,
+        lead_ticks=lead,
+        plan_slots=slots,
+        latent_plan=True,
+        command_stale_ms=5000.0,
+    )
+    server = _PlanServer(
+        request_name, response_name, slots=slots, z_dim=latent_manifest.command.z_dim
+    ).start()
+    try:
+        loop.start(ticks, paced=True)
+        loop.wait()
+    finally:
+        server.stop()
+    stats = loop.stats()
+    assert stats["fault"] == 0
+    assert stats["control_ticks"] > ticks - 5
+    assert stats["planner_requests"] >= 3  # one per plan, not one per hold
+    assert stats["planner_requests"] <= ticks // slots + 2
+    assert stats["plan_slot_advances"] >= (slots - 1) * 2
+    assert stats["deadline_misses"] == 0
+
+
+def test_the_oracle_horizon_covers_the_window_the_control_thread_reads(
+    tmp_path, latent_manifest
+):
+    """SONIC v1.1's stride of 5 needs a chunk the encoder can read past.
+
+    `encode_active_reference` reads from offset `o` out to
+    `o + (window_frames - 1) * stride` strictly inside the chunk, and `o`
+    reaches `hold_steps` on the tick a new chunk is due. A horizon equal to
+    that sum is one frame short and faults on a command contract mid-run.
+    """
+    command = latent_manifest.command.model_copy(
+        update={
+            "state_dim": 64,
+            "encoder_state_interface": "joint_qpos_qvel_anchor_ori",
+            "macro_anchor_mode": "robot_heading",
+            "macro_frame_stride": 5,
+            "encoder_trigger": "every_control_tick",
+        }
+    )
+    manifest = latent_manifest.model_copy(update={"command": command})
+    bundle = _native_bundle(tmp_path, manifest, with_encoder=True)
+    reference_root = tmp_path / "reference_horizon"
+    _write_reference_tree(
+        reference_root, bundle.manifest.action.isaac_joint_names, frames=200
+    )
+    window_frames = int(command.window_steps + 1)
+    stride = int(command.macro_frame_stride)
+    hold = int(command.hold_steps)
+    minimum = (window_frames - 1) * stride + hold + 1
+
+    def _worker(horizon):
+        return NativeOracleWorker(
+            _shm_name("oracle_horizon_request"),
+            _shm_name("oracle_horizon_response"),
+            bundle,
+            reference_root,
+            "motion",
+            horizon=horizon,
+            create_slots=True,
+        )
+
+    with pytest.raises(ValueError, match="shorter than the encoder window"):
+        _worker(minimum - 1)
+
+    exact = _worker(minimum)
+    try:
+        assert exact.horizon == minimum
+    finally:
+        exact.close()
+
+    # The default carries one hold of slack, so a late reply is a deadline
+    # miss rather than a fault.
+    default = _worker(None)
+    try:
+        assert default.horizon == minimum + hold
+    finally:
+        default.close()
+
+
+def test_native_root_qpos_heading_keeps_height_and_reference_tilt():
+    raw = np.zeros((10, 36), dtype=np.float32)
+    raw[:, 29:32] = [1.2, -0.3, 0.85]
+    raw[:, 32:36] = quat_mul(_axis_quaternion(2, 40), _axis_quaternion(0, 17))
+    position = np.array([0.4, 0.2, 0.71], dtype=np.float32)
+    rotation = quat_mul(_axis_quaternion(2, 40), _axis_quaternion(1, 25))
+    heading = rotation.copy()
+    heading[:2] = 0
+    heading /= np.linalg.norm(heading)
+    origin = position.copy()
+    origin[2] = 0
+    expected_pos, expected_rot = subtract_frame(origin, heading, raw[0, 29:32], raw[0, 32:36])
+    actual = ec_native.reexpress_root_qpos_window(raw, position, rotation, heading_only=True)
+    np.testing.assert_allclose(actual[:, 29:32], np.tile(expected_pos, (10, 1)), atol=1e-6)
+    np.testing.assert_allclose(actual[:, 32:], np.tile(rot6d_from_quat(expected_rot), (10, 1)), atol=1e-6)
+    np.testing.assert_allclose(actual[:, 31], 0.85, atol=1e-6)

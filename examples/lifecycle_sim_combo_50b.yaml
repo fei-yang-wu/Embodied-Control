@@ -1,0 +1,35 @@
+# Combo 50B: history-10 actor, heading-anchored root_qpos, 50 Hz encoder.
+api_version: ec.lifecycle/v1alpha1
+bundle: ../assets/models/controller/combo_50b
+trackers:
+  sonic-v1-1: ../assets/models/controller/sonic_v1_1
+  fsq64-sonic-4500m: ../assets/models/controller/fsq64_sonic_4500m
+  fsq64-10b: ../assets/models/controller/fsq64_10b
+network: lo
+dds_domain: 51
+request_slot: /ec_g1_request
+response_slot: /ec_g1_response
+connect_slots: true
+command_source: oracle
+reference_root: ../assets/models/reference/sonic_deployment
+motion: walking_quip_360_R_002__A428
+start_frame: 0
+lead_ticks: 0
+fixed_initial_anchor: true
+start_pose: motion
+ramp_seconds: 3.0
+ticks: 454
+blend_ticks: 250
+end_state: vendor_damp
+sim_hoist: true
+artifacts_dir: ../artifacts/lifecycle_combo_50b
+mjcf: ../assets/latent_playkit/model/g1_29dof_rev_1_0.xml
+realtime:
+  control_cpu: -1
+  writer_cpu: -1
+  control_priority: 0
+  writer_priority: 0
+  lock_memory: false
+  policy_threads: 1
+thresholds:
+  settle_timeout_seconds: 15.0

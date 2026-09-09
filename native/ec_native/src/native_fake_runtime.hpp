@@ -49,6 +49,12 @@ struct NativeRuntimeStats {
   std::uint64_t planner_responses = 0;
   std::uint64_t encoder_inferences = 0;
   std::uint64_t response_overruns = 0;
+  std::uint64_t stale_responses = 0;
+  std::uint64_t reference_ticks = 0;
+  // Milliseconds since the last accepted planner reply; -1 before the first.
+  double command_age_ms = -1.0;
+  std::uint64_t plan_slot_advances = 0;
+  std::uint64_t plan_late_starts = 0;
   std::uint64_t scheduler_deadlines_missed = 0;
   std::uint64_t tick_ns_max = 0;
   std::uint64_t wake_late_ns_max = 0;
@@ -65,6 +71,15 @@ struct NativeRuntimeStats {
 struct NativePlannerConfig {
   std::size_t hold_steps = 10;
   std::size_t lead_ticks = 4;
+  // A planner reply may carry `plan_slots` consecutive commands, each held
+  // `hold_steps` control ticks. The controller walks the plan without calling
+  // the planner again, so one head call covers plan_slots * hold_steps ticks
+  // and `lead_ticks` counts down to PLAN exhaustion, not hold expiry.
+  // plan_slots = 1 is the historical one-reply-per-hold behaviour.
+  std::size_t plan_slots = 1;
+  // Accept the latent-plan response tag: `plan_slots x z_dim` raw latents with
+  // no encoder in the loop. The controller writes the phase channels itself.
+  bool latent_plan = false;
   std::size_t encoder_frame_width = 38;
   std::size_t window_frames = 10;
   std::size_t encoder_frame_stride = 1;
@@ -74,6 +89,7 @@ struct NativePlannerConfig {
   bool oracle_reference = false;
   enum class ReferenceEncoderLayout {
     kRootQpos,
+    kRootQposHeading,
     kJointQposQvelAnchorOri,
   } reference_encoder_layout = ReferenceEncoderLayout::kRootQpos;
   enum class EncoderTrigger {
@@ -126,6 +142,12 @@ class NativeFakeRuntime {
   NativeFakeRuntime& operator=(const NativeFakeRuntime&) = delete;
 
   void start(std::size_t max_ticks, bool paced = true);
+  // Pin the reference clock: the oracle keeps serving frame 0 and the
+  // encoder keeps looking at it until unpaused, so a motion begins the tick
+  // the policy fully owns the joints, not the tick the loop started.
+  void set_reference_paused(bool paused) noexcept {
+    reference_paused_.store(paused, std::memory_order_relaxed);
+  }
   void stop() noexcept;
   void wait();
   bool running() const noexcept { return running_.load(); }
@@ -148,6 +170,7 @@ class NativeFakeRuntime {
   static constexpr std::uint32_t kLatentTag = 1;
   static constexpr std::uint32_t kChunkTag = 2;
   static constexpr std::uint32_t kRawReferenceTag = 3;
+  static constexpr std::uint32_t kLatentPlanTag = 4;
   static constexpr std::uint32_t kPlannerRequestTag = 10;
   static constexpr std::uint32_t kOracleRequestTag = 11;
   static constexpr std::size_t kReferenceHeaderWidth = 3;
@@ -161,6 +184,10 @@ class NativeFakeRuntime {
   bool accept_direct_command(std::uint32_t length) noexcept;
   bool accept_chunk(std::uint32_t length) noexcept;
   bool accept_reference_chunk(std::uint32_t length) noexcept;
+  bool accept_latent_plan(std::uint32_t length) noexcept;
+  bool advance_plan_slot() noexcept;
+  void load_plan_slot(std::size_t slot) noexcept;
+  std::size_t plan_ticks_remaining() const noexcept;
   bool encode_active_reference(std::size_t offset_steps) noexcept;
   void record_reference_metrics() noexcept;
   void transition_to_damp(RuntimeFault fault) noexcept;
@@ -179,6 +206,10 @@ class NativeFakeRuntime {
   std::array<float, kMaxValues> active_reference_chunk_{};
   std::array<float, kMaxValues> encoder_raw_window_{};
   std::array<float, kMaxValues> encoder_window_{};
+  std::array<float, kMaxValues> active_plan_{};
+  std::size_t active_plan_slots_ = 0;
+  std::size_t plan_cursor_ = 0;
+  std::uint64_t plan_accept_tick_ = 0;
   std::uint32_t pending_chunk_length_ = 0;
   std::uint64_t pending_chunk_sequence_ = 0;
   double pending_chunk_recv_stamp_ = 0.0;
@@ -218,6 +249,8 @@ class NativeFakeRuntime {
 
   std::atomic<std::uint64_t> ticks_{0};
   std::atomic<std::uint64_t> control_ticks_{0};
+  std::atomic<bool> reference_paused_{false};
+  std::uint64_t reference_tick_ = 0;
   std::atomic<std::uint64_t> wait_ticks_{0};
   std::atomic<std::uint64_t> damp_ticks_{0};
   std::atomic<std::uint64_t> deadline_misses_{0};
@@ -225,6 +258,9 @@ class NativeFakeRuntime {
   std::atomic<std::uint64_t> planner_responses_{0};
   std::atomic<std::uint64_t> encoder_inferences_{0};
   std::atomic<std::uint64_t> response_overruns_{0};
+  std::atomic<std::uint64_t> stale_responses_{0};
+  std::atomic<std::uint64_t> plan_slot_advances_{0};
+  std::atomic<std::uint64_t> plan_late_starts_{0};
   std::atomic<std::uint64_t> scheduler_deadlines_missed_{0};
   std::atomic<std::uint64_t> tick_ns_max_{0};
   std::atomic<std::uint64_t> wake_late_ns_max_{0};

@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "native_tracker_core.hpp"
+#include "plant_vendor.hpp"
 
 namespace ec_native {
 
@@ -19,10 +20,17 @@ struct PlantStats {
   std::uint64_t publishes = 0;
   std::uint64_t publish_failures = 0;
   std::uint64_t commands_received = 0;
+  std::uint64_t rejected_commands = 0;
+  std::uint64_t mode_machine_rejections = 0;
   std::uint64_t crc_errors = 0;
   std::uint64_t wake_late_ns_max = 0;
   std::uint64_t deadline_misses = 0;
   bool holding = true;
+  bool vendor_owned = false;
+  int vendor_fsm_id = -1;
+  bool hoisted = false;
+  int hoist_mode = 0;
+  double hoist_gain = 0.0;
   bool physics_fault = false;
   bool realtime_configured = false;
   double last_command_age_ms = -1.0;
@@ -44,6 +52,25 @@ struct PlantStats {
 // ("lo" against this plant, the robot NIC against hardware). The plant is
 // SDK-native: every per-joint array is in SDK motor order and it knows
 // nothing about the Isaac ordering used elsewhere in the runtime.
+// Sensor noise the plant puts ON THE WIRE, because a real G1 does not serve
+// clean state. Magnitudes are the uniform half-ranges SONIC trains against
+// (config/g1/common/observations.py). `imu_tilt_rad` perturbs the published
+// IMU orientation, which is how a tilt error reaches the controller's
+// projected gravity on hardware; SONIC instead adds to the derived vector
+// without renormalising, so the two are equivalent in magnitude, not in form.
+// All zero = the deterministic protocol, bit-identical to a noise-free plant.
+struct PlantSensorNoise {
+  float joint_pos = 0.0F;
+  float joint_vel = 0.0F;
+  float base_ang_vel = 0.0F;
+  float imu_tilt_rad = 0.0F;
+  std::uint64_t seed = 0;
+  bool active() const noexcept {
+    return joint_pos > 0.0F || joint_vel > 0.0F || base_ang_vel > 0.0F ||
+           imu_tilt_rad > 0.0F;
+  }
+};
+
 class MujocoDdsPlant {
  public:
   MujocoDdsPlant(const std::string& model_path,
@@ -56,7 +83,13 @@ class MujocoDdsPlant {
                  std::span<const float> hold_damping, double timestep,
                  std::uint8_t mode_machine, int physics_cpu = -1,
                  int physics_fifo_priority = 0, bool lock_memory = false,
-                 bool require_realtime = false);
+                 bool require_realtime = false,
+                 const PlantSensorNoise& sensor_noise = {},
+                 std::size_t state_log_capacity = 0, int dds_domain = 0,
+                 bool freeze_until_command = false,
+                 bool vendor_enabled = false,
+                 const std::string& vendor_name = "ai",
+                 bool hoist_enabled = false);
   ~MujocoDdsPlant();
 
   MujocoDdsPlant(const MujocoDdsPlant&) = delete;
@@ -64,12 +97,27 @@ class MujocoDdsPlant {
 
   void reset();
   // Optional start pose: [root pos 3 | root quat XYZW 4 | joints 29 SDK order].
+  // Rows x 36, SDK motor order. Copied off the physics thread.
+  std::vector<float> state_log() const;
+  std::size_t state_log_rows() const noexcept {
+    return state_log_rows_.load(std::memory_order_acquire);
+  }
   void set_initial_pose(std::span<const float> pose);
   void start();
   void stop() noexcept;
   void wait_for_stop() noexcept;
   bool running() const noexcept { return running_.load(); }
   PlantStats stats() const noexcept;
+  // In-process hoist controls; the "ec_plant" RPC service does the same from
+  // another process.
+  void hoist() noexcept;
+  void lower() noexcept;
+  void slack() noexcept;
+  // The most recent published state, [pos 3 | quat XYZW 4 | joints 29 SDK
+  // order]: what a viewer draws. Read from any thread; a torn read costs one
+  // frame of a wobble, and the alternative is handing a renderer a pointer
+  // into mjData while the physics thread writes it.
+  std::array<float, 7 + kJointCount> latest_state() const noexcept;
 
  private:
   struct Impl;
@@ -80,9 +128,12 @@ class MujocoDdsPlant {
   bool snapshot_command(CommandSnapshot& destination) const noexcept;
   void set_servo_gains(std::span<const float> stiffness,
                        std::span<const float> damping) noexcept;
+  void reset_data(bool while_running);
   void physics_loop() noexcept;
   bool configure_physics_thread() noexcept;
   void publish_low_state() noexcept;
+  void apply_vendor_drive() noexcept;
+  void apply_hoist() noexcept;
 
   std::unique_ptr<Impl> impl_;
   std::unique_ptr<CommandSlot> command_slot_;
@@ -109,12 +160,47 @@ class MujocoDdsPlant {
   std::atomic<bool> stop_requested_{false};
   std::atomic<bool> thread_ready_{false};
   std::atomic<bool> realtime_configured_{false};
+  PlantSensorNoise sensor_noise_{};
+  // A gantry that only lets go when a controller takes over. The rehearsal
+  // starts the robot ON a reference frame, and many frames are mid-stride
+  // poses that fall over in well under the second a controller needs to boot.
+  // Frozen, the plant still serves state on the wire; it just does not
+  // integrate physics until the first command arrives.
+  bool freeze_until_command_ = false;
+  // The simulated vendor: sport + motion-switcher RPC services and the
+  // ownership gate on rt/lowcmd. Null when the plant runs bare.
+  std::unique_ptr<PlantVendor> vendor_;
+  bool previous_owned_ = false;
+  // A 6-DoF spring-damper on the pelvis standing in for the gantry. Released
+  // over hoist_release_seconds_ so the feet take the load gradually, the way
+  // an operator pays out a strap.
+  bool hoist_enabled_ = false;
+  double hoist_gain_ = 0.0;
+  double hoist_release_seconds_ = 3.0;
+  std::uint64_t hoist_generation_seen_ = 0;
+  std::uint64_t reset_generation_seen_ = 0;
+  std::array<double, 3> hoist_target_position_{};
+  std::array<double, 4> hoist_target_quaternion_wxyz_{1.0, 0.0, 0.0, 0.0};
+  std::atomic<float> hoist_gain_reported_{0.0F};
+  std::array<float, kJointCount> zero_gains_{};
+  std::array<float, kJointCount> vendor_damp_kd_{};
+  // TRUE simulator state, sampled at the publish rate: the only ground truth
+  // in the rig, because the hardware wire protocol carries no root pose.
+  // Rows are [pos 3 | quat XYZW 4 | joint q 29] in SDK motor order.
+  std::array<std::atomic<float>, 7 + kJointCount> live_state_{};
+  std::vector<float> state_log_;
+  std::size_t state_log_capacity_ = 0;
+  std::atomic<std::size_t> state_log_rows_{0};
+  std::uint64_t noise_state_ = 0;  // physics thread only
+  float noise_uniform(float half_range) noexcept;
   std::atomic<bool> physics_fault_{false};
   std::atomic<bool> holding_{true};
   std::atomic<std::uint64_t> steps_{0};
   std::atomic<std::uint64_t> publishes_{0};
   std::atomic<std::uint64_t> publish_failures_{0};
   std::atomic<std::uint64_t> commands_received_{0};
+  std::atomic<std::uint64_t> rejected_commands_{0};
+  std::atomic<std::uint64_t> mode_machine_rejections_{0};
   std::atomic<std::uint64_t> crc_errors_{0};
   std::atomic<std::uint64_t> wake_late_ns_max_{0};
   std::atomic<std::uint64_t> deadline_misses_{0};

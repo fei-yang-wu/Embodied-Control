@@ -135,6 +135,8 @@ class _FakeRuntime:
 
     @property
     def base_height(self):
+        if self._running:
+            raise RuntimeError("native base height is available after the loop stops")
         return 0.76
 
     def joint_position_log(self):
@@ -183,6 +185,7 @@ def test_telemetry_drain_thread_logs_and_exits(tmp_path):
             events.append((event_type, fields))
 
     runtime = _FakeRuntime()
+    runtime._running = True
     recorder = TelemetryRecorder(runtime, logger=_CapturingLogger(), sample_hz=50.0)
     recorder.start()
     import time

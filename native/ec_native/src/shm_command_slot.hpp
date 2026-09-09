@@ -28,10 +28,11 @@ inline double monotonic_now() {
   return static_cast<double>(ts.tv_sec) + static_cast<double>(ts.tv_nsec) * 1e-9;
 }
 
-// A stride-5 reference block can carry 55 x 62 = 3,410 values. The extra
-// capacity keeps transport renewal outside the 50 Hz encoder cadence.
-constexpr std::uint32_t kMaxValues = 4096;
-constexpr std::uint64_t kMagic = 0x45434e4154495632ull;  // "ECNATIV2"
+// A stride-5 reference block can carry 55 x 62 = 3,410 values, and a latent
+// plan carries slots x z_dim (30 x 256 = 7,680 for the hold-1 tracker). The
+// extra capacity keeps transport renewal outside the 50 Hz encoder cadence.
+constexpr std::uint32_t kMaxValues = 16384;
+constexpr std::uint64_t kMagic = 0x45434e4154495633ull;  // "ECNATIV3"
 constexpr int kSnapshotAttempts = 8;
 
 struct Slot {

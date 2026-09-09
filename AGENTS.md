@@ -4,6 +4,13 @@ Instructions for AI agents (and a decent quick-start for humans) working in
 this repository. If you're a Claude Code agent, `CLAUDE.md` points here —
 this file is the canonical source.
 
+## Default communication mode
+
+Use the installed `caveman` skill at `full` intensity for every new session in
+this repository. Keep it active until the user says `stop caveman`, `normal
+mode`, or selects another Caveman intensity. This applies to both Codex and
+Claude Code; preserve Caveman's auto-clarity and written-artifact boundaries.
+
 ## What this is
 
 A host orchestrator for evaluating VLA (vision-language-action) policies
@@ -43,7 +50,7 @@ pixi run -e transports test-transports # OpenPI + GR00T client adapter tests (we
 pixi run -e lowlevel test-lowlevel     # 50 Hz tracker runtime: buffers, bundle, loop, torch engine
 pixi run -e lowlevel smoke-lowlevel    # self-contained closed-loop smoke (synthetic bundle, fake env)
 pixi run -e native build-native        # build the ec_native C++ extension (scikit-build-core + pybind11)
-pixi run -e native test-native         # shm slots, native loops, MPJPE/telemetry, DDS-plant loopback
+pixi run -e native test-native         # shm slots, native loops, MPJPE/telemetry, DDS-plant + lifecycle loopback
 pixi run doctor                        # host + dependency check (imageio, offscreen renderer, docker, ...)
 ```
 
@@ -175,3 +182,8 @@ if picking up one of these.
   VLA policies (the current next milestone).
 - `docs/design/eval_orchestration_interface.md` — original design doc
   (aspirational/planning; some of it isn't built yet).
+- `docs/design/robot_runtime_interface.md` — high-level robot axis
+  (`ec robot`, the sport service); takeover is ReleaseMode + `rt/lowcmd`.
+- `docs/design/robot_lifecycle.md` — the gated hoist-to-run lifecycle,
+  plant vendor parity, and the hardware ladder (the current next milestone
+  for the G1 work).

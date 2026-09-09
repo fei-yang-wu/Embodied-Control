@@ -3,6 +3,8 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+artifacts/
+
 # C extensions
 *.so
 
@@ -223,4 +225,12 @@ __marimo__/
 native/thirdparty/
 
 # Latent playkit assets (bundle + reference tree + MJCF), delivered out of band
-assets/
+assets/**
+# Model pins are the exception: weights stay out of git, but which repository,
+# which commit and which bytes are the record of what the robot ran. Git does
+# not descend into an excluded directory, so the path to a pin is re-included
+# one level at a time.
+!assets/models/
+!assets/models/*/
+!assets/models/*/*/
+!assets/models/*/*/model.pin.json

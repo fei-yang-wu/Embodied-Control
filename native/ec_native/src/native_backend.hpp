@@ -50,6 +50,14 @@ class NativeRobotBackend {
     return true;
   }
   virtual NativeBackendTimingStats timing_stats() const noexcept { return {}; }
+  // Blend-in progress, 0 (all held pose) to 1 (all policy). The control
+  // thread blends the target it writes and reports the blended action as
+  // last_action, so the policy's history stays honest about what ran.
+  virtual float blend_weight() const noexcept { return 1.0F; }
+  virtual bool held_target(std::span<float> out) const noexcept {
+    static_cast<void>(out);
+    return false;
+  }
 };
 
 class NativeFakeBackend final : public NativeRobotBackend {
@@ -69,6 +77,21 @@ class NativeFakeBackend final : public NativeRobotBackend {
   RobotState state_{};
 };
 
+// Observation noise the backend puts on the CONTROLLER'S VIEW only, matching
+// SONIC's policy-group uniform half-ranges. Metrics read the clean state, so
+// MPJPE never measures the noise that was injected. All zero = deterministic.
+struct BackendSensorNoise {
+  float joint_pos = 0.0F;
+  float joint_vel = 0.0F;
+  float base_ang_vel = 0.0F;
+  float projected_gravity = 0.0F;
+  std::uint64_t seed = 0;
+  bool active() const noexcept {
+    return joint_pos > 0.0F || joint_vel > 0.0F || base_ang_vel > 0.0F ||
+           projected_gravity > 0.0F;
+  }
+};
+
 class NativeMujocoBackend final : public NativeRobotBackend {
  public:
   NativeMujocoBackend(
@@ -79,7 +102,8 @@ class NativeMujocoBackend final : public NativeRobotBackend {
       std::span<const float> armature, std::span<const float> effort_limit,
       double timestep, std::size_t decimation, int physics_cpu = -1,
       int physics_fifo_priority = 0, bool lock_memory = false,
-      bool require_realtime = false);
+      bool require_realtime = false,
+      const BackendSensorNoise& sensor_noise = {});
   ~NativeMujocoBackend() override;
 
   NativeMujocoBackend(const NativeMujocoBackend&) = delete;
@@ -113,8 +137,12 @@ class NativeMujocoBackend final : public NativeRobotBackend {
   void physics_loop() noexcept;
   bool configure_physics_thread() noexcept;
   void publish_state() noexcept;
+  float noise_uniform(float half_range) noexcept;
   bool snapshot_state(StateSnapshot& destination) const noexcept;
   bool snapshot_command(CommandSnapshot& destination) const noexcept;
+
+  BackendSensorNoise sensor_noise_{};
+  std::uint64_t noise_state_ = 0;  // physics thread only
 
   struct Impl;
   std::unique_ptr<Impl> impl_;

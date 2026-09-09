@@ -59,6 +59,13 @@ class ControlLoop:
         control_hz = self.tracker.bundle.manifest.rates.control_hz
         clock = self.backend.clock()
         self.backend.reset(seed)
+        if getattr(self.job.rollout, "start_pose", None):
+            import numpy as _np
+
+            pose = _np.load(self.job.rollout.start_pose)
+            if pose.shape != (36,):
+                raise ValueError("rollout.start_pose must hold 36 values")
+            self.backend.set_pose(pose[0:7], pose[7:])
         state = self.backend.read_state()
         self.tracker.reset(state)
         if self.publisher is not None:

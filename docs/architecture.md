@@ -114,6 +114,25 @@ whichever transport OpenPI/GR00T actually speak (see
 translation (their trained normalization stats, action space conventions)
 becomes the real work.
 
+## G1 DDS plant configuration
+
+The simulated DDS robot is independent of the selected policy checkpoint.
+`ec lowlevel plant <robot.yaml> --model <robot.xml>` loads a standalone
+`ec.plant/v1alpha1` robot configuration, defined in `robot/plant.py`, and the
+MJCF. `sim/dds_plant.py` maps configured joint names and motor IDs to the
+native plant without loading a policy bundle.
+
+The plant configuration owns actuator armature, torque limits, nominal
+joint positions, and the simulated vendor's hold gains. The controller
+owns observation/action contracts, neural-network weights, reference
+alignment, and the gains and targets sent in each DDS command. Changing
+controllers does not change the plant's physical calibration. The vendor
+emulator and hoist can run before any controller is loaded.
+
+Initial-pose arrays follow the plant configuration's joint order, and plant
+state NPZs carry `joint_names` explicitly. Consumers map by name instead of
+assuming the plant shares a policy's internal joint ordering.
+
 ## Where to look for more detail
 
 - `README.md` — exact commands, artifact directory layout, per-feature docs

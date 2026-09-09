@@ -1,0 +1,47 @@
+{
+  "api_version": "ec.model_pin/v1",
+  "files": {
+    "anchor_pos_w.memmap": {
+      "sha256": "e6006d42378ce000a83beac420acbd996fcf41d20998b8f8c615927d05899b05",
+      "size": 91404
+    },
+    "anchor_quat_w.memmap": {
+      "sha256": "4d3516a81ab8ffabb95ed90e392fc64ab636018cd4cb3c57c8eee441be1f6765",
+      "size": 121872
+    },
+    "body_ang_vel_w.memmap": {
+      "sha256": "2ab2ca675df07e044c331670233ddca28bdf539699ff0afdafb1be4a9ba59c04",
+      "size": 1279656
+    },
+    "body_lin_vel_w.memmap": {
+      "sha256": "99b0479b9e16de40c890cbb2e9d32c28013dc795e2a83d6040d5343768203379",
+      "size": 1279656
+    },
+    "body_pos_w.memmap": {
+      "sha256": "478d014ad7515ebbffff017d3035a630bf2a14d96cbaa67a600583a40a596078",
+      "size": 1279656
+    },
+    "body_quat_w.memmap": {
+      "sha256": "514ee4a15356c04c908e4203bf02c26c594f6e0e94e9c662a55c6fa8ae8a0f4e",
+      "size": 1706208
+    },
+    "qpos.memmap": {
+      "sha256": "f0d1c1c2269866b73f302256199888d29833959da0aa7c698aa803a12bd72246",
+      "size": 1096848
+    },
+    "qvel.memmap": {
+      "sha256": "1fa1e00b4396616975bf07f55b41aa94f4e50a00449162eb2f1114c45c94c964",
+      "size": 1066380
+    },
+    "reference_arrays_manifest.json": {
+      "sha256": "15edb451cef8df230c02146763987953d8f23de601aaf1525c032d8df16f8131",
+      "size": 5101
+    }
+  },
+  "kind": "reference",
+  "name": "sonic_deployment",
+  "path": "reference_arrays",
+  "repo": "fei-yang-wu/sonic-deployment-motions",
+  "repo_type": "dataset",
+  "revision": "afb8a5fadc691ca8eb0072188ad65521f7958d0b"
+}

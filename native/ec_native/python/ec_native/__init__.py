@@ -10,6 +10,7 @@ from ._ec_native import (
     ShmCommandSlot,
     WITH_UNITREE,
     __version__,
+    align_heading_to_reference,
     monotonic_now,
     pack_joint_qpos_qvel_anchor_ori_window,
     projected_gravity_from_xyzw,
@@ -25,6 +26,7 @@ __all__ = [
     "ShmCommandSlot",
     "WITH_UNITREE",
     "__version__",
+    "align_heading_to_reference",
     "monotonic_now",
     "pack_joint_qpos_qvel_anchor_ori_window",
     "projected_gravity_from_xyzw",
@@ -32,6 +34,17 @@ __all__ = [
 ]
 
 if WITH_UNITREE:
+    G1LocoClient = _ec_native.G1LocoClient
     MujocoDdsPlant = _ec_native.MujocoDdsPlant
+    PlantClient = _ec_native.PlantClient
     NativeUnitreeRuntime = _ec_native.NativeUnitreeRuntime
-    __all__.extend(["MujocoDdsPlant", "NativeUnitreeRuntime"])
+    UnitreeStateProbe = _ec_native.UnitreeStateProbe
+    __all__.extend(
+        [
+            "G1LocoClient",
+            "MujocoDdsPlant",
+            "PlantClient",
+            "NativeUnitreeRuntime",
+            "UnitreeStateProbe",
+        ]
+    )

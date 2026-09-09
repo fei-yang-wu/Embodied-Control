@@ -1,0 +1,47 @@
+{
+  "api_version": "ec.model_pin/v1",
+  "files": {
+    "action_contract.json": {
+      "sha256": "37d5888c9ec6cbce8c557ce2673ad5d8212ae95b02f9e65fdb44a2c172aedd4d",
+      "size": 6520
+    },
+    "encoder.onnx": {
+      "sha256": "6dc25cefdd80354a5dc5801063b35f5460fe15e93fb3f2ac07a3b6d15cf60977",
+      "size": 5254584
+    },
+    "encoder.pt": {
+      "sha256": "fd67a8349f9b17c2a2e0e5ed8e34c62c0c2c88e7ac37740633bb596928576a58",
+      "size": 5268809
+    },
+    "golden_trace.npz": {
+      "sha256": "6c04988ae270d21cb7f30bffbc9ec804d831ec4e73c9f93430d7924c0c46fb1e",
+      "size": 942066
+    },
+    "manifest.json": {
+      "sha256": "ff071c2dac4b06022362e973397fb5c2328bd50c88a61b9038cd912eb2ca6a2d",
+      "size": 12896
+    },
+    "norm_stats.npz": {
+      "sha256": "7f3e50d6d6a371d4ab0ed3e10e257bbd9b8a11d20c8b66ff4dfdc900bcf948d9",
+      "size": 3951
+    },
+    "obs_contract.json": {
+      "sha256": "b11531633a27af3407cd7bdc6400e6c837894a72649c789a23490ba44c0c37db",
+      "size": 1339
+    },
+    "policy.onnx": {
+      "sha256": "3df3135fdd0222149148e00c6cb569e7f5ffb526170068219427dfe9de3f3ffe",
+      "size": 7803945
+    },
+    "policy.pt": {
+      "sha256": "56cc0d05dfd98a468f2e7eb4948a8adffa9d555e2efc4faeb20e31852d9db52e",
+      "size": 7815450
+    }
+  },
+  "kind": "controller",
+  "name": "rollout24_gamma097_3500m",
+  "path": "bundles/rollout24_gamma097_3500m",
+  "repo": "GeorgiaTech/ec-latent-playkit",
+  "repo_type": "dataset",
+  "revision": "e947fd4c6fc87dcfd76a3c6d433ca46c48d3320f"
+}

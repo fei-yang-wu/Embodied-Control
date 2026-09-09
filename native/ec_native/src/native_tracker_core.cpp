@@ -106,11 +106,37 @@ std::size_t expected_width(TermKind kind) {
 
 }  // namespace
 
+bool align_heading_to_reference(
+    std::span<const float> initial_robot_quaternion,
+    std::span<const float> initial_reference_quaternion,
+    std::span<const float> robot_quaternion,
+    std::span<float> aligned_quaternion) noexcept {
+  std::array<float, 4> initial{}, reference{}, current{};
+  if (aligned_quaternion.size() != 4 ||
+      !normalized_quaternion(initial_robot_quaternion, initial) ||
+      !normalized_quaternion(initial_reference_quaternion, reference) ||
+      !normalized_quaternion(robot_quaternion, current)) {
+    return false;
+  }
+  initial[0] = initial[1] = reference[0] = reference[1] = 0.0F;
+  if (!normalized_quaternion(initial, initial) ||
+      !normalized_quaternion(reference, reference)) {
+    return false;
+  }
+  initial[2] = -initial[2];
+  // Only world yaw is arbitrary. Cancelling the full initial pose would
+  // erase real tilt error and disagree with the policy's projected gravity.
+  const auto offset = multiply_quaternions(reference, initial);
+  const auto aligned = multiply_quaternions(offset, current);
+  std::copy(aligned.begin(), aligned.end(), aligned_quaternion.begin());
+  return true;
+}
+
 bool reexpress_root_qpos_window(
     std::span<const float> raw_world_frames, std::size_t frame_count,
     std::span<const float> anchor_position_w,
     std::span<const float> anchor_quaternion_w,
-    std::span<float> root_qpos_frames) noexcept {
+    std::span<float> root_qpos_frames, bool heading_only) noexcept {
   if (frame_count == 0 ||
       raw_world_frames.size() != frame_count * kRawReferenceWidth ||
       root_qpos_frames.size() != frame_count * kRootQposWidth ||
@@ -122,6 +148,11 @@ bool reexpress_root_qpos_window(
   std::array<float, 4> robot_quaternion{};
   if (!normalized_quaternion(anchor_quaternion_w, robot_quaternion)) {
     return false;
+  }
+  if (heading_only) {
+    robot_quaternion[0] = 0.0F;
+    robot_quaternion[1] = 0.0F;
+    if (!normalized_quaternion(robot_quaternion, robot_quaternion)) return false;
   }
   const auto robot_matrix = quaternion_matrix(robot_quaternion);
   const std::array<float, 4> robot_conjugate = {
@@ -139,7 +170,8 @@ bool reexpress_root_qpos_window(
     std::copy_n(source, kJointCount, destination);
     const float dx = source[kJointCount] - anchor_position_w[0];
     const float dy = source[kJointCount + 1] - anchor_position_w[1];
-    const float dz = source[kJointCount + 2] - anchor_position_w[2];
+    const float dz = source[kJointCount + 2] -
+                     (heading_only ? 0.0F : anchor_position_w[2]);
     destination[kJointCount] =
         robot_matrix[0] * dx + robot_matrix[3] * dy + robot_matrix[6] * dz;
     destination[kJointCount + 1] =
@@ -508,6 +540,19 @@ const StepResult& NativeTrackerCore::step(const RobotState& state,
     last_action_[index] = clipped_action;
   }
   return result_;
+}
+
+void NativeTrackerCore::set_last_action(std::span<const float> action) noexcept {
+  if (action.size() != kJointCount) {
+    return;
+  }
+  for (std::size_t index = 0; index < kJointCount; ++index) {
+    const float value = std::isfinite(action[index]) ? action[index] : 0.0F;
+    last_action_[index] =
+        raw_action_clip_ > 0.0F
+            ? std::clamp(value, -raw_action_clip_, raw_action_clip_)
+            : value;
+  }
 }
 
 void NativeTrackerCore::warmup(std::size_t iterations) {

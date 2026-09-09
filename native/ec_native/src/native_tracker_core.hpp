@@ -68,6 +68,12 @@ struct RobotState {
   bool anchor_pose_valid = false;
 };
 
+bool align_heading_to_reference(
+    std::span<const float> initial_robot_quaternion,
+    std::span<const float> initial_reference_quaternion,
+    std::span<const float> robot_quaternion,
+    std::span<float> aligned_quaternion) noexcept;
+
 // Convert raw world-frame reference records
 // [joint qpos 29 | anchor position 3 | anchor quaternion XYZW 4] into
 // robot-anchored root_qpos frames
@@ -77,7 +83,7 @@ bool reexpress_root_qpos_window(
     std::span<const float> raw_world_frames, std::size_t frame_count,
     std::span<const float> anchor_position_w,
     std::span<const float> anchor_quaternion_w,
-    std::span<float> root_qpos_frames) noexcept;
+    std::span<float> root_qpos_frames, bool heading_only = false) noexcept;
 
 bool pack_joint_qpos_qvel_anchor_ori_window(
     std::span<const float> raw_world_frames, std::size_t available_frames,
@@ -119,6 +125,10 @@ class NativeTrackerCore {
   const std::array<float, kJointCount>& last_action() const noexcept {
     return last_action_;
   }
+  // Overwrite the action the next observation reports as "last": what the
+  // writer actually applied, when that differs from what the policy asked
+  // (the blend-in). Isaac's last_action is the executed action; so is this.
+  void set_last_action(std::span<const float> action) noexcept;
 
  private:
   static TermKind parse_term(const std::string& name);

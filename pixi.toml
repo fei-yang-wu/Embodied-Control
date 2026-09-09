@@ -16,6 +16,10 @@ platforms = ["linux-64", "osx-arm64"]
 [tasks]
 doctor = "ec doctor"
 test = "pytest -q"
+# The operator manual is generated from the console's own bindings; a key
+# that moves without it is a manual that lies while a robot hangs on a hoist.
+build-manual = "python scripts/build_operator_manual.py"
+check-manual = "python scripts/build_operator_manual.py --check"
 # Run the blank policy service standalone (manual / debugging):
 policy-serve = "ec policy serve --type zero --action-dim 2 --host 127.0.0.1 --port 8756"
 policy-ping = "ec policy ping --endpoint 127.0.0.1:8756"
@@ -42,6 +46,9 @@ pip = "*"
 pytest = ">=8,<9"
 pydantic = ">=2,<3"
 pyyaml = ">=6,<7"
+# `ec models` fetches and publishes pinned bundles, so every environment that
+# can start a tracker can also make its weights present.
+huggingface_hub = ">=0.20"
 
 [pypi-dependencies]
 embodied-control = { path = ".", editable = true }
@@ -113,6 +120,14 @@ smoke-lowlevel = "pytest -q tests/lowlevel/test_torch_engine_e2e.py -k end_to_en
 [feature.native]
 platforms = ["linux-64"]
 
+# conda-forge's ncurses does not reliably find its own bundled terminfo
+# database on activation (a known packaging quirk), which makes any curses
+# program in this env - including `ec lifecycle console` - fail immediately
+# with "could not find terminfo database". Point it at the env's own copy so
+# curses works out of the box; this is self-contained, not a host package.
+[feature.native.activation.env]
+TERMINFO = "${CONDA_PREFIX}/lib/terminfo"
+
 [feature.native.dependencies]
 cmake = ">=3.27"
 ninja = "*"
@@ -128,10 +143,11 @@ scikit-build-core = ">=0.10"
 
 [feature.native.pypi-dependencies]
 ec-native = { path = "native/ec_native", editable = true }
+mjviser = ">=0.0.14"
 
 [feature.native.tasks]
 build-native = "pixi reinstall -e native ec-native && python -c \"import ec_native; print(ec_native.__version__)\""
-test-native = "pytest -q tests/lowlevel/test_native_shm.py tests/lowlevel/test_native_core.py tests/lowlevel/test_metrics_and_telemetry.py tests/lowlevel/test_dds_plant.py"
+test-native = "pytest -q tests/lowlevel/test_native_shm.py tests/lowlevel/test_native_core.py tests/lowlevel/test_metrics_and_telemetry.py tests/lowlevel/test_dds_plant.py tests/lowlevel/test_lifecycle_loopback.py tests/lowlevel/test_tracker_console.py tests/lowlevel/test_unitree_probe.py tests/lowlevel/test_unitree_pose.py"
 
 # --- notebook feature: the latent playground (encode z, perturb it, watch it) ---
 # Jupyter and plotting on top of the lowlevel runtime + MuJoCo backend.
