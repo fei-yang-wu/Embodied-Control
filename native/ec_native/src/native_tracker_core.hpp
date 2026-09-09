@@ -83,7 +83,7 @@ bool reexpress_root_qpos_window(
     std::span<const float> raw_world_frames, std::size_t frame_count,
     std::span<const float> anchor_position_w,
     std::span<const float> anchor_quaternion_w,
-    std::span<float> root_qpos_frames) noexcept;
+    std::span<float> root_qpos_frames, bool heading_only = false) noexcept;
 
 bool pack_joint_qpos_qvel_anchor_ori_window(
     std::span<const float> raw_world_frames, std::size_t available_frames,

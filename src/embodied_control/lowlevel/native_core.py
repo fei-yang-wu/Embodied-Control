@@ -36,18 +36,28 @@ def _require_supported_encoder_cadence(bundle: PolicyBundle) -> None:
     del bundle
 
 
+def _native_reference_layout(bundle: PolicyBundle) -> str:
+    command = bundle.manifest.command
+    if (
+        command.encoder_state_interface == "root_qpos"
+        and command.macro_anchor_mode == "robot_heading"
+    ):
+        return "root_qpos_heading"
+    return str(command.encoder_state_interface or "root_qpos")
+
+
 def _oracle_enabled(bundle: PolicyBundle, command_source: str) -> bool:
     if command_source not in {"vla", "oracle"}:
         raise ValueError("command_source must be 'vla' or 'oracle'")
     oracle = command_source == "oracle"
     command = bundle.manifest.command
     expected_anchor = {
-        "root_qpos": "robot",
-        "joint_qpos_qvel_anchor_ori": "robot_heading",
+        "root_qpos": {"robot", "robot_heading"},
+        "joint_qpos_qvel_anchor_ori": {"robot_heading"},
     }.get(command.encoder_state_interface)
     if oracle and (
         expected_anchor is None
-        or command.macro_anchor_mode != expected_anchor
+        or command.macro_anchor_mode not in expected_anchor
         or command.macro_frame_stride is None
         or bundle.manifest.models.get("encoder_onnx") is None
     ):
@@ -208,7 +218,7 @@ class NativeFakeLoop:
             command.phase_mode == "sin_cos",
             _direct_command_tag(bundle),
             oracle_reference,
-            str(command.encoder_state_interface or "root_qpos"),
+            _native_reference_layout(bundle),
             int(command.macro_frame_stride or 1),
             str(command.encoder_trigger),
             encoder_path,
@@ -387,7 +397,7 @@ class NativeMujocoLoop(NativeFakeLoop):
             command.phase_mode == "sin_cos",
             _direct_command_tag(bundle),
             oracle_reference,
-            str(command.encoder_state_interface or "root_qpos"),
+            _native_reference_layout(bundle),
             int(command.macro_frame_stride or 1),
             str(command.encoder_trigger),
             encoder_path,
@@ -522,9 +532,7 @@ class NativeUnitreeLoop(NativeFakeLoop):
             "z_dim": int(command.z_dim or self.tracker.command_width),
             "sin_cos_phase": command.phase_mode == "sin_cos",
             "direct_tag": _direct_command_tag(bundle),
-            "reference_encoder_layout": str(
-                command.encoder_state_interface or "root_qpos"
-            ),
+            "reference_encoder_layout": _native_reference_layout(bundle),
             "encoder_frame_stride": int(command.macro_frame_stride or 1),
             "encoder_trigger": str(command.encoder_trigger),
             "encoder_path": encoder_path,

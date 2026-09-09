@@ -59,8 +59,8 @@ class NativeOracleWorker:
         command = bundle.manifest.command
         interface = command.encoder_state_interface
         expected_anchor = {
-            "root_qpos": "robot",
-            "joint_qpos_qvel_anchor_ori": "robot_heading",
+            "root_qpos": {"robot", "robot_heading"},
+            "joint_qpos_qvel_anchor_ori": {"robot_heading"},
         }.get(interface)
         expected_width = {
             "root_qpos": 38,
@@ -68,7 +68,7 @@ class NativeOracleWorker:
         }.get(interface)
         if (
             interface not in RAW_REFERENCE_WIDTHS
-            or command.macro_anchor_mode != expected_anchor
+            or command.macro_anchor_mode not in expected_anchor
             or command.macro_frame_stride is None
             or command.state_dim != expected_width
         ):

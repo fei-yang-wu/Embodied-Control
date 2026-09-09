@@ -1253,3 +1253,21 @@ def test_the_oracle_horizon_covers_the_window_the_control_thread_reads(
         assert default.horizon == minimum + hold
     finally:
         default.close()
+
+
+def test_native_root_qpos_heading_keeps_height_and_reference_tilt():
+    raw = np.zeros((10, 36), dtype=np.float32)
+    raw[:, 29:32] = [1.2, -0.3, 0.85]
+    raw[:, 32:36] = quat_mul(_axis_quaternion(2, 40), _axis_quaternion(0, 17))
+    position = np.array([0.4, 0.2, 0.71], dtype=np.float32)
+    rotation = quat_mul(_axis_quaternion(2, 40), _axis_quaternion(1, 25))
+    heading = rotation.copy()
+    heading[:2] = 0
+    heading /= np.linalg.norm(heading)
+    origin = position.copy()
+    origin[2] = 0
+    expected_pos, expected_rot = subtract_frame(origin, heading, raw[0, 29:32], raw[0, 32:36])
+    actual = ec_native.reexpress_root_qpos_window(raw, position, rotation, heading_only=True)
+    np.testing.assert_allclose(actual[:, 29:32], np.tile(expected_pos, (10, 1)), atol=1e-6)
+    np.testing.assert_allclose(actual[:, 32:], np.tile(rot6d_from_quat(expected_rot), (10, 1)), atol=1e-6)
+    np.testing.assert_allclose(actual[:, 31], 0.85, atol=1e-6)

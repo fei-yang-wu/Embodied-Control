@@ -89,6 +89,7 @@ struct NativePlannerConfig {
   bool oracle_reference = false;
   enum class ReferenceEncoderLayout {
     kRootQpos,
+    kRootQposHeading,
     kJointQposQvelAnchorOri,
   } reference_encoder_layout = ReferenceEncoderLayout::kRootQpos;
   enum class EncoderTrigger {

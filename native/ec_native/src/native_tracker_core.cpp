@@ -136,7 +136,7 @@ bool reexpress_root_qpos_window(
     std::span<const float> raw_world_frames, std::size_t frame_count,
     std::span<const float> anchor_position_w,
     std::span<const float> anchor_quaternion_w,
-    std::span<float> root_qpos_frames) noexcept {
+    std::span<float> root_qpos_frames, bool heading_only) noexcept {
   if (frame_count == 0 ||
       raw_world_frames.size() != frame_count * kRawReferenceWidth ||
       root_qpos_frames.size() != frame_count * kRootQposWidth ||
@@ -148,6 +148,11 @@ bool reexpress_root_qpos_window(
   std::array<float, 4> robot_quaternion{};
   if (!normalized_quaternion(anchor_quaternion_w, robot_quaternion)) {
     return false;
+  }
+  if (heading_only) {
+    robot_quaternion[0] = 0.0F;
+    robot_quaternion[1] = 0.0F;
+    if (!normalized_quaternion(robot_quaternion, robot_quaternion)) return false;
   }
   const auto robot_matrix = quaternion_matrix(robot_quaternion);
   const std::array<float, 4> robot_conjugate = {
@@ -165,7 +170,8 @@ bool reexpress_root_qpos_window(
     std::copy_n(source, kJointCount, destination);
     const float dx = source[kJointCount] - anchor_position_w[0];
     const float dy = source[kJointCount + 1] - anchor_position_w[1];
-    const float dz = source[kJointCount + 2] - anchor_position_w[2];
+    const float dz = source[kJointCount + 2] -
+                     (heading_only ? 0.0F : anchor_position_w[2]);
     destination[kJointCount] =
         robot_matrix[0] * dx + robot_matrix[3] * dy + robot_matrix[6] * dz;
     destination[kJointCount + 1] =

@@ -387,6 +387,23 @@ with the checkpoint. Controller and planner assets live under
 `assets/models/controller/` and `assets/models/planner/`; configure converted
 controller bundles here and the planner launch command under `planner`.
 
+### Combo 46B tracker
+
+`examples/lifecycle_sim_combo_46b.yaml` selects the pinned `combo_46b` controller.
+Rebuild native (`pixi run -e native build-native`) after updating: this bundle
+uses heading-anchored root_qpos with absolute reference height, ten-step actor
+history, and a 50 Hz encoder. Its one-tick hold requires `lead_ticks: 0`.
+The oracle sweep automatically derives a valid lead time from the bundle.
+
+A local asynchronous MuJoCo pass on ten selected motions completed all 5,137
+control/encoder ticks and 20,548 physics steps with no faults or scheduler
+misses: MPJPE-L 12.39 mm / MPJPE-G 134.11 mm (frame-weighted full horizons),
+10/10 no-fall. This is a single-pass diagnostic, not hardware qualification;
+feeding-birds had 749.56 mm global error. The zero-lead reference worker missed
+2,567 reply deadlines, while the encoder still ran every tick from buffered
+reference frames. Reports and the required runtime patch accompany the HF
+controller release.
+
 ### Pinned model assets
 
 `assets/models/` holds no loose checkpoints. Each directory carries a
