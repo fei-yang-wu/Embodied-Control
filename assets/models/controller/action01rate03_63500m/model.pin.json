@@ -1,0 +1,47 @@
+{
+  "api_version": "ec.model_pin/v1",
+  "files": {
+    "action_contract.json": {
+      "sha256": "37d5888c9ec6cbce8c557ce2673ad5d8212ae95b02f9e65fdb44a2c172aedd4d",
+      "size": 6520
+    },
+    "encoder.onnx": {
+      "sha256": "cd1a5ed663b34b9a7792c21658a605944887b87f5a72732b8decbd6df72e3b3d",
+      "size": 14830697
+    },
+    "encoder.pt": {
+      "sha256": "46369815308bcb4ec2352f19bd9d978ec1330d33679732fa47035a79cc5a43ad",
+      "size": 14848485
+    },
+    "golden_trace.npz": {
+      "sha256": "f1d1fa83dc0c9157b51f9e510092b93e9a8870fc574fcc42785c4a1e05dcde8c",
+      "size": 2213874
+    },
+    "manifest.json": {
+      "sha256": "ae3a28a46938ded56a5dfb36ac047eb588682e6e90e0cce9eb957d7cd714359e",
+      "size": 12858
+    },
+    "norm_stats.npz": {
+      "sha256": "87e4dae4ae2127dedd6a81316ad448f34321435ca2e5fe2dcc008c15483d57a7",
+      "size": 9756
+    },
+    "obs_contract.json": {
+      "sha256": "7d490f321e5e4a317bbd1bdf366040a931b9bf7c1ea1f12b200546461d1a6215",
+      "size": 1343
+    },
+    "policy.onnx": {
+      "sha256": "8435a4f6668dd3049c4b1127d3a34e62da74ac1c92ac721744f151003b096a18",
+      "size": 40765322
+    },
+    "policy.pt": {
+      "sha256": "0fc69c240d609925ce0c191105e3ced46bd6fef932d67b5bab6a7c77afef2b1b",
+      "size": 40780544
+    }
+  },
+  "kind": "controller",
+  "name": "action01rate03_63500m",
+  "path": "controller/action01rate03_63500m",
+  "repo": "fei-yang-wu/ec-g1-gr00t-eval-kit",
+  "repo_type": "model",
+  "revision": "3da7c3044a038ae21b4c56127b559280e90354b9"
+}
