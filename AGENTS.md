@@ -198,3 +198,6 @@ if picking up one of these.
 - `docs/design/robot_lifecycle.md` — the gated hoist-to-run lifecycle,
   plant vendor parity, and the hardware ladder (the current next milestone
   for the G1 work).
+- `docs/design/smoothness_finetune_plan.md` — the ablation plan for the
+  training repo to make the tracker's output smoother (foot dither is the
+  policy output, not the PD gains); evidence under `docs/evidence/`.
