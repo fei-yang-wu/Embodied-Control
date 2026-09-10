@@ -254,6 +254,8 @@ def build_tracker(job, args, bundle, selection):
         require_realtime=not args.allow_non_realtime,
         policy_threads=job.realtime.policy_threads,
         dds_domain=job.dds_domain,
+        stiffness_scale=job.gain_scale.stiffness,
+        damping_scale=job.gain_scale.damping,
         plan_slots=job.planner.vla_plan_slots if selection.mode == "vla" else 1,
         latent_plan=selection.mode == "vla" and job.planner.vla_reply == "latent_plan",
     )
@@ -286,6 +288,7 @@ def run_identity_for(job, bundle, network: str, selection=None, ticks=None) -> d
         "start_pose", "fixed_initial_anchor", "pin_reference", "ramp_seconds", "lead_ticks",
         "blend_ticks", "play_countdown_seconds", "arm_timeout_seconds", "stand_hold_seconds",
     )}
+    deployment["gain_scale"] = job.gain_scale.model_dump()
     deployment["rehearsal_hoist_contract"] = "g1_shoulder_straps_v1"
     deployment["startup_contract"] = "diagnostic_pose_operator_play_v1"
     deployment["thresholds"] = job.thresholds.model_dump()
@@ -348,7 +351,7 @@ def lifecycle_config(job, args, bundle, start_pose, reference_gravity, ticks=Non
         tilt_tolerance_degrees=thresholds.tilt_tolerance_degrees,
         first_action_rad=thresholds.first_action_rad,
         first_action_torque_ratio=thresholds.first_action_torque_ratio,
-        stiffness=[float(v) for v in bundle.manifest.action.stiffness],
+        stiffness=[float(v) * job.gain_scale.stiffness for v in bundle.manifest.action.stiffness],
         effort_limit=(
             [float(v) for v in bundle.manifest.action.effort_limit]
             if bundle.manifest.action.effort_limit

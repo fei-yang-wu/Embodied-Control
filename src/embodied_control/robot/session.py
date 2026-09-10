@@ -560,6 +560,10 @@ class ExperimentSession:
                     reference_frames=np.asarray(frames, dtype=np.int32),
                     reference_joint_mae=np.asarray(mae, dtype=np.float32),
                     anchor_pose_log=np.asarray(rows_of(tracker.anchor_pose_log(), 7), dtype=np.float32),
+                    command_target_log=np.asarray(
+                        rows_of(tracker.command_target_log(), 29) if hasattr(tracker, "command_target_log") else [],
+                        dtype=np.float32,
+                    ).reshape(-1, 29),
                     anchor_pose_source=np.asarray("controller_fixed_translation_imu_orientation"),
                     tick_durations_ns=np.asarray(tracker.tick_durations_ns(), dtype=np.uint64),
                 )

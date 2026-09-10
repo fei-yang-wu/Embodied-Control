@@ -486,6 +486,14 @@ class NativeFakeRuntimeBinding {
     return result;
   }
 
+  py::array_t<float> command_target_log() const {
+    const auto values = runtime_->command_target_log();
+    py::array_t<float> result(static_cast<py::ssize_t>(values.size()));
+    std::memcpy(result.mutable_data(), values.data(),
+                sizeof(float) * values.size());
+    return result;
+  }
+
   py::array_t<float> anchor_pose_log() const {
     const auto values = runtime_->anchor_pose_log();
     py::array_t<float> result(static_cast<py::ssize_t>(values.size()));
@@ -1195,6 +1203,7 @@ PYBIND11_MODULE(_ec_native, m) {
       .def("joint_position_log",
            &NativeFakeRuntimeBinding::joint_position_log)
       .def("anchor_pose_log", &NativeFakeRuntimeBinding::anchor_pose_log)
+      .def("command_target_log", &NativeFakeRuntimeBinding::command_target_log)
       .def("base_heights", &NativeFakeRuntimeBinding::base_heights)
       .def("reference_joint_mae",
            &NativeFakeRuntimeBinding::reference_joint_mae)

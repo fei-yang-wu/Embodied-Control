@@ -148,7 +148,7 @@ def template_from(path: str | Path) -> dict:
         "arm_timeout_seconds", "lead_ticks", "command_stale_ms", "state_absent_ms",
         "end_state", "damp_hands_back", "retake_precheck", "rehearsal_max_age_days",
         "endpoint_screening", "thresholds", "realtime", "planner", "slack_on_run",
-        "fixed_anchor_max_displacement",
+        "fixed_anchor_max_displacement", "gain_scale",
     )
     return {key: job[key] for key in keep}
 

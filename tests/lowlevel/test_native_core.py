@@ -1001,6 +1001,11 @@ def test_native_latent_plan_serves_every_slot_from_one_reply(
         if not np.isclose(value, plateaus[-1]):
             plateaus.append(value)
     assert len(plateaus) >= slots
+    # The target the writer was handed is logged beside the measured joint,
+    # one row per tick, so dither can be attributed to the policy or the plant.
+    targets = np.asarray(loop.command_target_log()).reshape(-1, 29)
+    assert targets.shape == (len(joint_log), 29)
+    assert np.isfinite(targets[len(joint_log) // 2:]).all()
 
 
 def test_native_latent_plan_allows_a_lead_longer_than_one_hold(

@@ -179,6 +179,8 @@ void NativeFakeRuntime::start(std::size_t max_ticks, bool paced) {
                              std::numeric_limits<float>::quiet_NaN());
   anchor_pose_log_.assign(max_ticks * 7,
                           std::numeric_limits<float>::quiet_NaN());
+  command_target_log_.assign(max_ticks * kJointCount,
+                             std::numeric_limits<float>::quiet_NaN());
   backend_->reset();
   robot_state_ = backend_->read_state();
   planner_history_initialized_ = false;
@@ -939,8 +941,10 @@ void NativeFakeRuntime::one_tick() noexcept {
       backend_->write_target(blended);
       static_cast<void>(defaults);
       tracker_.set_last_action(applied_action);
+      record_command_target(blended);
     } else {
       backend_->write_target(result.joint_target);
+      record_command_target(result.joint_target);
     }
     control_ticks_.fetch_add(1, std::memory_order_relaxed);
     if (controller_paced_command && steps_remaining_ > 0) {
@@ -1024,6 +1028,20 @@ std::vector<float> NativeFakeRuntime::joint_position_log() const {
   const std::size_t count = static_cast<std::size_t>(ticks_.load());
   return {joint_position_log_.begin(),
           joint_position_log_.begin() + count * kJointCount};
+}
+
+void NativeFakeRuntime::record_command_target(
+    std::span<const float> target) noexcept {
+  if (loop_tick_ < command_target_log_.size() / kJointCount) {
+    std::copy(target.begin(), target.begin() + kJointCount,
+              command_target_log_.begin() + loop_tick_ * kJointCount);
+  }
+}
+
+std::vector<float> NativeFakeRuntime::command_target_log() const {
+  const std::size_t count = static_cast<std::size_t>(ticks_.load());
+  return {command_target_log_.begin(),
+          command_target_log_.begin() + count * kJointCount};
 }
 
 std::vector<float> NativeFakeRuntime::anchor_pose_log() const {

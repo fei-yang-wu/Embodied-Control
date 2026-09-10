@@ -60,6 +60,16 @@ accept against `assets/models/reference/bones`.
    `artifacts/rehearsal_all_*/REPORT.md`. Report per tracker: clean count
    under training noise vs measured noise, and which motions moved.
 
+## Gain experiments
+
+`--damping-scale 1.5` (or `--stiffness-scale`) rehearses at scaled PD gains.
+Compare against the unscaled measured-noise sweep on two things: the clean
+count, and the true ankle jitter from `plant.states.npz` (second-difference
+residual over the RUNNING window). `command_target_log` in each episode's
+`telemetry.npz` says whether the commanded targets dither (policy) or only
+the measured joints do (mechanics). A scale is part of the rehearsal
+identity; never deploy a scale without a rehearsal at that scale.
+
 ## Failure signatures
 
 - `writer damped during RUNNING` is a fall (fall guard). Policy failure.

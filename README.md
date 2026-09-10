@@ -300,6 +300,14 @@ see [artifacts/noise_analysis_20260910/REPORT.md](artifacts/noise_analysis_20260
 `--plant-noise off` none; neither changes the rehearsal identity, so keep the
 default run as the gate evidence and use the others for comparison.
 
+`--stiffness-scale` / `--damping-scale` multiply the bundle's PD gains for a
+rehearsal experiment (job field `gain_scale`). A scale is part of the
+rehearsal identity, so a hardware run at a scale needs a rehearsal at the
+same scale. Every episode's `telemetry.npz` carries `command_target_log`
+(the target handed to the writer, per control tick) beside
+`joint_position_log`, which is how a dither is attributed to the policy or
+to the joints.
+
 Endpoint screening blocks a moving or off-stance **start** frame; the **end**
 frame is reported, not refused, because any run ends in `HOLD` under the
 hoist (`endpoint_screening: start | both | off` in the job).
@@ -349,7 +357,9 @@ per channel (joint position, velocity, gyro, orientation) in the same units
 as the plant's `--noise-*` half-ranges, so the rehearsal's injected noise can
 be compared with the robot's own. Do it with the robot limp on the hoist.
 Analysis of the 2026-09-10 session is in
-[artifacts/noise_analysis_20260910/REPORT.md](artifacts/noise_analysis_20260910/REPORT.md).
+[artifacts/noise_analysis_20260910/REPORT.md](artifacts/noise_analysis_20260910/REPORT.md);
+the foot-dither attribution (policy output, not gains) is in
+[artifacts/noise_analysis_20260910/DITHER.md](artifacts/noise_analysis_20260910/DITHER.md).
 
 The hardware write gate is `--confirm ENABLE_G1_LOWLEVEL` without
 `--allow-non-realtime`; PRECHECK also refuses when SCHED_FIFO setup failed.

@@ -1171,11 +1171,14 @@ def _cmd_lifecycle_rehearse(args) -> int:
             return 2
     motions = list(dict.fromkeys(motions))
     output = Path(args.output or f"artifacts/rehearsal_{Path(args.bundle).name}_{time.strftime('%Y%m%d')}")
+    template = template_from(args.template) if args.template else {}
+    if args.stiffness_scale != 1.0 or args.damping_scale != 1.0:
+        template["gain_scale"] = {"stiffness": args.stiffness_scale, "damping": args.damping_scale}
     plan = RehearsePlan(
         bundle=args.bundle, motions=motions, output=output,
         reference_root=args.reference_root, model=args.model, plant_config=args.plant,
         seeds=args.seeds, lanes=args.lanes, dds_domain_base=args.dds_domain_base,
-        template=template_from(args.template) if args.template else {},
+        template=template,
         video=not args.no_video, offline=not args.fetch, plant_noise=args.plant_noise,
     )
     try:
@@ -1839,6 +1842,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     reh.add_argument("--no-video", action="store_true")
     reh.add_argument("--fetch", action="store_true", help="allow fetching a pinned bundle")
+    reh.add_argument("--stiffness-scale", type=float, default=1.0, help="multiply the bundle's kp (experiment knob; part of the identity)")
+    reh.add_argument("--damping-scale", type=float, default=1.0, help="multiply the bundle's kd (experiment knob; part of the identity)")
     reh.add_argument(
         "--plant-noise", choices=("training", "measured", "off"), default="training",
         help="plant sensor noise: SONIC's training ranges (default), the G1's own "

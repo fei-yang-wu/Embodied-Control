@@ -170,6 +170,9 @@ def test_identity_follows_selected_tracker_mode_and_start_frame():
     assert _run_identity(changed_timing, bundle, 'lo', selection, 13)['deployment_sha'] != identity['deployment_sha']
     changed = job.model_copy(update={'start_pose': 'motion'})
     assert _run_identity(changed, bundle, 'lo', selection, 13)['deployment_sha'] != identity['deployment_sha']
+    from embodied_control.robot.lifecycle_job import GainScale
+    softer = job.model_copy(update={'gain_scale': GainScale(damping=1.5)})
+    assert _run_identity(softer, bundle, 'lo', selection, 13)['deployment_sha'] != identity['deployment_sha']
 
 
 def test_recovery_does_not_clear_a_runtime_fault(tmp_path):

@@ -286,6 +286,9 @@ class NativeFakeLoop:
     def anchor_pose_log(self) -> np.ndarray:
         return np.asarray(self._runtime.anchor_pose_log()).reshape(-1, 7)
 
+    def command_target_log(self) -> np.ndarray:
+        return np.asarray(self._runtime.command_target_log()).reshape(-1, 29)
+
     def tick_durations_ns(self) -> np.ndarray:
         return np.asarray(self._runtime.tick_durations_ns(), dtype=np.uint64)
 
@@ -461,6 +464,8 @@ class NativeUnitreeLoop(NativeFakeLoop):
         require_realtime: bool = True,
         policy_threads: int = 1,
         dds_domain: int = 0,
+        stiffness_scale: float = 1.0,
+        damping_scale: float = 1.0,
     ) -> None:
         try:
             import ec_native
@@ -468,6 +473,10 @@ class NativeUnitreeLoop(NativeFakeLoop):
             raise ImportError(
                 "NativeUnitreeLoop needs the Unitree-enabled native build"
             ) from exc
+        if stiffness_scale <= 0 or damping_scale <= 0:
+            raise ValueError("gain scales must be positive")
+        self.stiffness_scale = float(stiffness_scale)
+        self.damping_scale = float(damping_scale)
         if not ec_native.WITH_UNITREE:
             raise RuntimeError(
                 "ec_native was built without Unitree SDK2; set "
@@ -559,8 +568,8 @@ class NativeUnitreeLoop(NativeFakeLoop):
             str(network_interface),
             list(action.isaac_to_sdk),
             np.asarray(action.default_joint_pos, dtype=np.float32),
-            np.asarray(action.stiffness, dtype=np.float32),
-            np.asarray(action.damping, dtype=np.float32),
+            np.asarray(action.stiffness, dtype=np.float32) * np.float32(self.stiffness_scale),
+            np.asarray(action.damping, dtype=np.float32) * np.float32(self.damping_scale),
             np.asarray(action.joint_limits_lower, dtype=np.float32),
             np.asarray(action.joint_limits_upper, dtype=np.float32),
             bool(writes_enabled),

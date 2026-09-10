@@ -160,6 +160,7 @@ class NativeFakeRuntime {
   std::vector<std::int32_t> reference_frames() const;
   std::vector<float> joint_position_log() const;
   std::vector<float> anchor_pose_log() const;
+  std::vector<float> command_target_log() const;
   RobotState state() const;
   double backend_time() const;
   double base_height() const;
@@ -190,6 +191,7 @@ class NativeFakeRuntime {
   std::size_t plan_ticks_remaining() const noexcept;
   bool encode_active_reference(std::size_t offset_steps) noexcept;
   void record_reference_metrics() noexcept;
+  void record_command_target(std::span<const float> target) noexcept;
   void transition_to_damp(RuntimeFault fault) noexcept;
   NativeTrackerCore& tracker_;
   std::unique_ptr<ShmSlot> response_slot_;
@@ -246,6 +248,9 @@ class NativeFakeRuntime {
   std::vector<std::int32_t> reference_frames_;
   std::vector<float> joint_position_log_;  // ticks x kJointCount
   std::vector<float> anchor_pose_log_;     // ticks x 7 (pos, quat XYZW)
+  // The target the writer was handed on each control tick (blended while
+  // blending in), so dither can be attributed to the policy or the joints.
+  std::vector<float> command_target_log_;  // ticks x kJointCount
 
   std::atomic<std::uint64_t> ticks_{0};
   std::atomic<std::uint64_t> control_ticks_{0};

@@ -48,6 +48,18 @@ class PlannerSpec(JobModel):
     vla_hold_steps: int = Field(default=10, ge=1)
 
 
+class GainScale(JobModel):
+    """Deployment-time multipliers on the bundle's PD gains.
+
+    An experiment knob, not a tuning: the policy learned the closed loop at
+    the bundle's own gains, so a scale is part of the rehearsal identity and
+    hardware needs a rehearsal at the same scale.
+    """
+
+    stiffness: float = Field(default=1.0, gt=0.0)
+    damping: float = Field(default=1.0, gt=0.0)
+
+
 class RealtimeSpec(JobModel):
     control_cpu: int = 2
     writer_cpu: int = 3
@@ -122,6 +134,7 @@ class LifecycleJob(JobModel):
     slack_on_run: bool = True
     pin_reference: bool = True
     thresholds: ThresholdSpec = Field(default_factory=ThresholdSpec)
+    gain_scale: GainScale = Field(default_factory=GainScale)
     realtime: RealtimeSpec = Field(default_factory=RealtimeSpec)
     planner: PlannerSpec = Field(default_factory=PlannerSpec)
     # MJCF for in-line MPJPE after each episode (forward kinematics); empty

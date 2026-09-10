@@ -301,6 +301,12 @@ def test_lifecycle_hoist_to_standing_on_the_plant(tmp_path, latent_manifest):
         lifecycle.poll()
         assert lifecycle.state is S.HOLD, (lifecycle.state, lifecycle.fault_reason)
         assert runtime.unitree_mode == NativeUnitreeLoop.HOLD
+        # The applied target is logged per control tick beside the measured
+        # joint, on the hardware path too, so dither can be attributed.
+        targets = runtime.command_target_log()
+        measured = runtime.joint_position_log()
+        assert targets.shape == measured.shape and targets.shape[1] == 29
+        assert np.isfinite(targets[-50:]).all()
         # A stiff PD hold is not balance. The strap was paid out for the run,
         # so HOLD takes the load again the way an operator hooks the hoist;
         # without it the robot topples where it stands and the fall guard
