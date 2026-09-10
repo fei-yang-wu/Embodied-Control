@@ -139,3 +139,38 @@ def rehearsal_evidence(
         f"rehearsed on the plant {age_days:.1f} days ago, ending {reached}",
         values,
     )
+
+
+IDENTITY_KEYS = (
+    "bundle_sha", "motion", "command_source", "reference_sha", "deployment_sha",
+    "start_frame", "ticks",
+)
+
+
+def explain_mismatch(root: str | Path, identity: dict, *, limit: int = 5) -> list[dict]:
+    """Why the newest runs under `root` do not vouch for `identity`.
+
+    One row per candidate, newest first: its path, end state, and the
+    identity keys that differ, so "no rehearsal found" becomes "the newest
+    run used different thresholds" or "that run rehearsed lead_ticks 4".
+    """
+    rows = []
+    for run in find_rehearsals(root)[:limit]:
+        candidate = run.get("rehearsal", {})
+        differs = [
+            key for key in IDENTITY_KEYS
+            if str(candidate.get(key, "")) != str(identity.get(key, ""))
+        ]
+        if not is_simulated(candidate):
+            differs.insert(0, "network")
+        rows.append({
+            "path": run.get("_path", ""),
+            "state": run.get("state", ""),
+            "failed_transitions": int(run.get("failed_transitions", 0)),
+            "fault_reason": run.get("fault_reason", ""),
+            "finished_at": float(run.get("finished_at", 0.0)),
+            "bundle_name": candidate.get("bundle_name", ""),
+            "motion": candidate.get("motion", ""),
+            "differs": differs,
+        })
+    return rows

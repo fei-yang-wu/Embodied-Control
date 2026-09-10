@@ -360,9 +360,11 @@ class LifecycleLog:
     def __init__(self, directory: str | Path | None) -> None:
         self.directory = Path(directory) if directory else None
         self.transitions: list[Transition] = []
+        # Append-only across console sessions too: a second session in the
+        # same directory used to truncate the first one's evidence.
         if self.directory is not None:
             self.directory.mkdir(parents=True, exist_ok=True)
-            (self.directory / "lifecycle.jsonl").write_text("")
+            (self.directory / "lifecycle.jsonl").touch()
 
     def record(self, transition: Transition) -> None:
         self.transitions.append(transition)
@@ -404,6 +406,10 @@ class Lifecycle:
         # rehearsal gate matches a hardware run against a plant run by it.
         self.identity = dict(identity or {})
         self.log = log if log is not None else LifecycleLog(None)
+        # The session shares one log across rebuilds; this lifecycle's own
+        # transitions start here, so an earlier episode's failed gate does
+        # not disqualify a later clean one.
+        self._log_start = len(self.log.transitions)
         self._now = now
         self._sleep = sleep
         self._note = note
@@ -729,16 +735,18 @@ class Lifecycle:
 
     # ------------------------------------------------------------- status
 
+    @property
+    def transitions(self) -> list[Transition]:
+        return self.log.transitions[self._log_start:]
+
     def summary(self) -> dict:
         return {
             "state": str(self.state),
             "fault_reason": self.fault_reason,
             "vendor_name": self.vendor_name,
             "episode": self.episode,
-            "transitions": len(self.log.transitions),
-            "failed_transitions": sum(
-                1 for t in self.log.transitions if not t.ok
-            ),
+            "transitions": len(self.transitions),
+            "failed_transitions": sum(1 for t in self.transitions if not t.ok),
             # What this run was, so a later hardware run can ask whether the
             # plant already ran the same thing (robot/rehearsal.py).
             "rehearsal": dict(self.identity),
@@ -870,8 +878,10 @@ class Lifecycle:
             return {}
         keys = (
             "mode", "publishes", "publish_failures", "hardware_faults",
+            "hardware_fault_latched",
             "watchdog_faults", "ramp_faults", "ramp_error_max", "ramp_error_joint",
             "state_frames", "state_gap_ns_max", "crc_errors", "state_fault_reason",
+            "state_fault_joint", "state_fault_sdk_joint", "state_fault_motorstate",
             "joint_speed_max", "tracking_error_max", "command_target_error_max",
             # The boot heading the fixed anchor absorbed, so a run's evidence
             # says which way the robot was facing when it started.
@@ -983,10 +993,19 @@ class Lifecycle:
         values.update(self._writer_snapshot())
         if int(ws.get("crc_errors", 0)) != 0:
             return GateResult(False, "rt/lowstate CRC errors", values)
-        if int(ws.get("hardware_faults", 0)) != 0:
+        # The lifetime counter survives a clear and remains useful evidence;
+        # only the active latch should veto a recovered robot on retry.
+        if ws.get("hardware_fault_latched", int(ws.get("hardware_faults", 0)) != 0):
+            reason = int(ws.get("state_fault_reason", 0))
+            detail = f"hardware fault latched (reason {reason})"
+            if reason & 31 and "state_fault_sdk_joint" in ws:
+                detail += f"; SDK motor {ws['state_fault_sdk_joint']}"
+            if reason & 8 and "state_fault_motorstate" in ws:
+                code = int(ws["state_fault_motorstate"])
+                detail += f"; motorstate={code} (0x{code:08x})"
             return GateResult(
                 False,
-                f"hardware fault latched (reason {ws.get('state_fault_reason')})",
+                detail,
                 values,
             )
         return GateResult(True, "link fresh, no CRC errors, no latched fault", values)
@@ -1674,12 +1693,16 @@ class Lifecycle:
         return GateResult(True, "damp frame on the wire", self._writer_snapshot())
 
     def _enter_released(self) -> GateResult:
-        before = self.tracker.writer_stats()
         self.tracker.close_gate()
+        # The writer thread can have one frame in flight while the gate
+        # closes; that frame is not "still writing". Silence is counted from
+        # after the close settles (seen on the robot and on the plant).
+        self._sleep(0.05)
+        before = self.tracker.writer_stats()
+        if int(before.get("mode", -1)) != WRITER_DISABLED or before.get("gate_open", False):
+            return GateResult(False, "writer did not disable", self._writer_snapshot())
         self._sleep(0.2)
         after = self.tracker.writer_stats()
-        if int(after.get("mode", -1)) != WRITER_DISABLED or after.get("gate_open", False):
-            return GateResult(False, "writer did not disable", self._writer_snapshot())
         silent = unchanged(int(before.get("publishes", 0)), int(after.get("publishes", 0)), "publishes")
         if not silent.ok:
             return GateResult(False, "publisher still writing after close_gate", silent.values)

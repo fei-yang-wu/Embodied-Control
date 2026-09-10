@@ -127,3 +127,32 @@ def test_cli_mutating_verb_runs_when_confirmed(capsys):
     )
     assert code == 0
     assert "ready: ok (mode ready)" in capsys.readouterr().out
+
+
+def test_g1_health_reads_the_fsm_when_balance_readings_are_refused():
+    """On the robot this morning: `ec robot status` said unreachable / unknown
+    while the robot hung limp in damp, because the loco service refuses
+    GetBalanceMode outside a standing FSM (7301, LocoState not available)."""
+    from embodied_control.robot.g1 import G1Runtime
+
+    class LimpLocoClient:
+        fsm_id = 1
+        fsm_mode = 0
+
+        def status(self):
+            raise RuntimeError("G1 sport service refused GetBalanceMode (status 7301)")
+
+    runtime = G1Runtime.__new__(G1Runtime)
+    runtime._client = LimpLocoClient()
+    runtime._writes_enabled = False
+    health = runtime.health()
+    assert health.reachable and health.mode is RobotMode.DAMP
+    assert "fsm_id=1" in health.detail and "7301" in health.detail
+
+    class DeadLocoClient(LimpLocoClient):
+        @property
+        def fsm_id(self):
+            raise RuntimeError("timeout")
+
+    runtime._client = DeadLocoClient()
+    assert not runtime.health().reachable

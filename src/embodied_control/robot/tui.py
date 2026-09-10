@@ -1146,11 +1146,17 @@ def render_rows(
 
     footer = _footer_rows(snapshot, width, busy, line)
     log_lines = _visual_log_lines(notes, width)
-    log_height = min(8, len(log_lines) + 1)
-    room = max(0, height - len(rows) - len(footer) - log_height)
+    body = _body_rows(snapshot, width)
+    # The ladder and telemetry are what the operator reads; the log takes
+    # what is left. A log that grew to eight rows used to push the bottom of
+    # the ladder off a 30-row terminal one line at a time as the session
+    # went on, which read as rows disappearing.
+    available = max(0, height - len(rows) - len(footer))
+    log_min = min(len(log_lines) + 1, 3)
+    room = min(len(body), available - log_min)
     # A lone panel header helps nobody; below three rows the ladder is out.
     if room >= 3:
-        rows += _body_rows(snapshot, width)[:room]
+        rows += body[:room]
     rows += footer
     if len(rows) < height:
         rows += _log_rows(notes, width, height - len(rows), log_lines)

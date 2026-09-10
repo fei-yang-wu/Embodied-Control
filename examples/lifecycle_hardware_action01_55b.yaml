@@ -1,0 +1,40 @@
+# First-session profile; paired with the shoulder-hoist preparation campaign.
+api_version: ec.lifecycle/v1alpha1
+bundle: ../assets/models/controller/action01_55b
+trackers: {}
+network: ""
+dds_domain: 0
+request_slot: /ec_hw_action01_55b_request
+response_slot: /ec_hw_action01_55b_response
+connect_slots: true
+command_source: oracle
+reference_root: ../assets/models/reference/bones_hurry_stand
+motion: hurry_idle_001_A277__stand_f42c00b9b413
+start_frame: 0
+lead_ticks: 0
+fixed_initial_anchor: true
+start_pose: default
+ramp_seconds: 3.0
+ticks: auto
+blend_ticks: 250
+play_countdown_seconds: 3.0
+arm_timeout_seconds: 60.0
+stand_hold_seconds: 60.0
+pin_reference: true
+end_state: vendor_damp
+sim_hoist: false
+require_vendor: true
+require_rehearsal: true
+rehearsal_root: ../artifacts/hardware_prep_20260910/dds/action01_55b
+rehearsal_max_age_days: 14.0
+artifacts_dir: ../artifacts/hardware_action01_55b
+mjcf: ../assets/latent_playkit/model/g1_29dof_rev_1_0.xml
+realtime:
+  control_cpu: 2
+  writer_cpu: 3
+  control_priority: 80
+  writer_priority: 90
+  lock_memory: true
+  policy_threads: 1
+thresholds:
+  settle_timeout_seconds: 15.0

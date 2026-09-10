@@ -106,6 +106,12 @@ class LifecycleJob(JobModel):
     # where a sim job of the same campaign writes its own run.
     rehearsal_root: str = ""
     rehearsal_max_age_days: float = Field(default=14.0, gt=0.0)
+    # Kinematic endpoint screening of the reference before a hardware run.
+    # `start` refuses a moving or off-stance first frame (the ramp and the
+    # blend assume a stationary start) and only reports the last frame: the
+    # run ends in HOLD under the hoist, which is the recovery for any ending.
+    # `both` is the old behaviour; `off` reports everything.
+    endpoint_screening: Literal["start", "both", "off"] = "start"
     # Empty reads the active service from CheckMode at PRECHECK.
     vendor_name: str = ""
     require_vendor: bool = True
@@ -165,6 +171,63 @@ class LifecycleJob(JobModel):
             if self.start_frame >= length - 1:
                 raise ValueError("start_frame must leave at least one reference transition")
         return self
+
+
+SIM_DDS_DOMAIN = 51
+
+
+def apply_target(
+    job: LifecycleJob,
+    target: str,
+    *,
+    network: str = "",
+    dds_domain: int | None = None,
+) -> LifecycleJob:
+    """One job, two targets: the same deployment against the plant or the robot.
+
+    Only the fields that name *where* the run happens change, so the sim run
+    and the hardware run share a rehearsal identity. A sim run writes under
+    `<artifacts_dir>/sim`, a hardware run under `<artifacts_dir>/hardware`
+    and looks for its rehearsal beside it.
+    """
+    if target not in ("sim", "hardware"):
+        raise ValueError(f"target must be sim or hardware, not {target!r}")
+    root = job.artifacts_dir
+    if not root:
+        raise ValueError("--target needs artifacts_dir in the job")
+    base = job.model_dump(mode="json")
+    stem = lambda slot: slot.removesuffix("_sim").removesuffix("_hw")  # noqa: E731
+    if target == "sim":
+        base.update(
+            network="lo",
+            dds_domain=SIM_DDS_DOMAIN if dds_domain is None else int(dds_domain),
+            sim_hoist=True,
+            artifacts_dir=str(Path(root) / "sim"),
+            rehearsal_root="",
+            request_slot=stem(job.request_slot) + "_sim",
+            response_slot=stem(job.response_slot) + "_sim",
+            realtime={
+                **base["realtime"],
+                "control_cpu": -1,
+                "writer_cpu": -1,
+                "control_priority": 0,
+                "writer_priority": 0,
+                "lock_memory": False,
+            },
+        )
+    else:
+        if not network and job.network in ("", "lo", "localhost"):
+            raise ValueError("--target hardware needs --network <robot NIC>")
+        base.update(
+            network=network or job.network,
+            dds_domain=0 if dds_domain is None else int(dds_domain),
+            sim_hoist=False,
+            artifacts_dir=str(Path(root) / "hardware"),
+            rehearsal_root=job.rehearsal_root or root,
+            request_slot=stem(job.request_slot) + "_hw",
+            response_slot=stem(job.response_slot) + "_hw",
+        )
+    return LifecycleJob.model_validate(base)
 
 
 def load_lifecycle_job(path: str | Path) -> LifecycleJob:

@@ -361,10 +361,13 @@ void NativeUnitreeBackend::low_state_handler(const void* message) noexcept {
     }
     if (reason != 0U) {
       std::uint32_t expected = 0U;
-      state_fault_reason_.compare_exchange_strong(expected, reason);
-      std::uint32_t expected_joint = 0U;
-      state_fault_joint_.compare_exchange_strong(
-          expected_joint, static_cast<std::uint32_t>(isaac));
+      // Joint zero is valid: latch its details with the reason instead of
+      // treating zero as an empty joint slot on the next faulty motor.
+      if (state_fault_reason_.compare_exchange_strong(expected, reason)) {
+        state_fault_joint_.store(static_cast<std::uint32_t>(isaac));
+        state_fault_sdk_joint_.store(static_cast<std::uint32_t>(sdk));
+        state_fault_motorstate_.store(motor.motorstate());
+      }
     }
     faulted = faulted || reason != 0U;
   }
@@ -539,6 +542,8 @@ void NativeUnitreeBackend::clear_latched_fault() noexcept {
   state_slot_->faulted.store(false, std::memory_order_relaxed);
   state_fault_reason_.store(0);
   state_fault_joint_.store(0);
+  state_fault_sdk_joint_.store(0);
+  state_fault_motorstate_.store(0);
   hardware_fault_latched_.store(false, std::memory_order_release);
 }
 
@@ -1099,6 +1104,8 @@ UnitreeWriterStats NativeUnitreeBackend::writer_stats() const noexcept {
       .hardware_faults = hardware_faults_.load(),
       .state_fault_reason = state_fault_reason_.load(),
       .state_fault_joint = state_fault_joint_.load(),
+      .state_fault_sdk_joint = state_fault_sdk_joint_.load(),
+      .state_fault_motorstate = state_fault_motorstate_.load(),
       .watchdog_faults = watchdog_faults_.load(),
       .wake_late_ns_max = wake_late_ns_max_.load(),
       .deadline_misses = deadline_misses_.load(),
@@ -1123,6 +1130,7 @@ UnitreeWriterStats NativeUnitreeBackend::writer_stats() const noexcept {
       .realtime_configured = realtime_configured_.load(),
       .gate_open = write_gate_open_.load(std::memory_order_acquire),
       .vendor_released = vendor_released_.load(),
+      .hardware_fault_latched = hardware_fault_latched_.load(),
   };
 }
 

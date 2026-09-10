@@ -113,8 +113,20 @@ class G1Runtime:
         try:
             status = self._client.status()
         except RuntimeError as exc:
+            # The loco service answers GetFsmId in every state but refuses
+            # GetBalanceMode / stand and swing height outside a standing FSM
+            # (7301 "LocoState not available"), so a limp robot on the hoist
+            # is reachable even though the full status bundle is not.
+            try:
+                fsm_id, fsm_mode = self._client.fsm_id, self._client.fsm_mode
+            except RuntimeError:
+                return RobotHealth(
+                    reachable=False, mode=RobotMode.UNKNOWN, detail=str(exc)
+                )
             return RobotHealth(
-                reachable=False, mode=RobotMode.UNKNOWN, detail=str(exc)
+                reachable=True,
+                mode=_FSM_TO_MODE.get(fsm_id, RobotMode.VENDOR_CONTROL),
+                detail=f"fsm_id={fsm_id} fsm_mode={fsm_mode}; balance/stand readings unavailable ({exc})",
             )
         return RobotHealth(
             reachable=True,

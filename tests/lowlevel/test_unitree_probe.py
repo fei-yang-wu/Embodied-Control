@@ -73,6 +73,32 @@ def test_probe_report_fails_when_tick_does_not_advance():
     assert report["checks"]["tick_progress"] is False
 
 
+def test_probe_preserves_transient_firmware_error_after_motor_recovers():
+    codes = [0] * 29
+    codes[0] = 0x80000001
+    report = _report(_raw(
+        motor_error_samples=1,
+        motor_error_mask=1,
+        first_motor_error_code=codes,
+        motor_state=[0] * 29,
+    ))
+
+    assert report["status"] == "fail"
+    assert report["motor_errors"] == [{
+        "sdk_index": 0,
+        "first_code": 0x80000001,
+        "first_code_hex": "0x80000001",
+        "latest_code": 0,
+    }]
+
+
+def test_probe_does_not_invent_raw_codes_from_an_older_native_build():
+    report = _report(_raw(motor_error_samples=1, motor_error_mask=1))
+
+    assert report["motor_errors"][0]["first_code"] is None
+    assert report["motor_errors"][0]["latest_code"] is None
+
+
 def test_probe_report_fails_short_slow_or_stalled_stream():
     report = _report(
         _raw(
@@ -134,3 +160,51 @@ def test_probe_fails_when_no_lowstate_arrives(monkeypatch):
 def test_probe_rejects_invalid_options(network, kwargs):
     with pytest.raises(ValueError):
         run_probe(network, **kwargs)
+
+
+def test_capture_recovers_the_plants_injected_sensor_noise(tmp_path):
+    """The probe's raw capture is the hardware side of the noise comparison;
+    against the plant it must read back the `--noise-*` half-ranges it injects.
+
+    The probe runs in a child process: the SDK's ChannelFactory is a
+    per-process singleton, so a probe opened after another test's plant on a
+    different domain would silently stay on that domain and see nothing."""
+    pytest.importorskip("ec_native")
+    import json
+    import subprocess
+    import sys
+
+    import numpy as np
+    from test_dds_plant import _finish_plant, _spawn_plant
+    from test_native_core import _g1_mjcf_path
+
+    from embodied_control.lowlevel.unitree_probe import noise_summary
+
+    report_path = tmp_path / "plant_report.json"
+    process = _spawn_plant(
+        _g1_mjcf_path(), 20.0, report_path,
+        ["--vendor", "--hoist", "--dds-domain", "45", "--noise-seed", "3",
+         "--noise-joint-pos", "0.02", "--noise-joint-vel", "0.4", "--noise-base-ang-vel", "0.1"],
+    )
+    capture = tmp_path / "capture.npz"
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-m", "embodied_control.cli", "lowlevel", "check-unitree",
+             "--network", "lo", "--dds-domain", "45", "--samples", "1500", "--timeout", "10",
+             "--capture", str(capture), "--json"],
+            capture_output=True, text=True, timeout=60,
+        )
+    finally:
+        _finish_plant(process, report_path)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    report = json.loads(completed.stdout[completed.stdout.index("{"):])
+    assert report["capture"]["rows"] == 1500 and capture.is_file()
+    data = np.load(capture)
+    assert data["joint_position"].shape == (1500, 29) and data["quaternion_wxyz"].shape == (1500, 4)
+    assert np.all(np.diff(data["receive_ns"].astype(np.int64)) > 0)
+    noise = noise_summary(capture)
+    assert report["noise"]["rate_hz"] == pytest.approx(500.0, rel=0.2)
+    # A hanging robot barely moves at 500 Hz, so the residual is the injection.
+    assert noise["joint_position"]["implied_uniform_half_range"] == pytest.approx(0.02, rel=0.2)
+    assert noise["joint_velocity"]["implied_uniform_half_range"] == pytest.approx(0.4, rel=0.2)
+    assert noise["gyroscope"]["implied_uniform_half_range"] == pytest.approx(0.1, rel=0.25)

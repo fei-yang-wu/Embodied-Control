@@ -36,6 +36,8 @@ struct UnitreeWriterStats {
   // 64 pelvis tilt past 60 deg (a fall).
   std::uint32_t state_fault_reason = 0;
   std::uint32_t state_fault_joint = 0;
+  std::uint32_t state_fault_sdk_joint = 0;
+  std::uint32_t state_fault_motorstate = 0;
   std::uint64_t watchdog_faults = 0;
   std::uint64_t wake_late_ns_max = 0;
   std::uint64_t deadline_misses = 0;
@@ -63,6 +65,7 @@ struct UnitreeWriterStats {
   bool realtime_configured = false;
   bool gate_open = false;
   bool vendor_released = false;
+  bool hardware_fault_latched = false;
 };
 
 // Native Unitree G1 DDS backend. DDS receive and the 500 Hz command writer
@@ -238,6 +241,8 @@ class NativeUnitreeBackend final : public NativeRobotBackend {
   // 8 motor state, 16 temperature, 32 IMU quaternion norm.
   std::atomic<std::uint32_t> state_fault_reason_{0};
   std::atomic<std::uint32_t> state_fault_joint_{0};
+  std::atomic<std::uint32_t> state_fault_sdk_joint_{0};
+  std::atomic<std::uint32_t> state_fault_motorstate_{0};
   std::atomic<std::uint64_t> watchdog_faults_{0};
   std::atomic<std::uint64_t> wake_late_ns_max_{0};
   std::atomic<std::uint64_t> deadline_misses_{0};

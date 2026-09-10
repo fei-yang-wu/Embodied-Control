@@ -378,3 +378,28 @@ def test_the_operator_starts_the_vla_planner_and_then_builds():
     # A fresh tracker numbers its requests from 1, so the planner restarts
     # with it. What must not happen is a start nobody asked for.
     assert len(FakePlanner.started) == 2
+
+
+def test_each_episode_keeps_its_own_rehearsal_evidence(tmp_path):
+    """Four motions in one console used to leave `lifecycle.json` for the last one."""
+    session, built, clock = _session(tmp_path)
+    _run_episode(session, clock)
+    assert session.recover().ok
+    assert session.lifecycle.state is S.VENDOR_RESTORED
+    first = next((tmp_path / "episodes").glob("ep001_*/lifecycle.json"))
+    evidence = json.loads(first.read_text())
+    assert evidence["state"] == "VENDOR_RESTORED" and evidence["failed_transitions"] == 0
+    lines = (first.parent / "lifecycle.jsonl").read_text().splitlines()
+    assert json.loads(lines[-1])["to_state"] == "VENDOR_RESTORED"
+
+    # A refused key before the next episode must not count against it.
+    assert not session.play().ok
+    assert session.step_motion(1).ok
+    _run_episode(session, clock)
+    assert session.recover().ok
+    second = next((tmp_path / "episodes").glob("ep002_*/lifecycle.json"))
+    assert json.loads(second.read_text())["failed_transitions"] == 0
+    assert json.loads(second.read_text())["rehearsal"] == session.lifecycle.identity
+    # The first episode's evidence survives the second lifecycle's shutdown.
+    assert json.loads(first.read_text())["state"] == "VENDOR_RESTORED"
+    assert (tmp_path / "lifecycle.jsonl").read_text().count("VENDOR_RESTORED") >= 2

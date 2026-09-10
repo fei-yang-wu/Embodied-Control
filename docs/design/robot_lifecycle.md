@@ -467,12 +467,12 @@ written down before the session.
 
 | Rung | What | Pass |
 |---|---|---|
-| H0 | read-only: cycle the vendor through 0 / 1 / 4 / 500 / 3 from the PC with `ec robot`, log `GetFsmId`/`GetFsmMode` | FSM table confirmed, `_FSM_TO_MODE` corrected from evidence |
+| H0 | vendor-command exercise (writes): cycle the vendor through 0 / 1 / 4 / 500 / 3 from the PC with `ec robot`, log `GetFsmId`/`GetFsmMode` | FSM table confirmed, `_FSM_TO_MODE` corrected from evidence |
 | H1 | `ec robot ready` then `move`: does FSM 4 accept velocity, or does `ready()` need `Start` (500)? | decision recorded, `ready()` fixed |
 | H2 | rows 1–3 only, then `DAMP → RELEASED → VENDOR_RESTORED` | vendor tolerates our damp frames before `ReleaseMode`; `SelectMode` name and round trip confirmed; if the vendor refuses the early publisher, fall back to release-then-publish and record it |
 | H3 | rows 1–5 with the bundle default stance, then hold, damp | ramp guard never trips on a free robot; settle thresholds hold |
-| H4 | rows 1–7 with `hurry_idle_001_A277@0`, feet lowered | `pose_match.json` inside tolerance |
-| H5 | full lifecycle with the stationary oracle, hoist slack | MPJPE within the sim rehearsal band; watchdog drills: kill the planner (command-stale damp), pull the NIC (state-absent damp), Ctrl-C (damp before join) |
+| H4 | rows 1–7 with `hurry_idle_001_A277@0`, feet lowered | valid state and operator-confirmed support; `pose_match.json` records pose/tilt diagnostics without requiring first-frame agreement |
+| H5 | full lifecycle with the stationary oracle, hoist slack | clean playback and recovery, joint/IMU telemetry and visual inspection; physical MPJPE requires external root measurement. Perform planner-loss, NIC-loss and interrupt/DAMP drills separately while the hoist carries the robot. |
 | H6 | same with the VLA command source | as H5 |
 
 ## 7. Decisions and unknowns to close on hardware
@@ -744,3 +744,37 @@ campaigns cannot qualify this revised setup. They remain historical results.
 
 Sources: [Unitree G1 user manual](https://www.manualslib.com/manual/3693046/Unitree-G1.html)
 and [photograph of the shoulder attachments](https://qiita.com/ShibataRyoichi/items/94c1948dbf91959c359e).
+
+
+### Rehearsal sweep and one-file jobs (2026-09-10)
+
+Three things made rehearsal evidence hard to produce for a new tracker, and
+each is a code change rather than a procedure:
+
+- **Evidence is per episode.** The console shared one `LifecycleLog` across
+  rebuilds, so `lifecycle.json` at the artifacts root was rewritten by every
+  episode and `lifecycle.jsonl` was truncated by every new session; four
+  motions rehearsed in one console left evidence for the last one, and a
+  refused key in episode one counted as a failed transition in episode four.
+  The session now writes `episodes/epNNN_*/lifecycle.json` and
+  `lifecycle.jsonl` when an episode reaches an accepted end state, the log is
+  append-only, and a lifecycle counts only its own transitions.
+- **`ec lifecycle rehearse <bundle> <motions>`** is the unattended sweep:
+  per motion a canonical hardware-shaped `job.yaml`, per seed a private plant
+  (`--vendor --hoist`, its own DDS domain and cores), the session driven
+  through build / prepare / arm / play / hoist / damp, and a video of the
+  plant's true state with the lifecycle state stamped on each frame
+  (`lowlevel/plant_render.py`, straps drawn at their recorded attachments).
+  Each episode is a child process because DDS teardown can abort inside the
+  vendor SDK after the robot is already safe. `ec lifecycle check` explains a
+  gate refusal key by key (`robot/rehearsal.py` `explain_mismatch`).
+- **One job, two targets.** `apply_target` derives the sim run (loopback,
+  hoisted, non-RT, `<artifacts_dir>/sim`) or the hardware run (`--network`,
+  `<artifacts_dir>/hardware`, rehearsal looked for beside it) from one file,
+  so the identity matches by construction instead of by a copied twin.
+
+Endpoint screening now refuses only the **start** frame on hardware
+(`endpoint_screening: start`, the default); the end frame is reported. Every
+run ends in `HOLD` under the hoist and hands back to vendor damp, which is the
+recovery for any ending, and the plant rehearsal proves that ending for the
+motion in question. `both` restores the previous rule.

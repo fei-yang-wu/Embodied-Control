@@ -52,7 +52,18 @@ pixi run -e lowlevel smoke-lowlevel    # self-contained closed-loop smoke (synth
 pixi run -e native build-native        # build the ec_native C++ extension (scikit-build-core + pybind11)
 pixi run -e native test-native         # shm slots, native loops, MPJPE/telemetry, DDS-plant + lifecycle loopback
 pixi run doctor                        # host + dependency check (imageio, offscreen renderer, docker, ...)
+pixi run -e native ec lifecycle rehearse <bundle> [motions|all|deployable]   # unattended plant rehearsal + video per motion
+pixi run -e native ec lifecycle check <job.yaml> --target hardware --network <NIC>   # would PRECHECK accept it? why not?
 ```
+
+`/rehearse-measured <bundles|all>` (`.claude/skills/rehearse-measured/`) is the
+sweep with the robot's measured sensor noise instead of SONIC's training
+ranges; the training-noise sweep stays the hardware gate evidence.
+
+G1 lifecycle jobs are one file per deployment; `--target sim|hardware` on
+`ec lifecycle console|run|check` picks where it runs (`robot/lifecycle_job.py`
+`apply_target`). The build helpers behind every lifecycle command live in
+`robot/build.py`; campaign scripts import those, never `cli.py` privates.
 
 `src/embodied_control/lowlevel/` is the 50 Hz G1 tracker runtime: it consumes
 a **policy bundle** exported by the IsaacLab-Imitation repo (TorchScript

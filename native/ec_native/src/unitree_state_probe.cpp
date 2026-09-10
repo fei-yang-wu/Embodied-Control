@@ -43,6 +43,7 @@ struct UnitreeStateProbe::Slot {
   std::array<std::atomic<float>, 29> joint_position{};
   std::array<std::atomic<float>, 29> joint_velocity{};
   std::array<std::atomic<float>, 29> joint_torque{};
+  std::array<std::atomic<std::uint32_t>, 29> motor_state{};
   std::array<std::atomic<float>, 4> quaternion{};
   std::array<std::atomic<float>, 3> gyroscope{};
   std::array<std::atomic<float>, 3> accelerometer{};
@@ -50,8 +51,13 @@ struct UnitreeStateProbe::Slot {
 };
 
 UnitreeStateProbe::UnitreeStateProbe(const std::string& network_interface,
-                                     int dds_domain)
-    : impl_(std::make_unique<Impl>()), slot_(std::make_unique<Slot>()) {
+                                     int dds_domain, std::size_t sample_capacity)
+    : impl_(std::make_unique<Impl>()),
+      slot_(std::make_unique<Slot>()),
+      sample_capacity_(sample_capacity),
+      sample_values_(sample_capacity * kProbeSampleWidth, 0.0F),
+      sample_times_ns_(sample_capacity, 0),
+      sample_ticks_(sample_capacity, 0) {
   ChannelFactory::Instance()->Init(dds_domain, network_interface);
   impl_->subscriber =
       std::make_shared<ChannelSubscriber<LowState>>("rt/lowstate");
@@ -104,10 +110,15 @@ void UnitreeStateProbe::low_state_handler(const void* message) noexcept {
     slot_->joint_velocity[index].store(motor.dq(), std::memory_order_relaxed);
     slot_->joint_torque[index].store(motor.tau_est(),
                                      std::memory_order_relaxed);
+    slot_->motor_state[index].store(motor.motorstate(),
+                                    std::memory_order_relaxed);
     finite = finite && std::isfinite(motor.q()) &&
              std::isfinite(motor.dq()) && std::isfinite(motor.tau_est());
     if (motor.motorstate() != 0) {
       motor_errors |= 1U << index;
+      std::uint32_t expected = 0;
+      first_motor_error_code_[index].compare_exchange_strong(
+          expected, motor.motorstate(), std::memory_order_relaxed);
     }
   }
 
@@ -132,6 +143,27 @@ void UnitreeStateProbe::low_state_handler(const void* message) noexcept {
   slot_->mode_machine.store(state.mode_machine(), std::memory_order_relaxed);
   slot_->sequence.store(sequence + 2, std::memory_order_release);
 
+  const auto captured = captured_.load(std::memory_order_relaxed);
+  if (captured < sample_capacity_) {
+    float* row = sample_values_.data() + captured * kProbeSampleWidth;
+    for (std::size_t index = 0; index < 29; ++index) {
+      const auto& motor = state.motor_state()[index];
+      row[index] = motor.q();
+      row[29 + index] = motor.dq();
+      row[58 + index] = motor.tau_est();
+    }
+    for (std::size_t index = 0; index < 4; ++index) {
+      row[87 + index] = imu.quaternion()[index];
+    }
+    for (std::size_t index = 0; index < 3; ++index) {
+      row[91 + index] = imu.gyroscope()[index];
+      row[94 + index] = imu.accelerometer()[index];
+    }
+    sample_times_ns_[captured] = receive_ns;
+    sample_ticks_[captured] = tick;
+    captured_.store(captured + 1, std::memory_order_release);
+  }
+
   if (!finite) {
     nonfinite_samples_.fetch_add(1, std::memory_order_relaxed);
   }
@@ -140,6 +172,10 @@ void UnitreeStateProbe::low_state_handler(const void* message) noexcept {
     motor_error_mask_.fetch_or(motor_errors, std::memory_order_relaxed);
   }
   samples_.fetch_add(1, std::memory_order_release);
+}
+
+std::size_t UnitreeStateProbe::captured_samples() const noexcept {
+  return static_cast<std::size_t>(captured_.load(std::memory_order_acquire));
 }
 
 bool UnitreeStateProbe::wait_for_samples(std::uint64_t count,
@@ -170,6 +206,10 @@ UnitreeProbeSnapshot UnitreeStateProbe::snapshot() const noexcept {
   result.first_tick = first_tick_.load(std::memory_order_relaxed);
   result.last_tick = last_tick_.load(std::memory_order_relaxed);
   result.motor_error_mask = motor_error_mask_.load(std::memory_order_relaxed);
+  for (std::size_t index = 0; index < 29; ++index) {
+    result.first_motor_error_code[index] =
+        first_motor_error_code_[index].load(std::memory_order_relaxed);
+  }
 
   for (int attempt = 0; attempt < 8; ++attempt) {
     const auto first = slot_->sequence.load(std::memory_order_acquire);
@@ -183,6 +223,8 @@ UnitreeProbeSnapshot UnitreeStateProbe::snapshot() const noexcept {
           slot_->joint_velocity[index].load(std::memory_order_relaxed);
       result.joint_torque[index] =
           slot_->joint_torque[index].load(std::memory_order_relaxed);
+      result.motor_state[index] =
+          slot_->motor_state[index].load(std::memory_order_relaxed);
     }
     for (std::size_t index = 0; index < 4; ++index) {
       result.quaternion[index] =

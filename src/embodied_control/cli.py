@@ -26,6 +26,20 @@ import time
 # default works from the repository root the operating card already assumes.
 DEFAULT_MODEL_ROOT = "assets/models"
 
+from embodied_control.robot.build import (  # noqa: E402
+    FixedAnchor,
+    build_lifecycle as _build_lifecycle,
+    build_session as _build_session,
+    build_tracker as _tracker_for,
+    episode_mpjpe as _episode_mpjpe,
+    job_selection as _lifecycle_selection,
+    lifecycle_config as _lifecycle_config,
+    load_job as _load_lifecycle_job,
+    run_identity_for as _run_identity,
+    stationary_anchor as _unitree_stationary_anchor,
+    write_gate_error as _unitree_write_gate_error,
+)
+
 
 def _models_token(args) -> str | None:
     return getattr(args, "token", "") or None
@@ -712,6 +726,7 @@ def _cmd_lowlevel_check_unitree(args) -> int:
             min_rate_hz=args.min_rate,
             max_gap_ms=args.max_gap_ms,
             dds_domain=args.dds_domain,
+            capture=args.capture,
         )
     except (RuntimeError, ValueError) as exc:
         print(f"FAIL: {exc}")
@@ -728,61 +743,23 @@ def _cmd_lowlevel_check_unitree(args) -> int:
         print(f"max gap: {report['max_gap_ms']:.2f} ms")
         print(f"CRC errors: {report['crc_errors']}")
         print(f"motor error joints: {report['motor_error_joints']}")
+        for motor in report["motor_errors"]:
+            print(
+                f"  SDK motor {motor['sdk_index']}: "
+                f"first motorstate={motor['first_code']} "
+                f"({motor['first_code_hex']}), latest={motor['latest_code']}"
+            )
+        if "noise" in report:
+            noise = report["noise"]
+            print(f"capture: {report['capture']['rows']} rows over {report['capture']['seconds']:.2f}s "
+                  f"-> {report['capture']['path']}")
+            for name in ("joint_position", "joint_velocity", "gyroscope", "quaternion_wxyz"):
+                entry = noise.get(name, {})
+                if entry:
+                    print(f"  {name}: implied noise std {entry['implied_noise_std']:.5f} "
+                          f"(uniform half-range {entry['implied_uniform_half_range']:.5f})")
         print("writes: disabled")
     return 0 if report["status"] == "pass" else 1
-
-
-def _unitree_write_gate_error(
-    *, enable_writes: bool, allow_non_realtime: bool, confirm: str
-) -> str | None:
-    if not enable_writes:
-        return None
-    required = (
-        "ENABLE_G1_LOWLEVEL_NON_REALTIME"
-        if allow_non_realtime
-        else "ENABLE_G1_LOWLEVEL"
-    )
-    if confirm != required:
-        return f"--enable-writes requires --confirm {required}"
-    return None
-
-
-def _unitree_stationary_anchor(
-    bundle, reference_root: str, motion: str, start_frame: int,
-    max_displacement: float,
-):
-    import numpy as np
-
-    from embodied_control.lowlevel.reference import ReferenceArrays
-
-    if max_displacement <= 0:
-        raise ValueError("fixed-anchor maximum displacement must be positive")
-    reference = ReferenceArrays(reference_root)
-    if reference.joint_names != list(bundle.manifest.action.isaac_joint_names):
-        raise ValueError("reference and bundle Isaac joint orders differ")
-    selected = reference.motion(motion)
-    if start_frame < 0 or start_frame >= selected.length:
-        raise ValueError(
-            f"start frame {start_frame} is outside motion length {selected.length}"
-        )
-    positions = np.asarray(selected.anchor_pos_w[start_frame:], dtype=np.float64)
-    displacement = np.linalg.norm(positions - positions[0], axis=1)
-    maximum = float(displacement.max(initial=0.0))
-    anchor = FixedAnchor(
-        position=positions[0].astype(np.float32),
-        quaternion_xyzw=np.asarray(
-            selected.anchor_quat_w[start_frame], dtype=np.float32
-        ),
-    )
-    return anchor, maximum, selected.length - start_frame - 1
-
-
-class FixedAnchor:
-    """Reference start-frame anchor pose: the encoder's frame for the episode."""
-
-    def __init__(self, position, quaternion_xyzw) -> None:
-        self.position = position
-        self.quaternion_xyzw = quaternion_xyzw
 
 
 def _cmd_lowlevel_unitree(args) -> int:
@@ -969,500 +946,6 @@ def _run_tracker_console(runtime, args, bundle) -> int:
     return 0
 
 
-def _lifecycle_reference_pose(job, *, motion=None, start_frame=None):
-    """Start-pose joints (Isaac order) and start-frame projected gravity."""
-    import numpy as np
-
-    from embodied_control.lowlevel.reference import ReferenceArrays
-    from embodied_control.robot.gates import gravity_from_quaternion_xyzw
-
-    motion = motion or job.motion
-    start_frame = job.start_frame if start_frame is None else int(start_frame)
-    reference = ReferenceArrays(job.reference_root)
-    selected = reference.motion(motion)
-    if start_frame >= selected.length:
-        raise ValueError(
-            f"start frame {start_frame} is outside motion length {selected.length}"
-        )
-    joints = np.asarray(selected.joint_qpos[start_frame], dtype=np.float64)
-    quaternion = np.asarray(
-        selected.anchor_quat_w[start_frame], dtype=np.float64
-    )
-    return [float(v) for v in joints], gravity_from_quaternion_xyzw(
-        [float(v) for v in quaternion]
-    )
-
-
-# Measured on the plant with the SONIC bundle's own PD gains, robot lowered
-# onto its feet: legs hold within 0.06 rad; the 28 N m/rad waist pitch sags
-# 0.42 rad and the 14 N m/rad shoulders 0.16 rad under gravity. The gate is
-# for gross mismatches (wrong frame, joint order, tilt), not for sag the
-# policy was trained against, so the gain-limited groups are loose.
-# Ankles carry the stance under 85 N m/rad (3x hold): 0.17 rad off on a
-# flexed start frame, so they get their own bound.
-POSE_TOLERANCE_BY_GROUP = (("hip", 0.1), ("knee", 0.1), ("ankle", 0.2), ("waist", 0.5))
-POSE_TOLERANCE_ARM = 0.5
-
-
-def _pose_tolerances(bundle, spec):
-    """Per-joint pose-match tolerances (Isaac order)."""
-    if isinstance(spec, list):
-        return [float(v) for v in spec]
-    if spec is not None:
-        return [float(spec)] * 29
-    out = []
-    for name in bundle.manifest.action.isaac_joint_names:
-        tolerance = POSE_TOLERANCE_ARM
-        for key, value in POSE_TOLERANCE_BY_GROUP:
-            if key in name:
-                tolerance = value
-                break
-        out.append(tolerance)
-    return out
-
-
-def _tracker_bundle_paths(job) -> dict[str, str]:
-    paths = {Path(job.bundle).name: job.bundle}
-    paths.update(job.trackers)
-    return paths
-
-
-def _lifecycle_selection(job, tracker: str = ""):
-    from embodied_control.robot.session import Selection
-
-    return Selection(
-        mode=job.command_source,
-        motion=job.motion,
-        start_frame=int(job.start_frame),
-        tracker=tracker,
-    )
-
-
-def _tracker_for(job, args, bundle, selection):
-    """Runtime plus the start pose and reference gravity for one selection."""
-    from embodied_control.lowlevel.native_core import NativeUnitreeLoop
-
-    network = args.network or job.network
-    fixed_anchor = None
-    if selection.mode == "oracle":
-        from embodied_control.lowlevel.reference import ReferenceArrays
-        from embodied_control.lowlevel.reference_deploy import classify_motion
-        from embodied_control.robot.rehearsal import SIM_NETWORKS
-        reference = ReferenceArrays(job.reference_root)
-        from embodied_control.lowlevel.reference_catalog import reference_compatibility
-        reference_compatibility(bundle, reference)
-        selected_motion = reference.motion(selection.motion)
-        metadata = reference.manifest.get("motions", {}).get(selection.motion, {})
-        if job.stand_hold_seconds > 0:
-            hold_frames = int(metadata.get("hold_frames", 0))
-            lookahead = bundle.manifest.command.horizon_steps * bundle.manifest.command.macro_frame_stride
-            if hold_frames <= lookahead or selection.start_frame != 0:
-                raise ValueError("final policy hold requires a composed stance reference covering this encoder's lookahead")
-            import numpy as np
-            for segment in (slice(0, hold_frames), slice(-hold_frames, None)):
-                for array in (selected_motion.joint_qpos, selected_motion.anchor_pos_w, selected_motion.anchor_quat_w):
-                    if not np.allclose(array[segment], array[segment][0], atol=1e-6):
-                        raise ValueError("composed stance segment is not stationary")
-                if selected_motion.joint_qvel is None or not np.allclose(selected_motion.joint_qvel[segment], 0, atol=1e-6):
-                    raise ValueError("composed stance segment has nonzero joint velocity")
-        if network not in SIM_NETWORKS:
-            if selection.start_frame != 0:
-                raise ValueError("hardware playback requires a screened start at frame 0")
-            verdict = classify_motion(selected_motion, fps=reference.fps)
-            if not verdict.deployable:
-                raise ValueError("reference fails deployment endpoint screening: " + "; ".join(verdict.reasons))
-        fixed_anchor, displacement, available = _unitree_stationary_anchor(
-            bundle,
-            job.reference_root,
-            selection.motion,
-            selection.start_frame,
-            job.fixed_anchor_max_displacement,
-        )
-        # A later start frame leaves fewer frames; the episode budget follows.
-        ticks = int(available) if job.ticks == "auto" else min(int(job.ticks), int(available))
-        print(f"Fixed initial anchor: max reference displacement {displacement:.4f} m; budget {ticks} ticks")
-    else:
-        if job.ticks == "auto":
-            raise ValueError("ticks=auto requires oracle playback")
-        ticks = int(job.ticks)
-    start_pose = None
-    reference_gravity = None
-    if job.start_pose == "motion" or (selection.mode == "oracle" and job.start_pose != "default" and not isinstance(job.start_pose, list)):
-        start_pose, reference_gravity = _lifecycle_reference_pose(
-            job, motion=selection.motion, start_frame=selection.start_frame
-        )
-    elif job.start_pose == "default":
-        start_pose = [float(v) for v in bundle.manifest.action.default_joint_pos]
-    else:
-        start_pose = [float(v) for v in job.start_pose]
-    runtime = NativeUnitreeLoop(
-        bundle,
-        network,
-        response_slot=job.response_slot,
-        request_slot=job.request_slot,
-        writes_enabled=args.enable_writes,
-        create_slots=not job.connect_slots,
-        lead_ticks=job.lead_ticks,
-        command_source=selection.mode,
-        fixed_anchor_position=None if fixed_anchor is None else fixed_anchor.position,
-        fixed_anchor_quaternion=(
-            None if fixed_anchor is None else fixed_anchor.quaternion_xyzw
-        ),
-        command_stale_ms=job.command_stale_ms,
-        state_absent_ms=job.state_absent_ms,
-        control_cpu=job.realtime.control_cpu,
-        writer_cpu=job.realtime.writer_cpu,
-        control_fifo_priority=job.realtime.control_priority,
-        writer_fifo_priority=job.realtime.writer_priority,
-        lock_memory=job.realtime.lock_memory,
-        require_realtime=not args.allow_non_realtime,
-        policy_threads=job.realtime.policy_threads,
-        dds_domain=job.dds_domain,
-        plan_slots=job.planner.vla_plan_slots if selection.mode == "vla" else 1,
-        latent_plan=selection.mode == "vla" and job.planner.vla_reply == "latent_plan",
-    )
-    return runtime, start_pose, reference_gravity, ticks
-
-
-def _rehearsal_root(job) -> str:
-    """Where to look for a plant rehearsal of this job."""
-    if job.rehearsal_root:
-        return job.rehearsal_root
-    # A sim job and its hardware twin write beside each other, so the parent
-    # of this run's artifacts is where the rehearsal lands.
-    return str(Path(job.artifacts_dir).parent) if job.artifacts_dir else ""
-
-
-def _run_identity(job, bundle, network: str, selection=None, ticks=None) -> dict:
-    from embodied_control.robot.rehearsal import run_identity
-
-    source = bundle.manifest.source or {}
-    motion = selection.motion if selection is not None else job.motion
-    start_frame = selection.start_frame if selection is not None else job.start_frame
-    mode = selection.mode if selection is not None else job.command_source
-    reference_sha = ""
-    if job.reference_root and motion:
-        from embodied_control.lowlevel.reference import ReferenceArrays
-        from embodied_control.lowlevel.reference_catalog import motion_sha256
-        reference_sha = motion_sha256(ReferenceArrays(job.reference_root), motion)
-    import hashlib
-    deployment = {key: getattr(job, key) for key in (
-        "start_pose", "fixed_initial_anchor", "pin_reference", "ramp_seconds", "lead_ticks",
-        "blend_ticks", "play_countdown_seconds", "arm_timeout_seconds", "stand_hold_seconds",
-    )}
-    deployment["rehearsal_hoist_contract"] = "g1_shoulder_straps_v1"
-    deployment["startup_contract"] = "diagnostic_pose_operator_play_v1"
-    deployment["thresholds"] = job.thresholds.model_dump()
-    deployment["bundle_manifest"] = bundle.manifest.model_dump(mode="json")
-    deployment_sha = hashlib.sha256(json.dumps(deployment, sort_keys=True).encode()).hexdigest()
-    return run_identity(
-        bundle_sha=str(source.get("checkpoint_sha256", "")),
-        deployment_sha=deployment_sha,
-        bundle_name=bundle.root.name,
-        motion=motion,
-        reference_sha=reference_sha,
-        command_source=mode,
-        network=network,
-        start_frame=start_frame,
-        ticks=int(ticks if ticks is not None else (0 if job.ticks == "auto" else job.ticks)),
-    )
-
-
-def _lifecycle_config(job, args, bundle, start_pose, reference_gravity, ticks=None, selection=None):
-    from embodied_control.robot.lifecycle import LifecycleConfig
-
-    thresholds = job.thresholds
-    terminal_hold_frames = 0
-    if job.stand_hold_seconds > 0:
-        manifest = json.loads((Path(job.reference_root) / "reference_arrays_manifest.json").read_text())
-        motion = selection.motion if selection is not None else job.motion
-        terminal_hold_frames = int(manifest["motions"][motion]["hold_frames"])
-    return LifecycleConfig(
-        start_pose=start_pose,
-        reference_gravity=reference_gravity,
-        ramp_seconds=job.ramp_seconds,
-        ticks=int(job.ticks if ticks is None else ticks),
-        blend_ticks=job.blend_ticks,
-        play_countdown_seconds=job.play_countdown_seconds,
-        arm_timeout_seconds=job.arm_timeout_seconds,
-        stand_hold_seconds=job.stand_hold_seconds,
-        terminal_hold_frames=terminal_hold_frames,
-        end_state=job.end_state,
-        damp_hands_back=job.damp_hands_back,
-        retake_precheck=job.retake_precheck,
-        require_rehearsal=job.require_rehearsal,
-        rehearsal_root=_rehearsal_root(job),
-        rehearsal_max_age_days=job.rehearsal_max_age_days,
-        vendor_name=job.vendor_name,
-        require_vendor=job.require_vendor,
-        allow_non_realtime=args.allow_non_realtime,
-        damp_publish_frames=thresholds.damp_publish_frames,
-        settle_seconds=thresholds.settle_seconds,
-        settle_timeout_seconds=thresholds.settle_timeout_seconds,
-        drift_rad=thresholds.drift_rad,
-        settle_position_rad=thresholds.settle_position_rad,
-        ramp_fault_rad=thresholds.ramp_fault_rad,
-        ramp_fault_ms=thresholds.ramp_fault_ms,
-        hold_gain_scale=thresholds.hold_gain_scale,
-        slack_on_run=job.slack_on_run,
-        pin_reference=job.pin_reference,
-        hoist_release_seconds=thresholds.hoist_release_seconds,
-        control_hz=float(bundle.manifest.rates.control_hz),
-        pose_tolerance_rad=_pose_tolerances(bundle, thresholds.pose_tolerance_rad),
-        tilt_tolerance_degrees=thresholds.tilt_tolerance_degrees,
-        first_action_rad=thresholds.first_action_rad,
-        first_action_torque_ratio=thresholds.first_action_torque_ratio,
-        stiffness=[float(v) for v in bundle.manifest.action.stiffness],
-        effort_limit=(
-            [float(v) for v in bundle.manifest.action.effort_limit]
-            if bundle.manifest.action.effort_limit
-            else None
-        ),
-        command_timeout_seconds=thresholds.command_timeout_seconds,
-        vendor_timeout_seconds=thresholds.vendor_timeout_seconds,
-    )
-
-
-def _lifecycle_peers(job, args):
-    """The vendor runtime and the sim hoist client, shared across rebuilds."""
-    from embodied_control.lowlevel.native_core import NativePlantClient
-    from embodied_control.robot import open_robot
-
-    network = args.network or job.network
-    vendor = None
-    if job.require_vendor or job.vendor_name:
-        vendor = open_robot(
-            "g1",
-            network_interface=network,
-            writes_enabled=args.enable_writes,
-            dds_domain=job.dds_domain,
-            timeout_seconds=job.vendor_rpc_timeout_seconds,
-        )
-    hoist = NativePlantClient(network, dds_domain=job.dds_domain) if job.sim_hoist else None
-    return vendor, hoist
-
-
-def _resolved_bundle(path, args):
-    """A bundle directory, fetched first when it carries a model pin."""
-    from embodied_control.lowlevel.bundle import PolicyBundle
-    from embodied_control.models import ensure_model
-
-    return PolicyBundle.load(
-        ensure_model(
-            path,
-            offline=getattr(args, "offline", False),
-            token=getattr(args, "token", "") or None,
-        )
-    )
-
-
-def _load_lifecycle_job(args):
-    from embodied_control.robot.lifecycle_job import load_lifecycle_job
-
-    job = load_lifecycle_job(args.job)
-    gate_error = _unitree_write_gate_error(
-        enable_writes=args.enable_writes,
-        allow_non_realtime=args.allow_non_realtime,
-        confirm=args.confirm,
-    )
-    if gate_error is not None:
-        raise ValueError(gate_error)
-    return job, _resolved_bundle(job.bundle, args)
-
-
-def _build_lifecycle(args):
-    """Job -> (job, lifecycle, runtime, vendor) for the scripted `run`."""
-    from embodied_control.robot.lifecycle import Lifecycle, LifecycleLog
-
-    job, bundle = _load_lifecycle_job(args)
-    selection = _lifecycle_selection(job)
-    runtime, start_pose, reference_gravity, ticks = _tracker_for(job, args, bundle, selection)
-    vendor, hoist = _lifecycle_peers(job, args)
-    config = _lifecycle_config(job, args, bundle, start_pose, reference_gravity, ticks, selection)
-    artifacts = args.artifacts or job.artifacts_dir or None
-    lifecycle = Lifecycle(
-        runtime,
-        vendor,
-        config,
-        hoist=hoist,
-        auto_ack=bool(job.sim_hoist or args.auto_ack),
-        identity=_run_identity(job, bundle, args.network or job.network, selection, ticks),
-        log=LifecycleLog(artifacts),
-        note=lambda msg: print(f"  -- {msg}", flush=True),
-    )
-    return job, lifecycle, runtime, vendor
-
-
-def _episode_mpjpe(job, bundle_for):
-    """In-line MPJPE from an episode's telemetry, when MuJoCo and an MJCF exist."""
-    if not job.mjcf or not job.reference_root:
-        return None
-
-    def grade(directory, selection):
-        import numpy as np
-
-        from embodied_control.lowlevel.eval_mpjpe import _align_reference
-        from embodied_control.lowlevel.metrics import compute_mpjpe, fk_body_positions
-        from embodied_control.lowlevel.reference import ReferenceArrays
-
-        if selection.mode != "oracle":
-            return None
-        telemetry = np.load(directory / "telemetry.npz")
-        if str(telemetry.get("anchor_pose_source", "unknown")) not in {
-            "simulator_ground_truth", "measured_root",
-        }:
-            return None
-        joint = telemetry["joint_position_log"]
-        anchor = telemetry["anchor_pose_log"]
-        frames = telemetry["reference_frames"]
-        valid = np.isfinite(joint).all(axis=1) & np.isfinite(anchor).all(axis=1) & (frames >= 0)
-        if valid.sum() < 2:
-            return None
-        joint, anchor, frames = joint[valid], anchor[valid], frames[valid]
-        arrays = ReferenceArrays(job.reference_root)
-        motion = arrays.motion(selection.motion)
-        if motion.body_pos_w is None or not arrays.body_names:
-            return None
-        bundle = bundle_for(selection)
-        robot_body = fk_body_positions(job.mjcf, bundle.manifest.action, joint, anchor, arrays.body_names)
-        reference_body = motion.body_pos_w[frames]
-        aligned_body = _align_reference(
-            anchor[0], motion.anchor_pos_w[frames[0]], motion.anchor_quat_w[frames[0]],
-            reference_body.reshape(-1, 3),
-        ).reshape(reference_body.shape)
-        aligned_root = _align_reference(
-            anchor[0], motion.anchor_pos_w[frames[0]], motion.anchor_quat_w[frames[0]],
-            motion.anchor_pos_w[frames],
-        )
-        record = compute_mpjpe(robot_body, anchor[:, 0:3], aligned_body, aligned_root)
-        return {k: v for k, v in record.items() if isinstance(v, (int, float))}
-
-    return grade
-
-
-def _build_session(args):
-    """Job -> ExperimentSession: the command center behind the console."""
-    from embodied_control.lowlevel.reference import ReferenceArrays
-    from embodied_control.robot.lifecycle import Lifecycle, LifecycleLog
-    from embodied_control.robot.session import (
-        ExperimentSession,
-        SessionConfig,
-        SubprocessPlanner,
-        oracle_worker_argv,
-        planner_worker_argv,
-    )
-
-    from embodied_control.robot.isolation import (
-        ThreadPinner,
-        child_preexec,
-        non_realtime_cores,
-    )
-
-    job, default_bundle = _load_lifecycle_job(args)
-    tracker_paths = _tracker_bundle_paths(job)
-    default_tracker = next(iter(tracker_paths))
-    bundles = {default_tracker: default_bundle}
-
-    def bundle_for(selection):
-        name = selection.tracker or default_tracker
-        if name not in tracker_paths:
-            raise ValueError(f"unknown tracker {name}")
-        if name not in bundles:
-            bundles[name] = _resolved_bundle(tracker_paths[name], args)
-        return bundles[name]
-    # The control thread and the writer own their cores at SCHED_FIFO 80/90.
-    # Everything the operator touches lives on the rest.
-    free_cores = non_realtime_cores(
-        (job.realtime.control_cpu, job.realtime.writer_cpu)
-    )
-    pinner = ThreadPinner(free_cores)
-    planner_preexec = child_preexec(free_cores)
-    catalog: list[str] = []
-    lengths: dict[str, int] = {}
-    if job.reference_root:
-        arrays = ReferenceArrays(job.reference_root)
-        catalog = list(arrays.motion_names)
-        lengths = {name: int(arrays.motion(name).length) for name in catalog}
-    artifacts = args.artifacts or job.artifacts_dir or None
-    artifacts_path = Path(artifacts) if artifacts else None
-    if artifacts_path is not None:
-        artifacts_path.mkdir(parents=True, exist_ok=True)
-    vendor, hoist = _lifecycle_peers(job, args)
-    log = LifecycleLog(artifacts)
-    notes: list = []
-
-    def note(message: str) -> None:
-        for sink in notes:
-            sink(message)
-
-    def planner_factory(selection):
-        report = str(artifacts_path / f"planner_{selection.mode}.json") if artifacts_path else ""
-        planner_log = artifacts_path / "planner.log" if artifacts_path else None
-        if selection.mode == "oracle":
-            selected_bundle = bundle_for(selection)
-            argv = oracle_worker_argv(
-                str(selected_bundle.root), job.reference_root, selection.motion, selection.start_frame,
-                job.request_slot, job.response_slot,
-                horizon=job.planner.oracle_horizon or None, report=report,
-            )
-        else:
-            if not job.planner.vla_service_command:
-                raise ValueError("job.planner.vla_service_command is empty")
-            argv = planner_worker_argv(
-                job.planner.vla_service_command, job.request_slot, job.response_slot,
-                reply=job.planner.vla_reply, z_dim=job.planner.vla_z_dim,
-                plan_slots=job.planner.vla_plan_slots, hold_steps=job.planner.vla_hold_steps,
-                lead_ticks=job.lead_ticks, report=report,
-            )
-        return SubprocessPlanner(argv, planner_log, preexec=planner_preexec)
-
-    pending: dict = {}
-
-    def tracker_factory(selection):
-        bundle = bundle_for(selection)
-        runtime, start_pose, reference_gravity, ticks = _tracker_for(job, args, bundle, selection)
-        pending["config"] = _lifecycle_config(job, args, bundle, start_pose, reference_gravity, ticks, selection)
-        # The console can switch bundle and motion between episodes, so the
-        # identity is rebuilt with the tracker rather than read once.
-        pending["identity"] = _run_identity(
-            job, bundle, args.network or job.network, selection, ticks
-        )
-        return runtime
-
-    def lifecycle_factory(tracker, selection, session):
-        return Lifecycle(
-            tracker,
-            vendor,
-            pending["config"],
-            hoist=hoist,
-            auto_ack=bool(job.sim_hoist or args.auto_ack),
-            identity=pending.get("identity", {}),
-            log=log,
-            note=note,
-        )
-
-    session = ExperimentSession(
-        SessionConfig(
-            catalog=catalog,
-            motion_lengths=lengths,
-            trackers=list(tracker_paths),
-            artifacts_dir=artifacts,
-            planner_autostart=bool(getattr(args, "planner_autostart", False)),
-        ),
-        _lifecycle_selection(job, default_tracker),
-        hoist=hoist,
-        planner_factory=planner_factory,
-        tracker_factory=tracker_factory,
-        lifecycle_factory=lifecycle_factory,
-        slot_names=[job.request_slot, job.response_slot] if job.connect_slots else [],
-        note=note,
-        mpjpe=_episode_mpjpe(job, bundle_for),
-    )
-    session.note_sinks = notes
-    session.pinner = pinner
-    return job, session, vendor
-
-
 def _cmd_lifecycle_console(args) -> int:
     import threading
 
@@ -1612,6 +1095,128 @@ def _cmd_lifecycle_run(args) -> int:
     return 1 if failed or lifecycle.state is LifecycleState.FAULT else 0
 
 
+def _cmd_lifecycle_check(args) -> int:
+    """Would PRECHECK accept this job on the robot? Say why not, per key."""
+    from embodied_control.lowlevel.reference import ReferenceArrays
+    from embodied_control.lowlevel.reference_deploy import classify_motion
+    from embodied_control.robot.build import (
+        job_selection, load_job, rehearsal_root, run_identity_for, screening_split,
+    )
+    from embodied_control.robot.rehearsal import explain_mismatch, rehearsal_evidence
+
+    try:
+        job, bundle = load_job(args)
+    except (ImportError, RuntimeError, ValueError, FileNotFoundError, KeyError) as exc:
+        print(f"FAIL: {exc}")
+        return 2
+    selection = job_selection(job)
+    ticks = job.ticks
+    if job.command_source == "oracle":
+        reference = ReferenceArrays(job.reference_root)
+        motion = reference.motion(selection.motion)
+        available = motion.length - selection.start_frame - 1
+        ticks = available if job.ticks == "auto" else min(int(job.ticks), available)
+        verdict = classify_motion(motion, fps=reference.fps)
+        blocking, reported = screening_split(verdict.reasons, job.endpoint_screening)
+        for reason in blocking:
+            print(f"screening: REFUSED  {reason}")
+        for reason in reported:
+            print(f"screening: reported {reason}")
+        if not verdict.reasons:
+            print("screening: both endpoints pass")
+    network = job.network or "hardware"
+    identity = run_identity_for(job, bundle, network, selection, ticks)
+    root = rehearsal_root(job)
+    print(f"bundle {identity['bundle_name']}  motion {identity['motion']}  ticks {identity['ticks']}")
+    print(f"rehearsal root {root or '(none)'}")
+    if not root:
+        print("FAIL: no rehearsal_root and no artifacts_dir to derive it from")
+        return 1
+    evidence = rehearsal_evidence(root, identity, max_age_days=job.rehearsal_max_age_days)
+    print(("PASS: " if evidence.ok else "FAIL: ") + evidence.detail)
+    if not evidence.ok:
+        rows = explain_mismatch(root, identity)
+        if rows:
+            print("newest runs under the root, and what differs from this job:")
+        for row in rows:
+            age = (time.time() - row["finished_at"]) / 86400.0 if row["finished_at"] else float("nan")
+            differs = ", ".join(row["differs"]) or "nothing (state or age)"
+            print(
+                f"  {row['bundle_name']}/{row['motion']}  {row['state']}  "
+                f"failed {row['failed_transitions']}  {age:.1f} d  differs: {differs}"
+            )
+            print(f"    {row['path']}")
+    return 0 if evidence.ok else 1
+
+
+def _cmd_lifecycle_rehearse(args) -> int:
+    from embodied_control.lowlevel.reference import ReferenceArrays
+    from embodied_control.lowlevel.reference_deploy import classify_motion
+    from embodied_control.robot.build import screening_split
+    from embodied_control.robot.rehearse import RehearsePlan, sweep, template_from
+
+    reference = ReferenceArrays(args.reference_root)
+    motions: list[str] = []
+    for name in args.motions or ["deployable"]:
+        if name in ("all", "deployable"):
+            for candidate in reference.motion_names:
+                verdict = classify_motion(reference.motion(candidate), fps=reference.fps)
+                blocking, _ = screening_split(verdict.reasons, "start")
+                if name == "all" or not blocking:
+                    motions.append(candidate)
+        elif name in reference.motion_names:
+            motions.append(name)
+        else:
+            print(f"FAIL: motion {name!r} not in {args.reference_root}")
+            return 2
+    motions = list(dict.fromkeys(motions))
+    output = Path(args.output or f"artifacts/rehearsal_{Path(args.bundle).name}_{time.strftime('%Y%m%d')}")
+    plan = RehearsePlan(
+        bundle=args.bundle, motions=motions, output=output,
+        reference_root=args.reference_root, model=args.model, plant_config=args.plant,
+        seeds=args.seeds, lanes=args.lanes, dds_domain_base=args.dds_domain_base,
+        template=template_from(args.template) if args.template else {},
+        video=not args.no_video, offline=not args.fetch, plant_noise=args.plant_noise,
+    )
+    try:
+        summary = sweep(plan)
+    except (ValueError, FileNotFoundError, RuntimeError) as exc:
+        print(f"FAIL: {exc}")
+        return 2
+    print(json.dumps({k: v for k, v in summary.items() if k != "rows"}, indent=2))
+    print(f"report: {output / 'REPORT.md'}")
+    return 0 if summary["episodes"] and summary["episodes_passed"] == summary["episodes"] else 1
+
+
+def _cmd_lifecycle_rehearsal_matrix(args) -> int:
+    from embodied_control.robot.rehearse import matrix_report
+
+    try:
+        payload = matrix_report(args.root)
+    except FileNotFoundError as exc:
+        print(f"FAIL: {exc}")
+        return 2
+    print(json.dumps(payload["clean"], indent=2))
+    print(f"report: {Path(args.root) / 'REPORT.md'}")
+    return 0
+
+
+def _cmd_lifecycle_rehearse_episode(args) -> int:
+    from embodied_control.robot.rehearse import run_episode
+
+    cores = [int(c) for c in args.cores.split(",") if c.strip()] if args.cores else []
+    result = run_episode(
+        args.job, seed=args.seed, domain=args.dds_domain, cores=cores,
+        model=args.model, plant_config=args.plant, video=not args.no_video,
+        offline=not args.fetch, plant_noise=args.plant_noise,
+    )
+    sys.stdout.flush()
+    sys.stderr.flush()
+    # DDS entity destruction can abort inside the vendor SDK after the robot
+    # is already limp under the vendor and every artifact is on disk.
+    os._exit(0 if result.get("passed") else 1)
+
+
 def _cmd_lowlevel_plant(args) -> int:
     import numpy as np
 
@@ -1655,6 +1260,7 @@ def _cmd_lowlevel_plant(args) -> int:
         plant.set_initial_pose(np.load(args.initial_pose))
         plant.reset()
     plant.start()
+    started_at = time.time()
     print("PLANT_READY", flush=True)
     deadline = time.monotonic() + args.seconds if args.seconds > 0 else None
     view = {}
@@ -1690,6 +1296,9 @@ def _cmd_lowlevel_plant(args) -> int:
         plant.wait_for_stop()
     report = plant.stats()
     report.update(view)
+    # Wall clock, so a recording can be lined up with `lifecycle.jsonl`.
+    report["started_at"] = started_at
+    report["finished_at"] = time.time()
     if states_output:
         rows = plant.state_log()
         hoist_rows = plant.hoist_log()
@@ -1912,6 +1521,11 @@ def build_parser() -> argparse.ArgumentParser:
     lcheck.add_argument("--max-gap-ms", type=float, default=100.0)
     lcheck.add_argument("--dds-domain", type=int, default=0)
     lcheck.add_argument("--report", default="")
+    lcheck.add_argument(
+        "--capture", default="",
+        help="also save the first --samples raw LowState rows to this .npz and "
+        "print per-channel implied sensor noise (compare with the plant's --noise-*)",
+    )
     lcheck.add_argument("--json", action="store_true")
     lcheck.set_defaults(func=_cmd_lowlevel_check_unitree)
     lunitree = lows.add_parser(
@@ -2133,6 +1747,7 @@ def build_parser() -> argparse.ArgumentParser:
     for name, helptext in (
         ("console", "single-keypress operator console over the lifecycle"),
         ("run", "scripted: advance to a state, optionally go and recover"),
+        ("check", "would PRECHECK accept this job on the robot? explain the rehearsal match"),
     ):
         parser = lifes.add_parser(name, help=helptext)
         parser.add_argument("job", help="lifecycle job YAML")
@@ -2142,6 +1757,22 @@ def build_parser() -> argparse.ArgumentParser:
             help="refuse to fetch a pinned bundle; require it on disk already",
         )
         parser.add_argument("--network", default="", help="overrides the job")
+        parser.add_argument(
+            "--target",
+            choices=("sim", "hardware"),
+            default="",
+            help="run one job against the plant (lo, hoisted, non-RT, writes under "
+            "<artifacts_dir>/sim) or the robot (--network, writes under "
+            "<artifacts_dir>/hardware, rehearsal looked for beside it)",
+        )
+        parser.add_argument(
+            "--dds-domain", type=int, default=None, help="with --target: overrides 51 (sim) / 0 (hardware)"
+        )
+        if name == "check":
+            parser.set_defaults(
+                func=_cmd_lifecycle_check, enable_writes=False, allow_non_realtime=False, confirm="",
+            )
+            continue
         parser.add_argument("--artifacts", default="", help="overrides the job")
         parser.add_argument("--allow-non-realtime", action="store_true")
         parser.add_argument("--enable-writes", action="store_true")
@@ -2182,6 +1813,57 @@ def build_parser() -> argparse.ArgumentParser:
             parser.add_argument("--go", action="store_true")
             parser.add_argument("--recover", action="store_true")
             parser.set_defaults(func=_cmd_lifecycle_run)
+
+    reh = lifes.add_parser(
+        "rehearse",
+        help="unattended plant rehearsal of a tracker on each motion, with video "
+        "and the evidence a hardware run needs (docs/design/robot_lifecycle.md)",
+    )
+    reh.add_argument("bundle", help="policy bundle directory (pinned or materialized)")
+    reh.add_argument(
+        "motions", nargs="*",
+        help="motion names; 'deployable' (default) is every motion whose start "
+        "frame passes screening, 'all' is the whole reference tree",
+    )
+    reh.add_argument("--reference-root", default="assets/models/reference/bones")
+    reh.add_argument("--model", default="assets/latent_playkit/model/g1_29dof_rev_1_0.xml")
+    reh.add_argument("--plant", default="examples/g1_plant.yaml", help="plant config YAML")
+    reh.add_argument("--output", default="", help="default artifacts/rehearsal_<bundle>_<date>")
+    reh.add_argument("--seeds", type=int, default=1, help="plant noise seeds per motion")
+    reh.add_argument("--lanes", type=int, default=1, help="episodes in parallel, 4 cores each")
+    reh.add_argument("--dds-domain-base", type=int, default=190)
+    reh.add_argument(
+        "--template", default="",
+        help="lifecycle job whose deployment settings (start pose, blend, "
+        "thresholds, realtime, ...) every motion copies",
+    )
+    reh.add_argument("--no-video", action="store_true")
+    reh.add_argument("--fetch", action="store_true", help="allow fetching a pinned bundle")
+    reh.add_argument(
+        "--plant-noise", choices=("training", "measured", "off"), default="training",
+        help="plant sensor noise: SONIC's training ranges (default), the G1's own "
+        "measured LowState noise, or none. Not part of the rehearsal identity",
+    )
+    reh.set_defaults(func=_cmd_lifecycle_rehearse)
+
+    rehm = lifes.add_parser(
+        "rehearsal-matrix",
+        help="motion x tracker table across several `rehearse` outputs under one directory",
+    )
+    rehm.add_argument("root", help="directory holding one `rehearse --output` per tracker")
+    rehm.set_defaults(func=_cmd_lifecycle_rehearsal_matrix)
+
+    rehe = lifes.add_parser("rehearse-episode", help=argparse.SUPPRESS)
+    rehe.add_argument("job")
+    rehe.add_argument("--seed", type=int, default=0)
+    rehe.add_argument("--dds-domain", type=int, required=True)
+    rehe.add_argument("--cores", default="")
+    rehe.add_argument("--model", required=True)
+    rehe.add_argument("--plant", required=True)
+    rehe.add_argument("--no-video", action="store_true")
+    rehe.add_argument("--fetch", action="store_true")
+    rehe.add_argument("--plant-noise", default="training")
+    rehe.set_defaults(func=_cmd_lifecycle_rehearse_episode)
 
     rob = sub.add_parser(
         "robot", help="high-level robot lifecycle commands (start, damp, ...)"

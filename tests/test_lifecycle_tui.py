@@ -534,3 +534,17 @@ def test_the_light_palette_inverts_the_contrast_it_needs_to():
     # The three tones stay apart from each other, or a red gauge reads green.
     for a, b in (("ok", "warn"), ("warn", "bad"), ("ok", "bad")):
         assert abs(light[a] - light[b]) > 0.05, (a, b)
+
+
+def test_a_long_log_never_eats_the_ladder_on_a_thirty_row_terminal():
+    """The log used to grow to eight rows and push the ladder's bottom rungs off."""
+    lifecycle, tracker, clock = _lifecycle()
+    assert lifecycle.auto(S.POSE_SETTLED).ok
+    snapshot, bindings = lifecycle.snapshot(), build_lifecycle_bindings(lifecycle)
+    quiet = render(snapshot, bindings, ["one"], width=100, height=30)
+    noisy = render(snapshot, bindings, [f"note {i}" for i in range(200)], width=100, height=30)
+    ladder = [row for row in quiet if "VENDOR_RESTORED" in row or "RUNNING" in row]
+    assert ladder, quiet
+    for row in ladder:
+        assert row in noisy
+    assert "note 199" in "\n".join(noisy)

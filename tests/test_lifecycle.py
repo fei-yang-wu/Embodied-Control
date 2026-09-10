@@ -298,6 +298,56 @@ def _run_to_hold(lifecycle, tracker, clock):
     assert lifecycle.state is S.HOLD, lifecycle.last_result
 
 
+def test_precheck_reports_raw_motor_status_and_keeps_writes_closed(tmp_path, monkeypatch):
+    lifecycle, tracker, _, _, _ = _lifecycle(tmp_path)
+    original_stats = tracker.writer_stats
+
+    def faulty_stats():
+        return {
+            **original_stats(),
+            "hardware_faults": 1,
+            "state_fault_reason": 8,
+            "state_fault_joint": 0,
+            "state_fault_sdk_joint": 7,
+            "state_fault_motorstate": 0x80000001,
+        }
+
+    monkeypatch.setattr(tracker, "writer_stats", faulty_stats)
+    result = lifecycle.advance()
+
+    assert not result.ok
+    assert "SDK motor 7" in result.detail
+    assert "motorstate=2147483649 (0x80000001)" in result.detail
+    assert result.values["state_fault_joint"] == 0
+    assert result.values["state_fault_sdk_joint"] == 7
+    assert result.values["state_fault_motorstate"] == 0x80000001
+    assert tracker.publishes == 0
+    assert not tracker.gate_open
+
+
+@pytest.mark.parametrize("latched", [False, True])
+def test_precheck_uses_current_latch_and_preserves_fault_history(monkeypatch, latched):
+    lifecycle, tracker, _, _, _ = _lifecycle()
+    original_stats = tracker.writer_stats
+
+    def recovered_stats():
+        return {
+            **original_stats(),
+            "hardware_faults": 2,
+            "hardware_fault_latched": latched,
+            "state_fault_reason": 8 if latched else 0,
+        }
+
+    monkeypatch.setattr(tracker, "writer_stats", recovered_stats)
+    result = lifecycle.advance()
+
+    assert result.ok is not latched
+    assert result.values["hardware_faults"] == 2
+    assert result.values["hardware_fault_latched"] is latched
+    assert tracker.publishes == 0
+    assert not tracker.gate_open
+
+
 def test_happy_path_hoist_to_standing(tmp_path):
     lifecycle, tracker, vendor, hoist, clock = _lifecycle(
         tmp_path, end_state="vendor_stand"
@@ -965,3 +1015,24 @@ def test_arming_rechecks_runtime_after_sampling_state():
     lifecycle._sampled_state = sample_then_damp
     assert not lifecycle.arm().ok
     assert lifecycle.state is S.BLEND_IN
+
+
+def test_a_frame_in_flight_at_close_gate_is_not_still_writing():
+    """Seen on the robot and on the plant: `DAMP -> RELEASED` refused with
+    `publisher still writing after close_gate` because the publish counter was
+    sampled before the gate closed and the writer sent one more frame while it
+    did. Silence is measured after the close, and the retry always passed."""
+    lifecycle, tracker, vendor, hoist, clock = _lifecycle(end_state="damp")
+    original = tracker.close_gate
+
+    def close_gate_with_one_more_frame():
+        tracker.publishes += 1
+        original()
+
+    tracker.close_gate = close_gate_with_one_more_frame
+    assert lifecycle.auto().ok
+    assert lifecycle.go().ok
+    assert lifecycle.damp().ok
+    assert lifecycle.recover().ok, lifecycle.last_result
+    assert lifecycle.state is S.RELEASED
+    assert tracker.mode == WRITER_DISABLED

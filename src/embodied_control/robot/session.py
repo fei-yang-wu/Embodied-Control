@@ -30,6 +30,7 @@ from embodied_control.robot.lifecycle import (
     LifecycleState,
     Transition,
 )
+from embodied_control.robot.rehearsal import ACCEPTED_END_STATES
 
 MODES = ("oracle", "vla")
 
@@ -282,6 +283,7 @@ class ExperimentSession:
         self.built_for: Selection | None = None
         self.episodes: list[dict] = []
         self._episode_written: tuple | None = None
+        self._episode_directory: Path | None = None
         self.note_sinks: list = []
         # The plant's hoist status is a blocking DDS RPC. `poll` refreshes it
         # from the watcher thread; `snapshot` only ever reads the cache, so a
@@ -490,6 +492,9 @@ class ExperimentSession:
     def _on_transition(self, transition: Transition) -> None:
         if not transition.ok or self.lifecycle is None:
             return
+        if transition.to_state in ACCEPTED_END_STATES:
+            self._record_evidence()
+            return
         if transition.to_state not in {str(LifecycleState.HOLD), str(LifecycleState.FAULT), str(LifecycleState.DAMP)}:
             return
         if transition.from_state not in {str(LifecycleState.RUNNING), str(LifecycleState.BLEND_IN), str(LifecycleState.ARMED), str(LifecycleState.STAND_HOLD)}:
@@ -505,6 +510,23 @@ class ExperimentSession:
             self._record_episode(episode)
         except Exception as exc:  # telemetry must never break the lifecycle
             self._note(f"episode record failed: {exc}")
+
+    def _record_evidence(self) -> None:
+        """The rehearsal gate reads `lifecycle.json`; one per episode, not per directory.
+
+        The shared `lifecycle.json` at the artifacts root is rewritten by
+        every rebuild, so a session that rehearses four motions used to leave
+        evidence for the last one only.
+        """
+        directory = self._episode_directory
+        if directory is None or self.lifecycle is None:
+            return
+        summary = self.lifecycle.summary()
+        (directory / "lifecycle.json").write_text(json.dumps(summary, indent=2) + "\n")
+        with (directory / "lifecycle.jsonl").open("w") as stream:
+            for transition in self.lifecycle.transitions:
+                stream.write(json.dumps(transition.__dict__) + "\n")
+        self._episode_directory = None
 
     def _record_episode(self, episode: int) -> None:
         tracker = self.tracker
@@ -552,6 +574,7 @@ class ExperimentSession:
                     summary["mpjpe_error"] = str(exc)
             (directory / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
             summary["directory"] = str(directory)
+            self._episode_directory = directory
         self.episodes.append(summary)
         self._note(
             f"episode {episode}: {summary['ticks']} ticks, joint MAE "

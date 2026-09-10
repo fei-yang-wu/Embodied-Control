@@ -737,8 +737,11 @@ class NativeUnitreeRuntimeBinding : public NativeFakeRuntimeBinding {
     result["publish_failures"] = stats.publish_failures;
     result["crc_errors"] = stats.crc_errors;
     result["hardware_faults"] = stats.hardware_faults;
+    result["hardware_fault_latched"] = stats.hardware_fault_latched;
     result["state_fault_reason"] = stats.state_fault_reason;
     result["state_fault_joint"] = stats.state_fault_joint;
+    result["state_fault_sdk_joint"] = stats.state_fault_sdk_joint;
+    result["state_fault_motorstate"] = stats.state_fault_motorstate;
     result["watchdog_faults"] = stats.watchdog_faults;
     result["wake_late_ns_max"] = stats.wake_late_ns_max;
     result["deadline_misses"] = stats.deadline_misses;
@@ -1339,8 +1342,27 @@ PYBIND11_MODULE(_ec_native, m) {
            py::arg("stage") = -1, py::call_guard<py::gil_scoped_release>());
 
   py::class_<ec_native::UnitreeStateProbe>(m, "UnitreeStateProbe")
-      .def(py::init<const std::string&, int>(), py::arg("network_interface"),
-           py::arg("dds_domain") = 0)
+      .def(py::init<const std::string&, int, std::size_t>(),
+           py::arg("network_interface"), py::arg("dds_domain") = 0,
+           py::arg("sample_capacity") = 0)
+      .def("samples", [](const ec_native::UnitreeStateProbe& probe) {
+        // Rows below `captured` are complete: the handler publishes the
+        // count with release semantics after writing the row.
+        const auto count = static_cast<py::ssize_t>(probe.captured_samples());
+        const auto width = static_cast<py::ssize_t>(ec_native::kProbeSampleWidth);
+        py::array_t<float> values({count, width});
+        std::copy_n(probe.sample_values().data(), count * width, values.mutable_data());
+        py::array_t<std::uint64_t> times(count);
+        std::copy_n(probe.sample_times_ns().data(), count, times.mutable_data());
+        py::array_t<std::uint32_t> ticks(count);
+        std::copy_n(probe.sample_ticks().data(), count, ticks.mutable_data());
+        py::dict out;
+        out["values"] = values;
+        out["receive_ns"] = times;
+        out["tick"] = ticks;
+        out["capacity"] = probe.sample_capacity();
+        return out;
+      })
       .def("wait_for_samples",
            [](const ec_native::UnitreeStateProbe& probe, std::uint64_t count,
               double timeout) {
@@ -1367,6 +1389,8 @@ PYBIND11_MODULE(_ec_native, m) {
         out["joint_position"] = s.joint_position;
         out["joint_velocity"] = s.joint_velocity;
         out["joint_torque"] = s.joint_torque;
+        out["motor_state"] = s.motor_state;
+        out["first_motor_error_code"] = s.first_motor_error_code;
         out["quaternion"] = s.quaternion;
         out["gyroscope"] = s.gyroscope;
         out["accelerometer"] = s.accelerometer;

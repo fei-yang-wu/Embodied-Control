@@ -246,171 +246,151 @@ pixi run -e native ec lowlevel unitree /absolute/path/to/bundle \
   --confirm ENABLE_G1_LOWLEVEL_NON_REALTIME
 ```
 
-### Lifecycle: hoist to run from the control PC
+### G1 experiments: sim rehearsal, then hardware
 
-The simulated robot uses its own [plant configuration](examples/g1_plant.yaml)
-and MJCF. The plant does not load a policy bundle. Joint motor IDs, rotor
-armature, torque limits, nominal pose, and simulated vendor gains belong to
-that configuration; the active controller supplies its own targets and PD
-gains through DDS after takeover. The initial G1 profile preserves the
-existing rehearsal calibration independently of future checkpoint choices.
-
-`ec lowlevel plant <robot.yaml> --model <robot.xml>` replaces the old
-bundle-based plant command. `--initial-pose` joint values follow the plant
-configuration's joint list. `--states` includes `joint_names` in its NPZ;
-use those names to map plant state into a controller or reference ordering.
-
-The lifecycle examples use one generated BONES collection (`assets/models/reference/bones`)
-and `ticks: auto`. Build it once from the two existing exports; see
-[reference deployment](docs/design/reference_deployment.md) for commands,
-per-motion screening, and the new stance/bridge examples. Existing source
-exports and remote pins remain available.
-
-`ec lifecycle` drives the whole hardware session as a gated state machine
+`ec lifecycle` drives a whole G1 session as a gated state machine
 (`docs/design/robot_lifecycle.md`): vendor damp, our damp frames on the wire,
-`ReleaseMode`, ramp to the start pose, settle, lower, pose match against the
-sim start frame, planner fresh, arm with the reference paused, explicit play
-with a countdown, and hoisted recovery to vendor damp. Composed stance
-references can keep policy control active during final hoist recovery. The same object runs against the MuJoCo plant when
-the plant serves the vendor (`--vendor`) and a virtual gantry (`--hoist`,
-hanging the robot `--hoist-clearance` metres clear of the floor, 0.10 by
-default, so the ramp to a start pose never pushes the feet through it):
+`ReleaseMode`, ramp to the start pose, settle, lower, pose check, planner
+probe, arm with the reference paused, explicit play with a countdown, and a
+hoisted hand-back to vendor damp. The same object runs against the MuJoCo
+plant when the plant serves the vendor (`--vendor`) and a virtual gantry
+(`--hoist`), and **a hardware run refuses to start until the same bundle,
+motion and deployment settings have reached the end of the ladder against
+the plant** (the rehearsal gate, `robot/rehearsal.py`).
+
+One job file describes one deployment. `--target sim` runs it against the
+plant (loopback, hoisted, non-RT, evidence under `<artifacts_dir>/sim`);
+`--target hardware --network <NIC>` runs the same job on the robot and looks
+for that evidence beside it. Nothing else in the file changes between the
+two, so the rehearsal identity matches by construction.
+
+#### 1. Rehearse a tracker, unattended, with video
 
 ```bash
-# T0: the plant, owning the joints until ReleaseMode and hanging the robot
-pixi run -e native ec lowlevel plant examples/g1_plant.yaml \
-  --model assets/latent_playkit/model/g1_29dof_rev_1_0.xml --network lo \
-  --vendor --hoist --dds-domain 51
-# T1: the planner (stays up across episodes, owns the slots)
-pixi run -e native ec lowlevel oracle-worker assets/models/controller/sonic_v1_1 \
-  --reference-root assets/models/reference/bones \
-  --motion hurry_idle_001_A277 --request-slot /ec_g1_request \
-  --response-slot /ec_g1_response --create-slots
-# T2: the lifecycle, scripted (or `console` for the single-key operator shell)
-pixi run -e native ec lifecycle run examples/lifecycle_sim_hurry_idle.yaml \
-  --enable-writes --confirm ENABLE_G1_LOWLEVEL_NON_REALTIME \
-  --allow-non-realtime --go --recover
+# every motion whose start frame passes screening (default), one seed each
+pixi run -e native ec lifecycle rehearse assets/models/controller/action01_55b
+
+# a chosen set, three plant noise seeds, two episodes in parallel (4 cores each)
+pixi run -e native ec lifecycle rehearse assets/models/controller/action01_55b \
+  hurry_idle_001_A277 casual_greeting_R_001_A428 hurry_idle_001_A277__stand_f42c00b9b413 \
+  --reference-root assets/models/reference/bones_hurry_stand \
+  --seeds 3 --lanes 2 --output artifacts/rehearsal_action01_55b_20260910
+
+# copy the deployment settings (start pose, blend, thresholds, ...) of an existing job
+pixi run -e native ec lifecycle rehearse assets/models/controller/combo_50b all \
+  --template examples/lifecycle_hardware_action01_55b.yaml
 ```
 
-`ec lifecycle console` is the experiment command center: a full-screen
-display on a terminal (`--plain` for line mode) that owns the planner process
-too. Pick the command source (`o` oracle / vla), the motion (`m`/`M`) and the
-start frame (`f`/`F`), start the planner (`p`), and build the tracker for that
-choice (`r`). In oracle mode `r` starts the worker too: it memory-maps the
-reference and loads no weights. In VLA mode the planner is yours to start,
-because that worker loads its own checkpoint, several gigabytes on the GPU,
-and a build refuses until it is running rather than launching one.
-`--planner-autostart` starts either. The display shows the
-ladder, the writer's live numbers, link health (lowstate and lowcmd rates,
-state gaps, planner reply age), a progress bar over the reference trajectory
-in oracle mode, and per-episode tracking summaries. Each episode's telemetry
-lands under `episodes/` in the artifacts directory with a `summary.json`
-(joint MAE, and MPJPE when the job names an `mjcf`). Lifecycle keys: `Ctrl-D` damp, `n` next state, `a` auto to PRIMED, `g` arm, `G` play, `h`
-hold, `H`/`l` hoist/lowered acknowledgements, `s` recover to vendor stand,
-`d` to vendor damp, `e` retake from HOLD, `x` abort, `q` quit. Every
-transition lands in `lifecycle.jsonl` with its evidence; the pose check
-writes `pose_match.json`. Against the robot the job changes `network`,
-`dds_domain: 0`, `sim_hoist: false`, and the write gate is
-`--confirm ENABLE_G1_LOWLEVEL` without `--allow-non-realtime`.
+For each motion the sweep writes `<output>/<motion>/job.yaml`, the canonical
+hardware-shaped job (strict RT, default stance, lead 0, `ticks: auto`, a
+final policy hold when the reference is a composed stance clip), then for
+each seed spawns its own vendored and hoisted plant on a private DDS domain
+and drives the console's session through build, prepare, arm, play, hoist
+and damp. Each `sim/seed_<n>/` holds the resolved job, `plant.states.npz`
+(true root, straps), `lifecycle.json` + `lifecycle.jsonl`, the episode's
+telemetry and summary, `timeline.json`, `result.json`, and `video.mp4`: the
+whole run from hoist to hand-back with the lifecycle state stamped on every
+frame. `<output>/REPORT.md` and `summary.json` tabulate the sweep. Finished
+episodes are kept on a rerun, so a sweep can be resumed. Exit code 0 only if
+every episode was clean.
 
-**Rehearse before hardware.** With a non-loopback interface, `PRECHECK`
-refuses to pass until a run matching the bundle, reference content, motion,
-start frame, duration, and deployment settings has reached the end
-of the ladder against the plant, cleanly, within `rehearsal_max_age_days`. It
-reads the `lifecycle.json` those runs already write under `rehearsal_root`.
-Set `require_rehearsal: false` to run without one, deliberately and in the
-job rather than from the console.
+The plant injects SONIC's training-range sensor noise by default.
+`--plant-noise measured` uses the G1's own LowState noise (13-130x smaller,
+see [artifacts/noise_analysis_20260910/REPORT.md](artifacts/noise_analysis_20260910/REPORT.md)),
+`--plant-noise off` none; neither changes the rehearsal identity, so keep the
+default run as the gate evidence and use the others for comparison.
 
-[docs/operator_manual.md](docs/operator_manual.md) is the page to have open in
-front of the robot: the ladder, every key, and what to do when a gate fails.
-It is generated from the console's own bindings (`pixi run build-manual`), and
-a test fails when the file drifts from them.
+Endpoint screening blocks a moving or off-stance **start** frame; the **end**
+frame is reported, not refused, because any run ends in `HOLD` under the
+hoist (`endpoint_screening: start | both | off` in the job).
 
-The console paints for a dark terminal by default. `--theme light` switches
-to a palette built for a light one: the numbers go near-black, the rules go
-faint, and every hue darkens so it still reads on paper and still holds white
-text inside a chip. `--theme auto` (the default) reads `COLORFGBG` and falls
-back to dark; `EC_TUI_THEME=light` overrides both, for a terminal that does
-not publish its background.
-
-The full-screen console also has a slash-command palette. Press `/` or `?` to
-open it; every operator key has a named equivalent such as `/next`, `/auto`,
-`/go`, `/hold`, `/stand`, and `/damp`. Slash commands take no arguments.
-
-#### Operating card
-
-One episode, from a robot hanging limp on the hoist to a robot standing under
-the vendor again. Three terminals; the console owns the planner, so terminal 2
-is only for the simulated robot.
+#### 2. Check a job before the robot
 
 ```bash
-# 1. plant (sim only; on hardware this is the robot)
+pixi run -e native ec lifecycle check artifacts/rehearsal_action01_55b_20260910/hurry_idle_001_A277/job.yaml \
+  --target hardware --network enp128s31f6 --offline
+```
+
+Prints the screening verdict, the identity the hardware run would carry, and
+`PASS`/`FAIL` for the rehearsal gate. On `FAIL` it lists the newest runs under
+the rehearsal root and which identity keys differ (`deployment_sha` means
+thresholds or timing changed; `ticks` means a different reference length).
+
+#### 3. Interactive session against the plant
+
+```bash
+# T1: the plant, owning the joints until ReleaseMode and hanging the robot
 pixi run -e native ec lowlevel plant examples/g1_plant.yaml \
   --model assets/latent_playkit/model/g1_29dof_rev_1_0.xml \
   --network lo --vendor --hoist --dds-domain 51
-# 2. console
-pixi run -e native ec lifecycle console examples/lifecycle_sim_hurry_idle.yaml \
+# T2: the console; it starts the oracle worker itself
+pixi run -e native ec lifecycle console <job.yaml> --target sim \
   --enable-writes --confirm ENABLE_G1_LOWLEVEL_NON_REALTIME --allow-non-realtime
 ```
 
-| Step | Key | What happens |
-|---|---|---|
-| 1 | `o` `t`/`T` `m`/`M` `f`/`F` | pick command source, tracker, motion, start frame |
-| 2 | `r` | build the tracker, and the oracle worker with it (`p` first in VLA mode) |
-| 3 | `a` | climb to PRIMED: vendor damp, our damp frames, ReleaseMode, ramp, settle, lower, pose match, planner probe |
-| 4 | `g`, then `G` | arm with reference paused; once clear, play after countdown |
-| 5 | `h` | freeze on the last target when you want to stop early |
-| 6 | `H` | tell the console the hoist is hooked and carrying |
-| 7 | `Ctrl-D` | damp: kd-only frames now, then the joints go back to the vendor's own damp |
-| 8 | `n` | next episode from PRECHECK, planner still up |
+`--viewer` on the plant serves a live 3D view over HTTP (mjviser); `--video`
+records it. The scripted form is `ec lifecycle run <job.yaml> --target sim
+... --go --recover`, exit 0 only if the target state was reached cleanly.
 
-`s` recovers to a vendor stand instead, when you want the robot on its feet.
-A run ends limp under the vendor (`end_state: vendor_damp`), so the next
-trajectory climbs the whole ladder again. `e` is the one shortcut, and it
-re-reads the link before it drives the robot a second time.
+#### 4. Hardware session
 
-`R` (`/reset-sim`) closes current tracker and planner, then atomically resets
-running MuJoCo plant to configured initial pose (bundle default when absent),
-vendor damp, and hoisted state.
-No plant-window restart is needed. Command is unavailable on hardware.
-
-Jobs may expose more trackers with operator-facing names:
-
-```yaml
-bundle: ../assets/models/controller/sonic_v1_1
-trackers:
-  sonic_v1_1: ../assets/models/controller/sonic_v1_1
-  fsq64_sonic_4500m: ../assets/models/controller/fsq64_sonic_4500m
-  fsq64_10b: ../assets/models/controller/fsq64_10b
-  rollout24_gamma097_3500m: ../assets/models/controller/rollout24_gamma097_3500m
+```bash
+export G1_TEST_NIC=enp128s31f6            # the interface wired to the G1, never a guess
+pixi run -e native ec lowlevel check-unitree --network "$G1_TEST_NIC" \
+  --samples 5000 --report artifacts/hardware_link.json \
+  --capture artifacts/hardware_lowstate.npz   # read-only link check + raw sensor capture
+pixi run -e native ec lifecycle check <job.yaml> --target hardware --network "$G1_TEST_NIC" --offline
+pixi run -e native ec lifecycle console <job.yaml> --target hardware --network "$G1_TEST_NIC" \
+  --offline --enable-writes --confirm ENABLE_G1_LOWLEVEL
 ```
 
+`--capture` saves the raw LowState rows and prints the implied sensor noise
+per channel (joint position, velocity, gyro, orientation) in the same units
+as the plant's `--noise-*` half-ranges, so the rehearsal's injected noise can
+be compared with the robot's own. Do it with the robot limp on the hoist.
+Analysis of the 2026-09-10 session is in
+[artifacts/noise_analysis_20260910/REPORT.md](artifacts/noise_analysis_20260910/REPORT.md).
+
+The hardware write gate is `--confirm ENABLE_G1_LOWLEVEL` without
+`--allow-non-realtime`; PRECHECK also refuses when SCHED_FIFO setup failed.
+The per-release card is [docs/hardware_testing_action01.md](docs/hardware_testing_action01.md);
+[docs/operator_manual.md](docs/operator_manual.md) is the page to have open
+in front of the robot (generated from the console's own bindings with
+`pixi run build-manual`; a test fails when it drifts).
+
+#### Console keys
+
+The full-screen console (`--plain` for line mode) owns the planner process.
+Pick the command source (`o`), tracker (`t`/`T`), motion (`m`/`M`) and start
+frame (`f`/`F`); `r` builds the tracker and, in oracle mode, the worker with
+it (`p` first in VLA mode, because that planner loads its own checkpoint).
+
+| Step | Key | What happens |
+|---|---|---|
+| 1 | `r` | build the tracker (and the oracle worker) for the selection |
+| 2 | `a` | climb to PRIMED: vendor damp, our damp frames, ReleaseMode, ramp, settle, lower, pose check, planner probe |
+| 3 | `g`, then `G` | arm with the reference paused; once clear, play after the countdown |
+| 4 | `h` | freeze on the last target to stop early |
+| 5 | `H` | the hoist is hooked and carrying |
+| 6 | `Ctrl-D` / `d` | damp: kd-only frames now, then the joints go back to the vendor's own damp |
+| 7 | `n` | next episode from PRECHECK, planner still up |
+
+`s` recovers to a vendor stand instead; `e` retakes from `HOLD` after
+re-reading the link; `x` aborts before `PRIMED`; `R` resets the sim plant.
+`/` opens a command palette with a named form of every key (`/next`, `/arm`,
+`/play`, `/damp`, ...) and `/diagnose`, a read-only agent that explains the
+current failure. Every transition lands in `lifecycle.jsonl` with its
+evidence; each episode that reaches `VENDOR_RESTORED` gets its own
+`episodes/epNNN_*/lifecycle.json`, which is what the rehearsal gate reads.
+`--theme light` switches the palette for a light terminal.
+
+Jobs may expose more trackers with operator-facing names (`trackers:` map);
 `t`/`T` cycles them between episodes and the console restarts the oracle
-worker for the bundle it switches to, so a job can carry every pinned
-controller and the encoder contract follows the selection.
-
-Each controller entry names a complete deployment bundle (`manifest.json` plus
-declared checkpoints), since the joint contract and the normalization travel
-with the checkpoint. Controller and planner assets live under
-`assets/models/controller/` and `assets/models/planner/`; configure converted
-controller bundles here and the planner launch command under `planner`.
-
-### Combo 46B tracker
-
-`examples/lifecycle_sim_combo_46b.yaml` selects the pinned `combo_46b` controller.
-Rebuild native (`pixi run -e native build-native`) after updating: this bundle
-uses heading-anchored root_qpos with absolute reference height, ten-step actor
-history, and a 50 Hz encoder. Its one-tick hold requires `lead_ticks: 0`.
-The oracle sweep automatically derives a valid lead time from the bundle.
-
-A local asynchronous MuJoCo pass on ten selected motions completed all 5,137
-control/encoder ticks and 20,548 physics steps with no faults or scheduler
-misses: MPJPE-L 12.39 mm / MPJPE-G 134.11 mm (frame-weighted full horizons),
-10/10 no-fall. This is a single-pass diagnostic, not hardware qualification;
-feeding-birds had 749.56 mm global error. The zero-lead reference worker missed
-2,567 reply deadlines, while the encoder still ran every tick from buffered
-reference frames. Reports and the required runtime patch accompany the HF
-controller release.
+worker for the bundle it switches to. Controller and planner bundles live
+under `assets/models/controller/` and `assets/models/planner/`. The legacy
+`examples/lifecycle_sim_*.yaml` / `lifecycle_hardware_*.yaml` pairs still
+work without `--target`; `lifecycle_sim_combo_46b.yaml` needs
+`lead_ticks: 0` for that bundle's one-tick hold.
 
 ### Pinned model assets
 
