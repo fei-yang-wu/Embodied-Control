@@ -129,6 +129,15 @@ class MujocoBackend:
             self.model.dof_armature[dof] = action.armature[isaac_index]
             self.model.dof_damping[dof] = 0.0
             self.model.dof_frictionloss[dof] = 0.0
+            # Joint limits as stiff as Isaac Lab's Newton/MJWarp model carries
+            # them (`solreflimit="-10000 -10"`, `solimplimit="0.9 0.95 0.001"`
+            # in the MJCF Newton dumps). The vendor MJCF's default soft limit
+            # (`solref 0.02 1`) lets a driven ankle overshoot its hard range by
+            # a few hundredths of a radian, which the Unitree writer's
+            # measured-position guard reports as a fault; the training
+            # simulator never lets the joint get there.
+            self.model.jnt_solref[joint_id] = [-10000.0, -10.0]
+            self.model.jnt_solimp[joint_id] = [0.9, 0.95, 0.001, 0.5, 2.0]
             self.model.actuator_forcelimited[actuator_id] = 1
             effort = action.effort_limit[isaac_index]
             self.model.actuator_forcerange[actuator_id] = [-effort, effort]

@@ -255,6 +255,14 @@ NativeMujocoBackend::NativeMujocoBackend(
     const int dof = model->jnt_dofadr[joint];
     dof_address_[actuator] = dof;
     model->dof_armature[dof] = armature[isaac];
+    // Stiff joint limits, as Isaac Lab's Newton/MJWarp model carries them
+    // (solreflimit -10000 -10, solimplimit 0.9 0.95 0.001); see the python
+    // MujocoBackend for why the vendor MJCF's soft default is wrong here.
+    model->jnt_solref[2 * joint] = -10000.0;
+    model->jnt_solref[2 * joint + 1] = -10.0;
+    model->jnt_solimp[mjNIMP * joint] = 0.9;
+    model->jnt_solimp[mjNIMP * joint + 1] = 0.95;
+    model->jnt_solimp[mjNIMP * joint + 2] = 0.001;
     model->dof_damping[dof] = 0.0;
     model->dof_frictionloss[dof] = 0.0;
     model->actuator_forcelimited[actuator] = 1;

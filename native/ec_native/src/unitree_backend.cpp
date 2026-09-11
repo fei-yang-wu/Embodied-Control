@@ -16,18 +16,23 @@
 #include <unitree/dds_wrapper/common/crc.h>
 #include <unitree/idl/hg/LowCmd_.hpp>
 #include <unitree/idl/hg/LowState_.hpp>
+#include <unitree/idl/go2/SportModeState_.hpp>
 #include <unitree/robot/channel/channel_factory.hpp>
 #include <unitree/robot/channel/channel_publisher.hpp>
 #include <unitree/robot/channel/channel_subscriber.hpp>
 #include <unitree/robot/b2/motion_switcher/motion_switcher_client.hpp>
 
 #include "dds_channel.hpp"
+#include "leg_odometry.hpp"
 
 namespace ec_native {
 namespace {
 
 using LowCmd = unitree_hg::msg::dds_::LowCmd_;
 using LowState = unitree_hg::msg::dds_::LowState_;
+// The G1 publishes its state estimator's odometry with the go2 message
+// layout (position, velocity, imu) on `rt/odommodestate`.
+using OdometryState = unitree_go::msg::dds_::SportModeState_;
 using unitree::robot::ChannelFactory;
 using unitree::robot::ChannelPublisher;
 using unitree::robot::ChannelPublisherPtr;
@@ -147,7 +152,14 @@ struct NativeUnitreeBackend::CommandSnapshot {
 struct NativeUnitreeBackend::Impl {
   ChannelPublisherPtr<LowCmd> publisher;
   ChannelSubscriberPtr<LowState> subscriber;
+  ChannelSubscriberPtr<OdometryState> odometry_subscriber;
   std::unique_ptr<unitree::robot::b2::MotionSwitcherClient> motion_switcher;
+};
+
+struct NativeUnitreeBackend::OdometrySlot {
+  std::atomic<std::uint64_t> sequence{0};
+  std::array<std::atomic<float>, 3> position{};
+  std::atomic<std::uint64_t> receive_ns{0};
 };
 
 NativeUnitreeBackend::NativeUnitreeBackend(
@@ -162,6 +174,7 @@ NativeUnitreeBackend::NativeUnitreeBackend(
     : impl_(std::make_unique<Impl>()),
       state_slot_(std::make_unique<StateSlot>()),
       command_slot_(std::make_unique<CommandSlot>()),
+      odometry_slot_(std::make_unique<OdometrySlot>()),
       writes_enabled_(writes_enabled),
       writer_cpu_(writer_cpu),
       writer_fifo_priority_(writer_fifo_priority),
@@ -238,6 +251,7 @@ NativeUnitreeBackend::~NativeUnitreeBackend() {
   if (writer_thread_.joinable()) {
     writer_thread_.join();
   }
+  impl_->odometry_subscriber.reset();
   impl_->subscriber.reset();
 }
 
@@ -247,6 +261,63 @@ void NativeUnitreeBackend::reset() {
   fixed_anchor_imu_captured_ = false;
   anchor_heading_captured_.store(false, std::memory_order_release);
   state_cache_.anchor_pose_valid = false;
+  odometry_start_captured_ = false;
+  anchor_displacement_odom_ = {0.0F, 0.0F, 0.0F};
+  anchor_position_source_active_.store(0, std::memory_order_relaxed);
+  if (leg_odometry_) {
+    leg_odometry_->reset();
+  }
+}
+
+void NativeUnitreeBackend::configure_live_anchor(
+    AnchorPositionSource source, const std::string& odometry_topic,
+    const std::string& odometry_mjcf,
+    std::span<const std::string> isaac_joint_names) {
+  const bool wants_odometry = source == AnchorPositionSource::kOdometry ||
+                              source == AnchorPositionSource::kAuto;
+  const bool wants_legs = source == AnchorPositionSource::kLegKinematics ||
+                          source == AnchorPositionSource::kAuto;
+  if (source == AnchorPositionSource::kOdometry && odometry_topic.empty()) {
+    throw std::runtime_error("odometry anchor source needs an odometry topic");
+  }
+  if (source == AnchorPositionSource::kLegKinematics && odometry_mjcf.empty()) {
+    throw std::runtime_error("leg kinematics anchor source needs a model");
+  }
+  if (wants_legs && !odometry_mjcf.empty()) {
+    leg_odometry_ = std::make_unique<LegOdometry>(odometry_mjcf,
+                                                  isaac_joint_names);
+  }
+  if (wants_odometry && !odometry_topic.empty()) {
+    impl_->odometry_subscriber =
+        std::make_shared<ChannelSubscriber<OdometryState>>(odometry_topic);
+    impl_->odometry_subscriber->InitChannel(
+        std::bind(&NativeUnitreeBackend::odometry_handler, this,
+                  std::placeholders::_1),
+        1);
+  }
+  anchor_position_source_ = source;
+}
+
+void NativeUnitreeBackend::odometry_handler(const void* message) noexcept {
+  const OdometryState& input = *static_cast<const OdometryState*>(message);
+  const auto& position = input.position();
+  if (!std::isfinite(position[0]) || !std::isfinite(position[1]) ||
+      !std::isfinite(position[2])) {
+    return;
+  }
+  std::uint64_t sequence =
+      odometry_slot_->sequence.load(std::memory_order_relaxed);
+  odometry_slot_->sequence.store(sequence + 1, std::memory_order_relaxed);
+  std::atomic_thread_fence(std::memory_order_release);
+  for (std::size_t index = 0; index < 3; ++index) {
+    odometry_slot_->position[index].store(position[index],
+                                          std::memory_order_relaxed);
+  }
+  odometry_slot_->receive_ns.store(monotonic_ns_unitree(),
+                                   std::memory_order_relaxed);
+  std::atomic_thread_fence(std::memory_order_release);
+  odometry_slot_->sequence.store(sequence + 2, std::memory_order_relaxed);
+  odometry_frames_.fetch_add(1, std::memory_order_relaxed);
 }
 
 bool NativeUnitreeBackend::snapshot_state(StateSnapshot& destination) const
@@ -452,18 +523,128 @@ const RobotState& NativeUnitreeBackend::read_state() noexcept {
       fixed_anchor_imu_captured_ = true;
       // Report what the alignment absorbed, so a boot heading is evidence in
       // the console and in lifecycle.jsonl rather than a silent constant.
-      anchor_yaw_offset_degrees_.store(
-          heading_offset_degrees(fixed_anchor_imu_start_,
-                                 fixed_anchor_quaternion_),
-          std::memory_order_release);
+      const float yaw_degrees = heading_offset_degrees(
+          fixed_anchor_imu_start_, fixed_anchor_quaternion_);
+      anchor_yaw_offset_degrees_.store(yaw_degrees, std::memory_order_release);
+      const double yaw = static_cast<double>(yaw_degrees) * M_PI / 180.0;
+      anchor_yaw_cos_ = static_cast<float>(std::cos(yaw));
+      anchor_yaw_sin_ = static_cast<float>(std::sin(yaw));
       anchor_heading_captured_.store(true, std::memory_order_release);
     }
-    state_cache_.anchor_position_w = fixed_anchor_position_;
     state_cache_.anchor_pose_valid = align_heading_to_reference(
         fixed_anchor_imu_start_, fixed_anchor_quaternion_, quaternion_xyzw,
         state_cache_.anchor_quaternion_w);
+    update_live_anchor_translation(snapshot.joint_position, quaternion_xyzw);
+    // The odometry world and the reference world differ by the start
+    // alignment: the same yaw the heading absorbs, and a translation that
+    // puts the robot's capture pose on the reference start frame.
+    const float dx = anchor_displacement_odom_[0];
+    const float dy = anchor_displacement_odom_[1];
+    state_cache_.anchor_position_w = {
+        fixed_anchor_position_[0] + anchor_yaw_cos_ * dx - anchor_yaw_sin_ * dy,
+        fixed_anchor_position_[1] + anchor_yaw_sin_ * dx + anchor_yaw_cos_ * dy,
+        fixed_anchor_position_[2] + anchor_displacement_odom_[2]};
+    const float displacement = std::sqrt(dx * dx + dy * dy);
+    if (displacement > anchor_displacement_max_.load(std::memory_order_relaxed)) {
+      anchor_displacement_max_.store(displacement, std::memory_order_relaxed);
+    }
   }
   return state_cache_;
+}
+
+void NativeUnitreeBackend::update_live_anchor_translation(
+    const std::array<float, kJointCount>& joint_position,
+    const std::array<float, 4>& quaternion_xyzw) noexcept {
+  // Settle the source once per episode, at capture, so the estimate never
+  // jumps between two estimators mid-run.
+  if (!odometry_start_captured_) {
+    std::array<float, 3> odometry{};
+    std::uint64_t odometry_ns = 0;
+    const bool odometry_alive =
+        snapshot_odometry(odometry, odometry_ns) &&
+        age_ms_since(monotonic_ns_unitree(), odometry_ns) < kOdometryStaleMs;
+    AnchorPositionSource active = AnchorPositionSource::kFixedStart;
+    switch (anchor_position_source_) {
+      case AnchorPositionSource::kFixedStart:
+        break;
+      case AnchorPositionSource::kOdometry:
+        active = AnchorPositionSource::kOdometry;
+        break;
+      case AnchorPositionSource::kLegKinematics:
+        active = leg_odometry_ ? AnchorPositionSource::kLegKinematics
+                               : AnchorPositionSource::kFixedStart;
+        break;
+      case AnchorPositionSource::kAuto:
+        active = odometry_alive ? AnchorPositionSource::kOdometry
+                 : leg_odometry_ ? AnchorPositionSource::kLegKinematics
+                                 : AnchorPositionSource::kFixedStart;
+        break;
+    }
+    if (active == AnchorPositionSource::kOdometry && !odometry_alive) {
+      // Explicit odometry with no frame yet: wait for the first one.
+      odometry_stale_ticks_.fetch_add(1, std::memory_order_relaxed);
+      anchor_displacement_odom_ = {0.0F, 0.0F, 0.0F};
+      return;
+    }
+    odometry_start_ = odometry;
+    if (leg_odometry_) {
+      leg_odometry_->reset();
+    }
+    anchor_displacement_odom_ = {0.0F, 0.0F, 0.0F};
+    odometry_start_captured_ = true;
+    anchor_position_source_active_.store(static_cast<std::uint32_t>(active),
+                                         std::memory_order_relaxed);
+  }
+  const auto active = static_cast<AnchorPositionSource>(
+      anchor_position_source_active_.load(std::memory_order_relaxed));
+  if (active == AnchorPositionSource::kOdometry) {
+    std::array<float, 3> odometry{};
+    std::uint64_t odometry_ns = 0;
+    if (snapshot_odometry(odometry, odometry_ns) &&
+        age_ms_since(monotonic_ns_unitree(), odometry_ns) < kOdometryStaleMs) {
+      for (std::size_t index = 0; index < 3; ++index) {
+        anchor_displacement_odom_[index] = odometry[index] - odometry_start_[index];
+      }
+    } else {
+      // Hold the last displacement rather than snap back to the start.
+      odometry_stale_ticks_.fetch_add(1, std::memory_order_relaxed);
+    }
+  } else if (active == AnchorPositionSource::kLegKinematics && leg_odometry_) {
+    std::array<float, 3> position{};
+    if (leg_odometry_->update(joint_position, quaternion_xyzw, position)) {
+      // Leg odometry starts its walk at (0, 0); its z is the pelvis height
+      // above the stance sole, which the anchor keeps only as a delta.
+      if (leg_odometry_->updates() == 1) {
+        odometry_start_ = position;
+      }
+      for (std::size_t index = 0; index < 3; ++index) {
+        anchor_displacement_odom_[index] = position[index] - odometry_start_[index];
+      }
+      leg_odometry_stance_switches_.store(leg_odometry_->stance_switches(),
+                                          std::memory_order_relaxed);
+    }
+  }
+}
+
+bool NativeUnitreeBackend::snapshot_odometry(
+    std::array<float, 3>& position, std::uint64_t& receive_ns) const noexcept {
+  for (int attempt = 0; attempt < kLocalSnapshotAttempts; ++attempt) {
+    const std::uint64_t first =
+        odometry_slot_->sequence.load(std::memory_order_acquire);
+    if (first == 0 || (first & 1ULL) != 0) {
+      continue;
+    }
+    for (std::size_t index = 0; index < 3; ++index) {
+      position[index] =
+          odometry_slot_->position[index].load(std::memory_order_relaxed);
+    }
+    receive_ns = odometry_slot_->receive_ns.load(std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_acquire);
+    if (first == odometry_slot_->sequence.load(std::memory_order_relaxed)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 void NativeUnitreeBackend::write_target(
@@ -1125,6 +1306,15 @@ UnitreeWriterStats NativeUnitreeBackend::writer_stats() const noexcept {
           anchor_yaw_offset_degrees_.load(std::memory_order_acquire),
       .anchor_heading_captured =
           anchor_heading_captured_.load(std::memory_order_acquire),
+      .anchor_position_source =
+          anchor_position_source_active_.load(std::memory_order_relaxed),
+      .odometry_frames = odometry_frames_.load(std::memory_order_relaxed),
+      .odometry_stale_ticks =
+          odometry_stale_ticks_.load(std::memory_order_relaxed),
+      .anchor_displacement_max =
+          anchor_displacement_max_.load(std::memory_order_relaxed),
+      .leg_odometry_stance_switches =
+          leg_odometry_stance_switches_.load(std::memory_order_relaxed),
       .mode = mode_.load(),
       .writes_enabled = writes_enabled_,
       .realtime_configured = realtime_configured_.load(),

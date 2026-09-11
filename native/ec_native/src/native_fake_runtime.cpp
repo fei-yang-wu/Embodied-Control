@@ -264,6 +264,14 @@ void NativeFakeRuntime::start(std::size_t max_ticks, bool paced) {
   }
 }
 
+void NativeFakeRuntime::set_anchor_source(
+    NativePlannerConfig::AnchorSource source) {
+  if (running_.load() || thread_.joinable()) {
+    throw std::runtime_error("anchor source must be set before start");
+  }
+  planner_.anchor_source = source;
+}
+
 void NativeFakeRuntime::stop() noexcept {
   stop_requested_.store(true);
   backend_->stop();
@@ -693,7 +701,9 @@ bool NativeFakeRuntime::accept_reference_chunk(std::uint32_t length) noexcept {
 
 bool NativeFakeRuntime::encode_active_reference(
     std::size_t offset_steps) noexcept {
-  if (!encoder_ || !robot_state_.anchor_pose_valid ||
+  const bool expert_anchor =
+      planner_.anchor_source == NativePlannerConfig::AnchorSource::kExpertHeading;
+  if (!encoder_ || (!expert_anchor && !robot_state_.anchor_pose_valid) ||
       active_reference_length_ < kReferenceHeaderWidth) {
     return false;
   }
@@ -721,16 +731,24 @@ bool NativeFakeRuntime::encode_active_reference(
                     encoder_raw_window_.data() +
                         frame * raw_reference_width_);
       }
+      // Expert anchor: the window's slot-0 frame is the origin, heading only.
+      const float* slot0 = encoder_raw_window_.data() + kJointCount;
+      const std::span<const float> anchor_position =
+          expert_anchor ? std::span<const float>(slot0, 3)
+                        : std::span<const float>(robot_state_.anchor_position_w);
+      const std::span<const float> anchor_quaternion =
+          expert_anchor ? std::span<const float>(slot0 + 3, 4)
+                        : std::span<const float>(robot_state_.anchor_quaternion_w);
       packed = input_width ==
                    planner_.window_frames * planner_.encoder_frame_width &&
                reexpress_root_qpos_window(
                    std::span<const float>(encoder_raw_window_.data(),
                                           selected_width),
-                   planner_.window_frames, robot_state_.anchor_position_w,
-                   robot_state_.anchor_quaternion_w,
+                   planner_.window_frames, anchor_position, anchor_quaternion,
                    std::span<float>(encoder_window_.data(), input_width),
-                   planner_.reference_encoder_layout ==
-                       NativePlannerConfig::ReferenceEncoderLayout::kRootQposHeading);
+                   expert_anchor ||
+                       planner_.reference_encoder_layout ==
+                           NativePlannerConfig::ReferenceEncoderLayout::kRootQposHeading);
     }
   } else {
     packed = pack_joint_qpos_qvel_anchor_ori_window(

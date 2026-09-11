@@ -207,3 +207,18 @@ def test_job_defaults_and_validators(tmp_path):
     path = tmp_path / "job.yaml"
     path.write_text("api_version: ec.lowlevel/v1alpha1\nbundle: bundles/x\n")
     assert load_lowlevel_job(path).bundle == "bundles/x"
+
+
+def test_lifecycle_job_live_anchor_defaults_and_validation(tmp_path):
+    from embodied_control.robot.lifecycle_job import LifecycleJob
+
+    job = LifecycleJob(bundle="b", command_source="vla")
+    assert job.live_anchor is True
+    assert job.anchor_position_source == "auto"
+    assert job.odometry_topic == "rt/odommodestate"
+    with pytest.raises(ValueError, match="leg_kinematics needs mjcf"):
+        LifecycleJob(bundle="b", command_source="vla", anchor_position_source="leg_kinematics")
+    with pytest.raises(ValueError, match="odometry needs odometry_topic"):
+        LifecycleJob(bundle="b", command_source="vla", anchor_position_source="odometry", odometry_topic="")
+    off = LifecycleJob(bundle="b", command_source="vla", live_anchor=False, anchor_position_source="leg_kinematics")
+    assert off.live_anchor is False

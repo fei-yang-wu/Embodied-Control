@@ -269,3 +269,19 @@ the host side — readable by the host user (default `-rw-r--r--`), but not
 writable/deletable without `sudo`. Not fixed, just a known wrinkle; would
 need `--user $(id -u):$(id -g)` on the `docker run` if it ever becomes
 annoying enough to matter (e.g. for `ec eval gc`-style cleanup tooling).
+
+## The frozen start anchor made the policy chase a phantom offset (2026-09-11)
+
+`fixed_initial_anchor` froze the encoder anchor's translation at the
+reference start frame; on a moving reference the window then carried the
+robot's own displacement as "tracking error", which doubled the commanded
+target dither and walked the robot off (Part 4/5 of
+`docs/evidence/isaac_replay_20260910/REPORT.md`). Since 2026-09-11 the
+lifecycle job's `live_anchor` (default on) moves the translation with the
+robot: `anchor_position_source: auto` takes `rt/odommodestate` when it is on
+the wire at capture, else kinematic leg odometry from the job's `mjcf`, else
+the old frozen start. Rehearsals therefore need `mjcf` (the rehearse plan
+always sets it); a hardware job without odometry and without `mjcf` silently
+runs the old behaviour, and lifecycle.jsonl's `anchor_position_source` says
+which one you got. `live_anchor: false` is the anchor-blind `expert_heading`
+window and only makes sense for a policy trained that way.

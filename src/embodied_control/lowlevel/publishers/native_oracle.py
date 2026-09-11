@@ -58,8 +58,10 @@ class NativeOracleWorker:
             ) from exc
         command = bundle.manifest.command
         interface = command.encoder_state_interface
+        # The worker streams raw world frames; the control thread anchors
+        # them (robot, robot heading, or the window's own first frame).
         expected_anchor = {
-            "root_qpos": {"robot", "robot_heading"},
+            "root_qpos": {"robot", "robot_heading", "expert_heading"},
             "joint_qpos_qvel_anchor_ori": {"robot_heading"},
         }.get(interface)
         expected_width = {

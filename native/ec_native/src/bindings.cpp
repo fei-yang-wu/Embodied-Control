@@ -16,6 +16,7 @@
 #include <pybind11/stl.h>
 
 #include "native_tracker_core.hpp"
+#include "leg_odometry.hpp"
 #include "native_fake_runtime.hpp"
 #include "shm_command_slot.hpp"
 #ifdef EC_WITH_UNITREE
@@ -24,6 +25,7 @@
 #include "plant_vendor.hpp"
 #include "unitree_backend.hpp"
 #include "unitree_state_probe.hpp"
+#include "odometry_probe.hpp"
 #endif
 
 #define STRINGIFY(x) #x
@@ -155,6 +157,67 @@ ec_native::NativePlannerConfig::EncoderTrigger encoder_trigger(
   }
   throw std::runtime_error("unsupported encoder trigger: " + value);
 }
+
+ec_native::NativePlannerConfig::AnchorSource anchor_source(
+    const std::string& value) {
+  if (value == "robot") {
+    return ec_native::NativePlannerConfig::AnchorSource::kRobot;
+  }
+  if (value == "expert_heading") {
+    return ec_native::NativePlannerConfig::AnchorSource::kExpertHeading;
+  }
+  throw std::runtime_error("unsupported anchor source: " + value);
+}
+
+#ifdef EC_WITH_UNITREE
+ec_native::AnchorPositionSource anchor_position_source(
+    const std::string& value) {
+  if (value == "fixed_start") {
+    return ec_native::AnchorPositionSource::kFixedStart;
+  }
+  if (value == "odometry") {
+    return ec_native::AnchorPositionSource::kOdometry;
+  }
+  if (value == "leg_kinematics") {
+    return ec_native::AnchorPositionSource::kLegKinematics;
+  }
+  if (value == "auto") {
+    return ec_native::AnchorPositionSource::kAuto;
+  }
+  throw std::runtime_error("unsupported anchor position source: " + value);
+}
+#endif
+
+class LegOdometryBinding {
+ public:
+  LegOdometryBinding(const std::string& mjcf_path,
+                     const std::vector<std::string>& isaac_joint_names,
+                     float contact_threshold_m)
+      : odometry_(mjcf_path, isaac_joint_names, contact_threshold_m) {}
+
+  void reset() { odometry_.reset(); }
+
+  py::array_t<float> update(const FloatArray& joint_position,
+                            const FloatArray& quaternion_xyzw) {
+    const auto q = vector_from_array(joint_position, ec_native::kJointCount,
+                                     "joint_position");
+    const auto quaternion =
+        vector_from_array(quaternion_xyzw, 4, "quaternion_xyzw");
+    std::array<float, 3> position{};
+    if (!odometry_.update(q, quaternion, position)) {
+      throw std::runtime_error("leg odometry rejected a non-finite input");
+    }
+    py::array_t<float> out(3);
+    std::copy(position.begin(), position.end(), out.mutable_data());
+    return out;
+  }
+
+  int stance_foot() const { return odometry_.stance_foot(); }
+  std::uint64_t stance_switches() const { return odometry_.stance_switches(); }
+
+ private:
+  ec_native::LegOdometry odometry_;
+};
 
 class ShmCommandSlot {
  public:
@@ -363,6 +426,10 @@ class NativeFakeRuntimeBinding {
         tracker.core(), response_slot, request_slot, create_slots, scheduler,
         planner, encoder_path, encoder_input_name, encoder_output_name,
         encoder_input_width, encoder_output_width);
+  }
+
+  void set_anchor_source(const std::string& value) {
+    runtime_->set_anchor_source(anchor_source(value));
   }
 
   void start(std::size_t max_ticks, bool paced) {
@@ -764,6 +831,16 @@ class NativeUnitreeRuntimeBinding : public NativeFakeRuntimeBinding {
     result["blend_ticks_remaining"] = stats.blend_ticks_remaining;
     result["anchor_yaw_offset_degrees"] = stats.anchor_yaw_offset_degrees;
     result["anchor_heading_captured"] = stats.anchor_heading_captured;
+    static const char* const kAnchorPositionSources[] = {
+        "fixed_start", "odometry", "leg_kinematics", "auto"};
+    result["anchor_position_source"] =
+        stats.anchor_position_source < 4
+            ? kAnchorPositionSources[stats.anchor_position_source]
+            : "unknown";
+    result["odometry_frames"] = stats.odometry_frames;
+    result["odometry_stale_ticks"] = stats.odometry_stale_ticks;
+    result["anchor_displacement_max"] = stats.anchor_displacement_max;
+    result["leg_odometry_stance_switches"] = stats.leg_odometry_stance_switches;
     result["mode"] = static_cast<std::uint32_t>(stats.mode);
     result["writes_enabled"] = stats.writes_enabled;
     result["realtime_configured"] = stats.realtime_configured;
@@ -861,6 +938,18 @@ class NativeUnitreeRuntimeBinding : public NativeFakeRuntimeBinding {
           py::cast<std::vector<float>>(config["fixed_anchor_position"]),
           py::cast<std::vector<float>>(config["fixed_anchor_quaternion"]));
     }
+    if (config.contains("anchor_position_source")) {
+      const std::vector<std::string> isaac_joint_names =
+          config.contains("isaac_joint_names")
+              ? py::cast<std::vector<std::string>>(config["isaac_joint_names"])
+              : std::vector<std::string>{};
+      backend->configure_live_anchor(
+          anchor_position_source(
+              config_value<std::string>(config, "anchor_position_source")),
+          config_value_or<std::string>(config, "odometry_topic", ""),
+          config_value_or<std::string>(config, "odometry_mjcf", ""),
+          isaac_joint_names);
+    }
     ec_native::NativeUnitreeBackend* backend_pointer = backend.get();
     ec_native::NativeSchedulerConfig scheduler{
         .control_hz = config_value<std::size_t>(config, "control_hz"),
@@ -907,6 +996,8 @@ class NativeUnitreeRuntimeBinding : public NativeFakeRuntimeBinding {
         config_value<std::string>(config, "encoder_output_name"),
         config_value<std::size_t>(config, "encoder_input_width"),
         config_value<std::size_t>(config, "encoder_output_width"));
+    runtime->set_anchor_source(anchor_source(
+        config_value_or<std::string>(config, "anchor_source", "robot")));
     return BuildResult{std::move(runtime), backend_pointer};
   }
 
@@ -955,6 +1046,9 @@ class MujocoDdsPlantBinding {
   }
 
   void start() { plant_.start(); }
+  void publish_odometry(const std::string& topic) {
+    plant_.publish_odometry(topic);
+  }
   void stop() { plant_.stop(); }
   void wait_for_stop() {
     py::gil_scoped_release release;
@@ -1150,6 +1244,18 @@ PYBIND11_MODULE(_ec_native, m) {
       .def("warmup", &OnnxEngineBinding::warmup, py::arg("iterations") = 8)
       .def("infer", &OnnxEngineBinding::infer, py::arg("input"));
 
+  py::class_<LegOdometryBinding>(m, "LegOdometry")
+      .def(py::init<const std::string&, const std::vector<std::string>&,
+                    float>(),
+           py::arg("mjcf_path"), py::arg("isaac_joint_names"),
+           py::arg("contact_threshold_m") = 0.005F)
+      .def("reset", &LegOdometryBinding::reset)
+      .def("update", &LegOdometryBinding::update, py::arg("joint_position"),
+           py::arg("quaternion_xyzw"))
+      .def_property_readonly("stance_foot", &LegOdometryBinding::stance_foot)
+      .def_property_readonly("stance_switches",
+                             &LegOdometryBinding::stance_switches);
+
   py::class_<NativeFakeRuntimeBinding>(m, "NativeFakeRuntime")
       .def(py::init<
                NativeTrackerCoreBinding&, const std::string&,
@@ -1185,6 +1291,8 @@ PYBIND11_MODULE(_ec_native, m) {
            py::keep_alive<1, 2>())
       .def("start", &NativeFakeRuntimeBinding::start,
            py::arg("max_ticks"), py::arg("paced") = true)
+      .def("set_anchor_source", &NativeFakeRuntimeBinding::set_anchor_source,
+           py::arg("source"))
       .def("stop", &NativeFakeRuntimeBinding::stop)
       .def("set_reference_paused",
            [](NativeFakeRuntimeBinding& self, bool paused) {
@@ -1350,6 +1458,34 @@ PYBIND11_MODULE(_ec_native, m) {
       .def("shake_hand", &ec_native::G1LocoClient::shake_hand,
            py::arg("stage") = -1, py::call_guard<py::gil_scoped_release>());
 
+  py::class_<ec_native::OdometryProbe>(m, "OdometryProbe")
+      .def(py::init<const std::string&, const std::string&, int>(),
+           py::arg("network_interface"), py::arg("topic") = "rt/odommodestate",
+           py::arg("dds_domain") = 0)
+      .def("wait_for_frames",
+           [](const ec_native::OdometryProbe& probe, std::uint64_t count,
+              double timeout_seconds) {
+             py::gil_scoped_release release;
+             return probe.wait_for_frames(count, timeout_seconds);
+           },
+           py::arg("count"), py::arg("timeout_seconds"))
+      .def("snapshot", [](const ec_native::OdometryProbe& probe) {
+        const auto s = probe.snapshot();
+        py::dict out;
+        out["frames"] = s.frames;
+        out["nonfinite_frames"] = s.nonfinite_frames;
+        out["first_receive_ns"] = s.first_receive_ns;
+        out["last_receive_ns"] = s.last_receive_ns;
+        out["max_gap_ns"] = s.max_gap_ns;
+        out["first_position"] = std::vector<float>(s.first_position.begin(), s.first_position.end());
+        out["position"] = std::vector<float>(s.position.begin(), s.position.end());
+        out["velocity"] = std::vector<float>(s.velocity.begin(), s.velocity.end());
+        out["quaternion_wxyz"] = std::vector<float>(s.quaternion_wxyz.begin(), s.quaternion_wxyz.end());
+        out["error_code"] = s.error_code;
+        out["mode"] = static_cast<std::uint32_t>(s.mode);
+        return out;
+      });
+
   py::class_<ec_native::UnitreeStateProbe>(m, "UnitreeStateProbe")
       .def(py::init<const std::string&, int, std::size_t>(),
            py::arg("network_interface"), py::arg("dds_domain") = 0,
@@ -1482,6 +1618,8 @@ PYBIND11_MODULE(_ec_native, m) {
            py::arg("hoist_enabled") = false,
            py::arg("hoist_clearance") = ec_native::kDefaultHoistClearanceMeters)
       .def("start", &MujocoDdsPlantBinding::start)
+      .def("publish_odometry", &MujocoDdsPlantBinding::publish_odometry,
+           py::arg("topic"))
       .def("hoist", &MujocoDdsPlantBinding::hoist)
       .def("lower", &MujocoDdsPlantBinding::lower)
       .def("slack", &MujocoDdsPlantBinding::slack)

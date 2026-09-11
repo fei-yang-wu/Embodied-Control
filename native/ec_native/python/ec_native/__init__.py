@@ -3,6 +3,7 @@ from __future__ import annotations
 from . import _ec_native
 from ._ec_native import (
     MAX_VALUES,
+    LegOdometry,
     NativeFakeRuntime,
     NativeMujocoRuntime,
     NativeTrackerCore,
@@ -19,6 +20,7 @@ from ._ec_native import (
 
 __all__ = [
     "MAX_VALUES",
+    "LegOdometry",
     "NativeFakeRuntime",
     "NativeMujocoRuntime",
     "NativeTrackerCore",
@@ -39,6 +41,7 @@ if WITH_UNITREE:
     PlantClient = _ec_native.PlantClient
     NativeUnitreeRuntime = _ec_native.NativeUnitreeRuntime
     UnitreeStateProbe = _ec_native.UnitreeStateProbe
+    OdometryProbe = _ec_native.OdometryProbe
     __all__.extend(
         [
             "G1LocoClient",

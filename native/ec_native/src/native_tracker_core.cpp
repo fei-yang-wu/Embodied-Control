@@ -359,7 +359,6 @@ NativeTrackerCore::NativeTrackerCore(
     }
     std::copy(joint_lower.begin(), joint_lower.end(), joint_lower_.begin());
     std::copy(joint_upper.begin(), joint_upper.end(), joint_upper_.begin());
-    clamp_joint_targets_ = true;
   }
   if (fsq_z_dim_ > command_width_ ||
       fsq_half_levels_.size() != fsq_z_dim_ ||
@@ -531,11 +530,11 @@ const StepResult& NativeTrackerCore::step(const RobotState& state,
             ? std::clamp(action[index], -raw_action_clip_, raw_action_clip_)
             : action[index];
     result_.action[index] = clipped_action;
-    float target = default_joint_position_[index] +
-                   action_scale_[index] * clipped_action;
-    if (clamp_joint_targets_) {
-      target = std::clamp(target, joint_lower_[index], joint_upper_[index]);
-    }
+    // Not clamped to the joint limits: the training simulator applies
+    // default + scale * action verbatim, and a target past the range is a
+    // torque request through the PD law. See ActionContract.decode.
+    const float target = default_joint_position_[index] +
+                         action_scale_[index] * clipped_action;
     result_.joint_target[index] = target;
     last_action_[index] = clipped_action;
   }

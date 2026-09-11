@@ -144,7 +144,6 @@ class NativeTrackerCore {
   std::array<float, kJointCount> action_scale_{};
   std::array<float, kJointCount> joint_lower_{};
   std::array<float, kJointCount> joint_upper_{};
-  bool clamp_joint_targets_ = false;
   std::vector<float> fsq_half_levels_;
   std::size_t fsq_z_dim_ = 0;
   float raw_action_clip_ = 0.0F;

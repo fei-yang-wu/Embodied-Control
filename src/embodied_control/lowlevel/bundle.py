@@ -126,17 +126,17 @@ class ActionContract(BundleModel):
             )
         if self.raw_action_clip is not None:
             action = np.clip(action, -self.raw_action_clip, self.raw_action_clip)
+        # The target is NOT clamped to the joint limits. The policy was trained
+        # against a simulator that applies `default + scale * action` verbatim;
+        # a target past the joint range is a deliberate torque request through
+        # the PD law (kp * error), not a position the joint will reach. Clamping
+        # it changed the closed loop on every foot-transfer motion (ankle pitch
+        # targets of 1.27 rad capped at 0.45 rad; 1.9 m drift against 0.02 m in
+        # Isaac -- docs/evidence/isaac_replay_20260910/REPORT.md). The limits
+        # stay in the contract for the writer's measured-position fault check.
         q_target = np.asarray(
             self.default_joint_pos, dtype=np.float32
         ) + action * np.asarray(self.action_scale, dtype=np.float32)
-        if self.joint_limits_lower is not None:
-            q_target = np.maximum(
-                q_target, np.asarray(self.joint_limits_lower, dtype=np.float32)
-            )
-        if self.joint_limits_upper is not None:
-            q_target = np.minimum(
-                q_target, np.asarray(self.joint_limits_upper, dtype=np.float32)
-            )
         kp = np.asarray(self.stiffness, dtype=np.float32)
         kd = np.asarray(self.damping, dtype=np.float32)
         return q_target, kp, kd

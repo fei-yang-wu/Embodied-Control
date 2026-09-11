@@ -15,6 +15,7 @@
 #include <unitree/dds_wrapper/common/crc.h>
 #include <unitree/idl/hg/LowCmd_.hpp>
 #include <unitree/idl/hg/LowState_.hpp>
+#include <unitree/idl/go2/SportModeState_.hpp>
 #include <unitree/robot/channel/channel_factory.hpp>
 #include <unitree/robot/channel/channel_publisher.hpp>
 #include <unitree/robot/channel/channel_subscriber.hpp>
@@ -26,6 +27,7 @@ namespace {
 
 using LowCmd = unitree_hg::msg::dds_::LowCmd_;
 using LowState = unitree_hg::msg::dds_::LowState_;
+using OdometryState = unitree_go::msg::dds_::SportModeState_;
 
 // [pos 3 | quat XYZW 4 | joint q 29]
 constexpr std::size_t kPlantStateRow = 7 + kJointCount;
@@ -96,6 +98,8 @@ struct MujocoDdsPlant::Impl {
   ChannelPublisherPtr<LowState> publisher;
   ChannelSubscriberPtr<LowCmd> subscriber;
   LowState state_message{};
+  ChannelPublisherPtr<OdometryState> odometry_publisher;
+  OdometryState odometry_message{};
   std::array<float, kJointCount> applied_stiffness{};
   std::array<float, kJointCount> applied_damping{};
 
@@ -248,6 +252,15 @@ MujocoDdsPlant::MujocoDdsPlant(
     dof_address_[actuator] = dof;
     model->dof_armature[dof] = armature[sdk];
     model->dof_damping[dof] = 0.0;
+    // Stiff joint limits, as Isaac Lab's Newton/MJWarp model carries them
+    // (solreflimit -10000 -10, solimplimit 0.9 0.95 0.001); the vendor
+    // MJCF's soft default lets a driven ankle overshoot its hard range and
+    // trip the writer's measured-position guard.
+    model->jnt_solref[2 * joint] = -10000.0;
+    model->jnt_solref[2 * joint + 1] = -10.0;
+    model->jnt_solimp[mjNIMP * joint] = 0.9;
+    model->jnt_solimp[mjNIMP * joint + 1] = 0.95;
+    model->jnt_solimp[mjNIMP * joint + 2] = 0.001;
     model->dof_frictionloss[dof] = 0.0;
     model->actuator_forcelimited[actuator] = 1;
     model->actuator_forcerange[2 * actuator] = -effort_limit[sdk];
@@ -615,6 +628,19 @@ std::vector<float> MujocoDdsPlant::hoist_log() const {
   return {hoist_log_.begin(), hoist_log_.begin() + static_cast<std::ptrdiff_t>(rows * 9)};
 }
 
+void MujocoDdsPlant::publish_odometry(const std::string& topic) {
+  if (running()) {
+    throw std::runtime_error("publish_odometry must be set before start");
+  }
+  if (topic.empty()) {
+    impl_->odometry_publisher.reset();
+    return;
+  }
+  impl_->odometry_publisher =
+      std::make_shared<ChannelPublisher<OdometryState>>(topic);
+  impl_->odometry_publisher->InitChannel();
+}
+
 void MujocoDdsPlant::publish_low_state() noexcept {
   const mjData* data = impl_->data;
   LowState& message = impl_->state_message;
@@ -739,6 +765,23 @@ void MujocoDdsPlant::publish_low_state() noexcept {
     publishes_.fetch_add(1, std::memory_order_relaxed);
   } else {
     publish_failures_.fetch_add(1, std::memory_order_relaxed);
+  }
+  if (impl_->odometry_publisher) {
+    OdometryState& odometry = impl_->odometry_message;
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+      odometry.position()[axis] = static_cast<float>(data->qpos[axis]);
+      odometry.velocity()[axis] = static_cast<float>(data->qvel[axis]);
+    }
+    odometry.imu_state().quaternion() = {
+        static_cast<float>(data->qpos[3]), static_cast<float>(data->qpos[4]),
+        static_cast<float>(data->qpos[5]), static_cast<float>(data->qpos[6])};
+    odometry.stamp().sec() = static_cast<std::int32_t>(data->time);
+    odometry.stamp().nanosec() = static_cast<std::uint32_t>(
+        (data->time - static_cast<double>(odometry.stamp().sec())) * 1e9);
+    try {
+      impl_->odometry_publisher->Write(odometry);
+    } catch (...) {
+    }
   }
   simulation_time_.store(data->time, std::memory_order_relaxed);
   const float height = static_cast<float>(data->qpos[2]);

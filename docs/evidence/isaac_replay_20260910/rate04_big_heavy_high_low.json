@@ -1,0 +1,116 @@
+{
+  "trace": "../../logs/isaac_replay/rate04_66500m_big_heavy_high_low.npz",
+  "bundle": "assets/models/controller/action01rate04_66500m_ect",
+  "motion": "big_heavy_one_hand_front_high_to_front_low_R_001_A524",
+  "steps": 419,
+  "default_joint_pos_max_diff_isaac_vs_bundle": 0.0,
+  "window_slots": 10,
+  "stages": [
+    {
+      "stage": "window[pelvis] vs isaac",
+      "max_abs": 3.427267074584961e-07,
+      "mean_abs": 7.214307206544425e-09,
+      "p95_abs": 5.960464477539063e-08,
+      "signal_rms": 0.5467809438705444,
+      "slot0_qpos_max": 0.0,
+      "slot0_anchor_pos_max": 2.9802322387695312e-08,
+      "slot0_rot6d_max": 3.203749656677246e-07
+    },
+    {
+      "stage": "window[torso_link] vs isaac",
+      "max_abs": 0.49321767687797546,
+      "mean_abs": 0.018446499600146514,
+      "p95_abs": 0.11628134846687288,
+      "signal_rms": 0.5467809438705444,
+      "slot0_qpos_max": 0.0,
+      "slot0_anchor_pos_max": 0.044175565242767334,
+      "slot0_rot6d_max": 0.4932175874710083
+    },
+    {
+      "stage": "z: EC encoder on ISAAC window vs isaac z",
+      "max_abs": 9.5367431640625e-07,
+      "mean_abs": 1.4385212446742987e-07,
+      "p95_abs": 3.5762786865234375e-07,
+      "signal_rms": 0.755180835723877
+    },
+    {
+      "stage": "z: EC encoder on EC window[pelvis] vs isaac z",
+      "max_abs": 5.036592483520508e-06,
+      "mean_abs": 4.3529503479230983e-07,
+      "p95_abs": 1.2088567018508911e-06,
+      "signal_rms": 0.755180835723877
+    },
+    {
+      "stage": "z: EC encoder on EC window[torso_link] vs isaac z",
+      "max_abs": 1.495535969734192,
+      "mean_abs": 0.23903136231858302,
+      "p95_abs": 0.6248222589492798,
+      "signal_rms": 0.755180835723877
+    },
+    {
+      "stage": "obs: EC assembler vs isaac terms",
+      "max_abs": 0.0,
+      "mean_abs": 0.0,
+      "p95_abs": 0.0,
+      "signal_rms": 0.9388425350189209,
+      "per_term": {
+        "latent_command": {
+          "stage": "obs[latent_command]",
+          "max_abs": 0.0,
+          "mean_abs": 0.0,
+          "p95_abs": 0.0,
+          "signal_rms": 0.753769040107727
+        },
+        "projected_gravity": {
+          "stage": "obs[projected_gravity]",
+          "max_abs": 0.0,
+          "mean_abs": 0.0,
+          "p95_abs": 0.0,
+          "signal_rms": 0.5773503184318542
+        },
+        "base_ang_vel": {
+          "stage": "obs[base_ang_vel]",
+          "max_abs": 0.0,
+          "mean_abs": 0.0,
+          "p95_abs": 0.0,
+          "signal_rms": 0.29422473907470703
+        },
+        "joint_pos_rel": {
+          "stage": "obs[joint_pos_rel]",
+          "max_abs": 0.0,
+          "mean_abs": 0.0,
+          "p95_abs": 0.0,
+          "signal_rms": 0.46871060132980347
+        },
+        "joint_vel_rel": {
+          "stage": "obs[joint_vel_rel]",
+          "max_abs": 0.0,
+          "mean_abs": 0.0,
+          "p95_abs": 0.0,
+          "signal_rms": 0.5752518177032471
+        },
+        "last_action": {
+          "stage": "obs[last_action]",
+          "max_abs": 0.0,
+          "mean_abs": 0.0,
+          "p95_abs": 0.0,
+          "signal_rms": 1.5178571939468384
+        }
+      }
+    },
+    {
+      "stage": "action: EC policy on ISAAC obs vs isaac action",
+      "max_abs": 1.430511474609375e-06,
+      "mean_abs": 9.922582495802175e-08,
+      "p95_abs": 2.980232238769531e-07,
+      "signal_rms": 1.5219706296920776
+    },
+    {
+      "stage": "action: EC policy on EC obs vs isaac action",
+      "max_abs": 1.430511474609375e-06,
+      "mean_abs": 9.922582495802175e-08,
+      "p95_abs": 2.980232238769531e-07,
+      "signal_rms": 1.5219706296920776
+    }
+  ]
+}

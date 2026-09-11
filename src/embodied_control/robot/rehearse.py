@@ -72,6 +72,11 @@ class RehearsePlan:
     video: bool = True
     offline: bool = True
     plant_noise: str = "training"
+    # Serve the plant's true pelvis position on this odometry topic (the G1
+    # message layout), so the controller's odometry anchor path runs against
+    # a perfect estimator. Empty: the controller falls back to its own leg
+    # odometry, the sim stand-in for the vendor estimator.
+    plant_odometry: str = ""
 
 
 # ------------------------------------------------------------------ jobs
@@ -200,6 +205,7 @@ def run_episode(
     video: bool = True,
     offline: bool = True,
     plant_noise: str = "training",
+    plant_odometry: str = "",
 ) -> dict:
     """One motion, one seed, one plant: the operator's keys, unattended.
 
@@ -224,6 +230,9 @@ def run_episode(
         "dds_domain": domain, "frames": frames, "started_at": time.time(),
         "passed": False, "failure_stage": "plant_start", "directory": str(run),
         "plant_noise": plant_noise,
+        "plant_odometry": plant_odometry,
+        "live_anchor": job.live_anchor,
+        "anchor_position_source": job.anchor_position_source,
     }
     plant_log = run / "plant.log"
     with plant_log.open("w") as stream:
@@ -236,6 +245,7 @@ def run_episode(
                 "--physics-cpu", str(cores[2] if len(cores) > 2 else -1),
                 "--seconds", f"{budget:.0f}", "--report", str(run / "plant.json"),
                 *plant_noise_argv(plant_noise),
+                *(["--odometry-topic", plant_odometry] if plant_odometry else []),
             ],
             stdout=stream, stderr=subprocess.STDOUT,
         )
@@ -413,6 +423,8 @@ def _worker_argv(plan: RehearsePlan, job_path: Path, seed: int, domain: int, cor
     if not plan.offline:
         argv.append("--fetch")
     argv += ["--plant-noise", plan.plant_noise]
+    if plan.plant_odometry:
+        argv += ["--plant-odometry", plan.plant_odometry]
     return argv
 
 

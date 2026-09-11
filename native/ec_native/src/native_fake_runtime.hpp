@@ -96,6 +96,15 @@ struct NativePlannerConfig {
     kOnAcceptance,
     kEveryControlTick,
   } encoder_trigger = EncoderTrigger::kOnAcceptance;
+  // Which pose the encoder window is expressed against. kRobot is the live
+  // robot anchor (training's `robot_heading`: the window carries the current
+  // tracking error). kExpertHeading is the window's own first frame
+  // (training's `expert_heading`: every window sits at its origin, the
+  // robot's position never enters, so no localization is needed).
+  enum class AnchorSource {
+    kRobot,
+    kExpertHeading,
+  } anchor_source = AnchorSource::kRobot;
 };
 
 struct NativeSchedulerConfig {
@@ -151,6 +160,12 @@ class NativeFakeRuntime {
   void stop() noexcept;
   void wait();
   bool running() const noexcept { return running_.load(); }
+  // Before start only: how the encoder window is anchored (see
+  // NativePlannerConfig::AnchorSource).
+  void set_anchor_source(NativePlannerConfig::AnchorSource source);
+  NativePlannerConfig::AnchorSource anchor_source() const noexcept {
+    return planner_.anchor_source;
+  }
 
   void set_initial_pose(std::span<const float> pose);
   NativeRuntimeStats stats() const noexcept;

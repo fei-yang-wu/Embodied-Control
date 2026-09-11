@@ -258,6 +258,15 @@ def build_tracker(job, args, bundle, selection):
         damping_scale=job.gain_scale.damping,
         plan_slots=job.planner.vla_plan_slots if selection.mode == "vla" else 1,
         latent_plan=selection.mode == "vla" and job.planner.vla_reply == "latent_plan",
+        anchor_source="robot" if job.live_anchor else "expert_heading",
+        anchor_position_source=job.anchor_position_source,
+        odometry_topic=job.odometry_topic,
+        odometry_mjcf=job.mjcf,
+    )
+    print(
+        "Encoder anchor: "
+        + (f"live robot, translation source {job.anchor_position_source}"
+           if job.live_anchor else "expert heading (window's own first frame)")
     )
     return runtime, start_pose, reference_gravity, ticks
 
@@ -287,6 +296,7 @@ def run_identity_for(job, bundle, network: str, selection=None, ticks=None) -> d
     deployment = {key: getattr(job, key) for key in (
         "start_pose", "fixed_initial_anchor", "pin_reference", "ramp_seconds", "lead_ticks",
         "blend_ticks", "play_countdown_seconds", "arm_timeout_seconds", "stand_hold_seconds",
+        "live_anchor", "anchor_position_source",
     )}
     deployment["gain_scale"] = job.gain_scale.model_dump()
     deployment["rehearsal_hoist_contract"] = "g1_shoulder_straps_v1"

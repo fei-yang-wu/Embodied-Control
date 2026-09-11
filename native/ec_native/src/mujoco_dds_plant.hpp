@@ -104,6 +104,12 @@ class MujocoDdsPlant {
                  bool hoist_enabled = false,
                  double hoist_clearance = kDefaultHoistClearanceMeters);
   ~MujocoDdsPlant();
+  // Before start: also serve the true pelvis position on `topic` with the
+  // G1's odometry message layout (unitree_go SportModeState_.position), so
+  // a rehearsal can exercise the controller's odometry anchor path against
+  // a perfect estimator. Empty: no odometry on the wire (the default; a
+  // rehearsal then exercises the controller's own leg odometry).
+  void publish_odometry(const std::string& topic);
 
   MujocoDdsPlant(const MujocoDdsPlant&) = delete;
   MujocoDdsPlant& operator=(const MujocoDdsPlant&) = delete;

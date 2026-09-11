@@ -325,7 +325,13 @@ class LifecycleConfig:
     # 3x, not 1x: the wrists' 5 N m limit saturates on any real command
     # (1.4x on the plant with the SONIC bundle) and the policy was trained
     # with that clipping. A wrong joint order or frame shows up far higher.
-    first_action_rad: float = 2.5
+    # The distance gate on the first target is disabled by default (2 pi):
+    # a target far from the held pose is a torque request through the PD law
+    # (Isaac applies default + scale * action verbatim, see
+    # ActionContract.decode), so distance alone says nothing about safety. The
+    # torque-ratio gate below (kp * error against the effort limit) is the
+    # physical bound and stays.
+    first_action_rad: float = 6.2832
     first_action_torque_ratio: float = 3.0
     stiffness: list[float] | None = None
     effort_limit: list[float] | None = None
@@ -886,6 +892,10 @@ class Lifecycle:
             # The boot heading the fixed anchor absorbed, so a run's evidence
             # says which way the robot was facing when it started.
             "anchor_yaw_offset_degrees", "anchor_heading_captured",
+            # Live anchor: which translation estimate the episode settled on,
+            # how far it walked, and whether the odometry topic went quiet.
+            "anchor_position_source", "odometry_frames", "odometry_stale_ticks",
+            "anchor_displacement_max", "leg_odometry_stance_switches",
         )
         values = {k: ws[k] for k in keys if k in ws}
         try:

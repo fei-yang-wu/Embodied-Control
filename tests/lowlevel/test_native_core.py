@@ -515,7 +515,10 @@ def test_native_onnx_engine_rejects_non_float32_contract(tmp_path):
         ec_native.OnnxEngine(str(path), "obs", "action", 101, 29)
 
 
-def test_native_step_clamps_joint_targets_to_bundle_limits(tmp_path, latent_manifest):
+def test_native_step_does_not_clamp_joint_targets_to_bundle_limits(tmp_path, latent_manifest):
+    # A target past the joint range is a torque request through the PD law,
+    # exactly what the training simulator receives; the limits in the contract
+    # feed the writer's measured-position fault, not the target.
     action = latent_manifest.action.model_copy(
         update={
             "joint_limits_lower": [-0.2] * 29,
@@ -525,9 +528,11 @@ def test_native_step_clamps_joint_targets_to_bundle_limits(tmp_path, latent_mani
     manifest = latent_manifest.model_copy(update={"action": action})
     tracker = NativeTracker(_native_bundle(tmp_path, manifest))
     result = tracker.step_once(_state(), np.full(8, 10.0, dtype=np.float32))
-    assert np.all(result["joint_target"] >= -0.2)
-    assert np.all(result["joint_target"] <= 0.2)
-    assert result["joint_target"][0] == pytest.approx(0.2)
+    expected = np.asarray(action.default_joint_pos, dtype=np.float32) + np.asarray(
+        action.action_scale, dtype=np.float32
+    ) * result["action"]
+    np.testing.assert_allclose(result["joint_target"], expected, atol=1e-6)
+    assert np.any(np.abs(result["joint_target"]) > 0.2)
 
 
 def test_native_onnx_engine_replays_bundle_trace(tmp_path, latent_manifest):
@@ -1276,3 +1281,63 @@ def test_native_root_qpos_heading_keeps_height_and_reference_tilt():
     np.testing.assert_allclose(actual[:, 29:32], np.tile(expected_pos, (10, 1)), atol=1e-6)
     np.testing.assert_allclose(actual[:, 32:], np.tile(rot6d_from_quat(expected_rot), (10, 1)), atol=1e-6)
     np.testing.assert_allclose(actual[:, 31], 0.85, atol=1e-6)
+
+
+def test_native_oracle_expert_heading_anchor_encodes_without_a_robot_anchor(
+    tmp_path, latent_manifest
+):
+    """`expert_heading` anchors the window at its own first frame: the
+    encoder runs every tick and the loop's own anchor never enters."""
+    command = latent_manifest.command.model_copy(
+        update={
+            "state_dim": 38,
+            "encoder_state_interface": "root_qpos",
+            "macro_anchor_mode": "expert_heading",
+            "macro_frame_stride": 1,
+            "encoder_trigger": "every_control_tick",
+        }
+    )
+    manifest = latent_manifest.model_copy(update={"command": command})
+    bundle = _native_bundle(tmp_path, manifest, with_encoder=True)
+    reference_root = tmp_path / "reference_expert"
+    qpos, anchor_pos, anchor_quat = _write_reference_tree(
+        reference_root, bundle.manifest.action.isaac_joint_names, frames=60
+    )
+    request_name = _shm_name("oracle_expert_request")
+    response_name = _shm_name("oracle_expert_response")
+    worker = NativeOracleWorker(
+        request_name, response_name, bundle, reference_root, "motion", create_slots=True,
+    )
+    worker.start()
+    loop = NativeFakeLoop(
+        bundle,
+        request_slot=request_name,
+        response_slot=response_name,
+        create_slots=False,
+        command_source="oracle",
+        hold_steps=1,
+        lead_ticks=0,
+        command_stale_ms=1000.0,
+    )
+    assert loop.anchor_source == "expert_heading"
+    # The fake backend's pose is nowhere near the reference; the encoder
+    # must not care.
+    loop.set_initial_pose(np.concatenate([[40.0, -40.0, 0.9], [0, 0, 0, 1], qpos[0, 7:]]))
+    try:
+        loop.start(12, paced=True)
+        loop.wait()
+    finally:
+        worker.close()
+    stats = loop.stats()
+    assert worker.last_error is None
+    assert stats["fault"] == 0
+    assert stats["control_ticks"] == 12
+    assert stats["encoder_inferences"] == 12
+    with pytest.raises(RuntimeError):
+        loop._runtime.set_anchor_source("robot") if loop._runtime.running else (_ for _ in ()).throw(RuntimeError())
+
+
+def test_native_loop_anchor_source_must_match_the_contract(tmp_path, latent_manifest):
+    bundle = _native_bundle(tmp_path, latent_manifest, with_encoder=True)
+    with pytest.raises(ValueError):
+        NativeFakeLoop(bundle, response_slot=_shm_name("bad_anchor"), anchor_source="pelvis")

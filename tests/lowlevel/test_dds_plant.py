@@ -494,3 +494,78 @@ def test_plant_publishes_sensor_noise_on_the_wire(tmp_path):
     # Both plants hold the same uncommanded pose; noise rides on the wire, not
     # on the physics, so the simulated robot still stands.
     assert noisy_stats["min_base_height"] > 0.5
+
+
+@pytest.mark.parametrize(
+    "plant_odometry, source, expected",
+    [
+        ("rt/odommodestate", "auto", "odometry"),
+        ("rt/odommodestate", "odometry", "odometry"),
+        ("", "auto", "leg_kinematics"),
+        ("", "fixed_start", "fixed_start"),
+    ],
+)
+def test_live_anchor_settles_on_the_available_translation_source(
+    tmp_path, latent_manifest, plant_odometry, source, expected
+):
+    """The plant either serves the G1 odometry message or not; the controller's
+    live anchor settles on odometry, its own leg kinematics, or the frozen
+    start accordingly, and says so in writer_stats."""
+    from test_native_core import _write_reference_tree
+    from embodied_control.lowlevel.publishers.native_oracle import NativeOracleWorker
+
+    command = latent_manifest.command.model_copy(update={
+        "state_dim": 38, "encoder_state_interface": "root_qpos", "macro_anchor_mode": "robot_heading",
+    })
+    bundle = _g1_bundle(
+        tmp_path, latent_manifest.model_copy(update={"command": command}), with_encoder=True,
+    )
+    reference_root = tmp_path / "reference"
+    _write_reference_tree(reference_root, bundle.manifest.action.isaac_joint_names)
+    request_slot, response_slot = _shm_name("odom_request"), _shm_name("odom_response")
+    worker = NativeOracleWorker(
+        request_slot, response_slot, bundle, reference_root, "motion", create_slots=True,
+    )
+    worker.start()
+    report_path = tmp_path / "odom.json"
+    quiet = ["--noise-joint-pos", "0", "--noise-joint-vel", "0",
+             "--noise-base-ang-vel", "0", "--noise-imu-tilt-rad", "0"]
+    extra = ["--freeze-until-command", *quiet]
+    if plant_odometry:
+        extra += ["--odometry-topic", plant_odometry]
+    process = _spawn_plant(_g1_mjcf_path(), 30, report_path, extra=extra)
+    runtime = None
+    try:
+        runtime = NativeUnitreeLoop(
+            bundle, "lo", response_slot=response_slot, request_slot=request_slot,
+            command_source="oracle", create_slots=False,
+            fixed_anchor_position=np.array([1, 2, 0.9], dtype=np.float32),
+            fixed_anchor_quaternion=np.array([0, 0, 0, 1], dtype=np.float32),
+            writes_enabled=False, control_cpu=-1, writer_cpu=-1, control_fifo_priority=0,
+            writer_fifo_priority=0, lock_memory=False, require_realtime=False,
+            anchor_position_source=source, odometry_topic="rt/odommodestate",
+            odometry_mjcf=str(_g1_mjcf_path()),
+        )
+        deadline = time.monotonic() + 10
+        while runtime.writer_stats()["state_frames"] < 20:
+            assert time.monotonic() < deadline, "plant state did not arrive"
+            time.sleep(0.01)
+        if plant_odometry:
+            while runtime.writer_stats()["odometry_frames"] < 5:
+                assert time.monotonic() < deadline, "plant odometry did not arrive"
+                time.sleep(0.01)
+        runtime.start(10)
+        runtime.wait()
+        stats = runtime.writer_stats()
+        assert stats["anchor_position_source"] == expected
+        assert (stats["odometry_frames"] > 0) == bool(plant_odometry)
+        state = runtime.state()
+        assert state["anchor_pose_valid"]
+        # A frozen plant does not move: every source keeps the start alignment.
+        np.testing.assert_allclose(state["anchor_position_w"][:2], [1, 2], atol=0.02)
+        assert stats["anchor_displacement_max"] < 0.02
+    finally:
+        if runtime is not None:
+            runtime.close()
+        worker.close()
+        _finish_plant(process, report_path)

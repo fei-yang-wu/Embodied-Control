@@ -13,6 +13,25 @@
 
 namespace ec_native {
 
+class LegOdometry;
+
+// Where the live encoder anchor's translation comes from while the fixed
+// initial anchor supplies the start alignment (reference start frame <->
+// robot pose at capture) and the IMU supplies the heading.
+enum class AnchorPositionSource : std::uint32_t {
+  // The legacy behaviour: translation frozen at the reference start frame.
+  // A moving reference then accumulates a phantom offset in the window.
+  kFixedStart = 0,
+  // The vendor state estimator on the odometry DDS topic
+  // (`rt/odommodestate`, unitree_go SportModeState_.position).
+  kOdometry = 1,
+  // Kinematic leg odometry from the joints and the IMU (LegOdometry).
+  kLegKinematics = 2,
+  // Odometry when the topic is alive at capture, else leg kinematics when a
+  // model was given, else the fixed start.
+  kAuto = 3,
+};
+
 enum class UnitreeMode : std::uint32_t {
   kDisabled = 0,
   kInitialize = 1,
@@ -60,6 +79,16 @@ struct UnitreeWriterStats {
   // much, and it stays constant for the episode.
   float anchor_yaw_offset_degrees = 0.0F;
   bool anchor_heading_captured = false;
+  // The translation source the episode settled on at capture (an
+  // AnchorPositionSource value), the odometry frames seen on the topic, the
+  // control ticks that found the odometry stale, and how far the live anchor
+  // has moved from the start alignment (the quantity the frozen anchor
+  // could never report).
+  std::uint32_t anchor_position_source = 0;
+  std::uint64_t odometry_frames = 0;
+  std::uint64_t odometry_stale_ticks = 0;
+  float anchor_displacement_max = 0.0F;
+  std::uint64_t leg_odometry_stance_switches = 0;
   UnitreeMode mode = UnitreeMode::kDisabled;
   bool writes_enabled = false;
   bool realtime_configured = false;
@@ -106,6 +135,14 @@ class NativeUnitreeBackend final : public NativeRobotBackend {
   // dataset's heading; matching full initial orientation hid real tilt error.
   void set_fixed_anchor_pose(std::span<const float> position,
                              std::span<const float> quaternion_xyzw);
+  // Let the anchor translation follow the robot. `odometry_topic` names the
+  // vendor estimator's DDS topic (empty: never subscribe); `odometry_mjcf`
+  // names the model for kinematic leg odometry (empty: unavailable). The
+  // start alignment and heading come from set_fixed_anchor_pose as before.
+  void configure_live_anchor(AnchorPositionSource source,
+                             const std::string& odometry_topic,
+                             const std::string& odometry_mjcf,
+                             std::span<const std::string> isaac_joint_names);
   // hold_current ramps to the pose the robot is already in instead of the
   // bundle's default stance. The default stance is the hardware sequence; a
   // rehearsal episode that must start ON a reference frame holds instead, so
@@ -177,6 +214,12 @@ class NativeUnitreeBackend final : public NativeRobotBackend {
   struct CommandSnapshot;
 
   void low_state_handler(const void* message) noexcept;
+  void odometry_handler(const void* message) noexcept;
+  void update_live_anchor_translation(
+      const std::array<float, kJointCount>& joint_position,
+      const std::array<float, 4>& quaternion_xyzw) noexcept;
+  bool snapshot_odometry(std::array<float, 3>& position,
+                         std::uint64_t& receive_ns) const noexcept;
   void writer_loop() noexcept;
   void ensure_motion_switcher();
   void release_motion_service();
@@ -205,6 +248,24 @@ class NativeUnitreeBackend final : public NativeRobotBackend {
   // Written by the control thread on capture, read by the operator thread.
   std::atomic<float> anchor_yaw_offset_degrees_{0.0F};
   std::atomic<bool> anchor_heading_captured_{false};
+  // Live anchor translation. The odometry slot is written by the DDS
+  // callback and read by the control thread (seqlock like the state slot).
+  AnchorPositionSource anchor_position_source_ = AnchorPositionSource::kFixedStart;
+  std::atomic<std::uint32_t> anchor_position_source_active_{0};
+  struct OdometrySlot;
+  std::unique_ptr<OdometrySlot> odometry_slot_;
+  std::unique_ptr<LegOdometry> leg_odometry_;
+  std::array<float, 3> odometry_start_{0.0F, 0.0F, 0.0F};
+  std::array<float, 3> anchor_displacement_odom_{0.0F, 0.0F, 0.0F};
+  bool odometry_start_captured_ = false;
+  // cos / sin of the yaw the alignment applies to odometry displacements.
+  float anchor_yaw_cos_ = 1.0F;
+  float anchor_yaw_sin_ = 0.0F;
+  static constexpr double kOdometryStaleMs = 200.0;
+  std::atomic<std::uint64_t> odometry_frames_{0};
+  std::atomic<std::uint64_t> odometry_stale_ticks_{0};
+  std::atomic<float> anchor_displacement_max_{0.0F};
+  std::atomic<std::uint64_t> leg_odometry_stance_switches_{0};
   std::array<float, kJointCount> init_start_position_{};
   std::array<float, kJointCount> init_target_position_{};
   std::array<float, kJointCount> hold_target_{};

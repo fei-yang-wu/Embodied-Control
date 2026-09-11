@@ -715,6 +715,41 @@ def _cmd_lowlevel_compare_unitree_pose(args) -> int:
     return 0 if report["status"] == "pass" else 1
 
 
+def _cmd_lowlevel_odometry_probe(args) -> int:
+    """Is the G1's odometry on the wire? Rate, gap, and whether it moves."""
+    try:
+        import ec_native
+    except ImportError:
+        print("FAIL: needs the native environment (pixi run -e native)")
+        return 2
+    if not ec_native.WITH_UNITREE:
+        print("FAIL: ec_native was built without Unitree SDK2")
+        return 2
+    probe = ec_native.OdometryProbe(args.network, args.topic, args.dds_domain)
+    arrived = probe.wait_for_frames(max(2, int(args.min_rate * args.seconds)), args.seconds)
+    s = probe.snapshot()
+    span = (s["last_receive_ns"] - s["first_receive_ns"]) / 1e9 if s["frames"] > 1 else 0.0
+    rate = (s["frames"] - 1) / span if span > 0 else 0.0
+    moved = float(sum((a - b) ** 2 for a, b in zip(s["position"], s["first_position"])) ** 0.5)
+    report = {
+        "topic": args.topic, "network": args.network, "frames": s["frames"],
+        "rate_hz": rate, "max_gap_ms": s["max_gap_ns"] / 1e6, "position": s["position"],
+        "velocity": s["velocity"], "moved_m": moved, "error_code": s["error_code"],
+        "mode": s["mode"], "nonfinite_frames": s["nonfinite_frames"],
+        "status": "pass" if arrived and rate >= args.min_rate else "fail",
+    }
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        print(f"odometry {args.topic} on {args.network}: {s['frames']} frames, {rate:.1f} Hz, "
+              f"max gap {s['max_gap_ns'] / 1e6:.1f} ms, position {[round(v, 3) for v in s['position']]}, "
+              f"moved {moved:.3f} m, error_code {s['error_code']}, mode {s['mode']}")
+        if not arrived:
+            print("no odometry (or too slow): the live anchor will fall back to leg kinematics "
+                  "when the job carries an mjcf, else to the frozen start")
+    return 0 if report["status"] == "pass" else 1
+
+
 def _cmd_lowlevel_check_unitree(args) -> int:
     from embodied_control.lowlevel.unitree_probe import run_probe, write_report
 
@@ -828,6 +863,10 @@ def _cmd_lowlevel_unitree(args) -> int:
         fixed_anchor_quaternion=(
             None if fixed_anchor is None else fixed_anchor.quaternion_xyzw
         ),
+        anchor_source=args.anchor,
+        anchor_position_source=args.anchor_position_source,
+        odometry_topic=args.odometry_topic,
+        odometry_mjcf=args.odometry_mjcf,
         control_cpu=args.control_cpu,
         writer_cpu=args.writer_cpu,
         control_fifo_priority=args.control_priority,
@@ -1174,12 +1213,17 @@ def _cmd_lifecycle_rehearse(args) -> int:
     template = template_from(args.template) if args.template else {}
     if args.stiffness_scale != 1.0 or args.damping_scale != 1.0:
         template["gain_scale"] = {"stiffness": args.stiffness_scale, "damping": args.damping_scale}
+    if args.anchor != "template":
+        template["live_anchor"] = args.anchor == "live"
+    if args.anchor_position_source != "template":
+        template["anchor_position_source"] = args.anchor_position_source
     plan = RehearsePlan(
         bundle=args.bundle, motions=motions, output=output,
         reference_root=args.reference_root, model=args.model, plant_config=args.plant,
         seeds=args.seeds, lanes=args.lanes, dds_domain_base=args.dds_domain_base,
         template=template,
         video=not args.no_video, offline=not args.fetch, plant_noise=args.plant_noise,
+        plant_odometry=args.plant_odometry,
     )
     try:
         summary = sweep(plan)
@@ -1212,6 +1256,7 @@ def _cmd_lifecycle_rehearse_episode(args) -> int:
         args.job, seed=args.seed, domain=args.dds_domain, cores=cores,
         model=args.model, plant_config=args.plant, video=not args.no_video,
         offline=not args.fetch, plant_noise=args.plant_noise,
+        plant_odometry=args.plant_odometry,
     )
     sys.stdout.flush()
     sys.stderr.flush()
@@ -1254,6 +1299,7 @@ def _cmd_lowlevel_plant(args) -> int:
         vendor_name=args.vendor_name,
         hoist=args.hoist,
         hoist_clearance=args.hoist_clearance,
+        odometry_topic=args.odometry_topic,
         # One row per publish; the plant serves at 1 / timestep.
         state_log_capacity=(
             int(args.seconds / args.timestep) + 1024 if states_output else 0
@@ -1531,6 +1577,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     lcheck.add_argument("--json", action="store_true")
     lcheck.set_defaults(func=_cmd_lowlevel_check_unitree)
+
+    lodom = lows.add_parser(
+        "odometry-probe",
+        help="listen on the G1 odometry topic: rate, gaps, and whether the position moves",
+    )
+    lodom.add_argument("--network", required=True)
+    lodom.add_argument("--topic", default="rt/odommodestate")
+    lodom.add_argument("--seconds", type=float, default=3.0)
+    lodom.add_argument("--min-rate", type=float, default=20.0)
+    lodom.add_argument("--dds-domain", type=int, default=0)
+    lodom.add_argument("--json", action="store_true")
+    lodom.set_defaults(func=_cmd_lowlevel_odometry_probe)
     lunitree = lows.add_parser(
         "unitree", help="run the native G1 DDS tracker (writes off by default)"
     )
@@ -1551,6 +1609,18 @@ def build_parser() -> argparse.ArgumentParser:
     lunitree.add_argument(
         "--fixed-anchor-max-displacement", type=float, default=0.05
     )
+    lunitree.add_argument(
+        "--anchor", choices=["bundle", "robot", "expert_heading"], default="bundle",
+        help="encoder window anchor: the live robot (heading from the IMU, "
+        "translation from --anchor-position-source) or the window's own first "
+        "frame; 'bundle' follows the bundle's macro_anchor_mode",
+    )
+    lunitree.add_argument(
+        "--anchor-position-source",
+        choices=["auto", "odometry", "leg_kinematics", "fixed_start"], default="auto",
+    )
+    lunitree.add_argument("--odometry-topic", default="rt/odommodestate")
+    lunitree.add_argument("--odometry-mjcf", default="", help="G1 MJCF for leg kinematics")
     lunitree.add_argument("--policy-threads", type=int, default=1)
     lunitree.add_argument("--control-cpu", type=int, default=2)
     lunitree.add_argument("--writer-cpu", type=int, default=3)
@@ -1593,6 +1663,11 @@ def build_parser() -> argparse.ArgumentParser:
     lplant.add_argument("--noise-base-ang-vel", type=float, default=0.2)
     lplant.add_argument("--noise-imu-tilt-rad", type=float, default=0.05)
     lplant.add_argument("--noise-seed", type=int, default=0)
+    lplant.add_argument(
+        "--odometry-topic", default="",
+        help="also serve the true pelvis position with the G1 odometry message "
+        "layout on this topic (empty: none, as the plant's default)",
+    )
     lplant.add_argument(
         "--dds-domain",
         type=int,
@@ -1849,6 +1924,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="plant sensor noise: SONIC's training ranges (default), the G1's own "
         "measured LowState noise, or none. Not part of the rehearsal identity",
     )
+    reh.add_argument(
+        "--anchor", choices=("template", "live", "expert_heading"), default="template",
+        help="encoder window anchor: live robot (job default) or the window's own "
+        "first frame; 'template' keeps the job's live_anchor",
+    )
+    reh.add_argument(
+        "--anchor-position-source",
+        choices=("template", "auto", "odometry", "leg_kinematics", "fixed_start"),
+        default="template",
+        help="live anchor translation; the job default 'auto' takes vendor "
+        "odometry when alive, else leg kinematics from the model",
+    )
+    reh.add_argument(
+        "--plant-odometry", default="",
+        help="have the plant serve its true pelvis position on this odometry "
+        "topic (e.g. rt/odommodestate): a perfect-estimator rehearsal. Empty "
+        "(default) exercises the controller's leg odometry",
+    )
     reh.set_defaults(func=_cmd_lifecycle_rehearse)
 
     rehm = lifes.add_parser(
@@ -1868,6 +1961,7 @@ def build_parser() -> argparse.ArgumentParser:
     rehe.add_argument("--no-video", action="store_true")
     rehe.add_argument("--fetch", action="store_true")
     rehe.add_argument("--plant-noise", default="training")
+    rehe.add_argument("--plant-odometry", default="")
     rehe.set_defaults(func=_cmd_lifecycle_rehearse_episode)
 
     rob = sub.add_parser(

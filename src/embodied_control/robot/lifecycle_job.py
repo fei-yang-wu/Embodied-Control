@@ -28,7 +28,9 @@ class ThresholdSpec(JobModel):
     # tight, waist medium, arms loose (they sag under the policy's PD gains).
     pose_tolerance_rad: float | list[float] | None = None
     tilt_tolerance_degrees: float = Field(default=10.0, gt=0.0)
-    first_action_rad: float = Field(default=2.5, gt=0.0)
+    # 2 pi: the distance gate is off by default; the torque-ratio gate is the
+    # physical bound (see LifecycleConfig.first_action_rad).
+    first_action_rad: float = Field(default=6.2832, gt=0.0)
     first_action_torque_ratio: float = Field(default=3.0, gt=0.0)
     damp_publish_frames: int = Field(default=100, ge=1)
     hoist_release_seconds: float = Field(default=1.5, ge=0.0)
@@ -86,6 +88,18 @@ class LifecycleJob(JobModel):
     motion: str = ""
     start_frame: int = Field(default=0, ge=0)
     fixed_initial_anchor: bool = False
+    # How the encoder window is anchored. On (the default): the live robot
+    # anchor, heading from the IMU and translation from a position estimate
+    # (`anchor_position_source`), training's `robot_heading` frame. Off: the
+    # window's own first frame (`expert_heading`), no localization at all.
+    live_anchor: bool = True
+    # `auto` takes the vendor odometry topic when it is alive at capture,
+    # else kinematic leg odometry from `mjcf`, else the frozen start.
+    # `fixed_start` is the pre-2026-09-11 behaviour (phantom offset on a
+    # moving reference).
+    anchor_position_source: Literal["auto", "odometry", "leg_kinematics", "fixed_start"] = "auto"
+    # The G1 state estimator's odometry (unitree_go SportModeState_).
+    odometry_topic: str = "rt/odommodestate"
     # Legacy compatibility knob. Displacement is now reported, never rejected:
     # curated moving references intentionally deploy from a fixed start anchor.
     fixed_anchor_max_displacement: float = Field(default=0.05, gt=0.0)
@@ -166,6 +180,10 @@ class LifecycleJob(JobModel):
             not self.reference_root or not self.motion
         ):
             raise ValueError("start_pose=motion needs reference_root and motion")
+        if self.live_anchor and self.anchor_position_source == "leg_kinematics" and not self.mjcf:
+            raise ValueError("anchor_position_source=leg_kinematics needs mjcf")
+        if self.live_anchor and self.anchor_position_source == "odometry" and not self.odometry_topic:
+            raise ValueError("anchor_position_source=odometry needs odometry_topic")
         if isinstance(self.start_pose, list) and len(self.start_pose) != 29:
             raise ValueError("an explicit start_pose needs 29 joint values")
         if isinstance(self.thresholds.pose_tolerance_rad, list) and len(

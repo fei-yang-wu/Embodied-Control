@@ -38,6 +38,7 @@ class NativeDdsPlant:
         vendor_name: str = "ai",
         hoist: bool = False,
         hoist_clearance: float = 0.10,
+        odometry_topic: str = "",
     ) -> None:
         try:
             import ec_native
@@ -91,6 +92,8 @@ class NativeDdsPlant:
             bool(hoist),
             float(hoist_clearance),
         )
+        if odometry_topic:
+            self._plant.publish_odometry(str(odometry_topic))
 
     def hoist(self) -> None:
         self._plant.hoist()

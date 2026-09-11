@@ -40,10 +40,41 @@ def _native_reference_layout(bundle: PolicyBundle) -> str:
     command = bundle.manifest.command
     if (
         command.encoder_state_interface == "root_qpos"
-        and command.macro_anchor_mode == "robot_heading"
+        and command.macro_anchor_mode in ("robot_heading", "expert_heading")
     ):
         return "root_qpos_heading"
     return str(command.encoder_state_interface or "root_qpos")
+
+
+ANCHOR_SOURCES = ("robot", "expert_heading")
+ANCHOR_POSITION_SOURCES = ("auto", "odometry", "leg_kinematics", "fixed_start")
+
+
+def _anchor_source_for(bundle: PolicyBundle, anchor_source: str) -> str:
+    """Resolve how the runtime anchors the encoder window.
+
+    `robot`: the live robot anchor (position from odometry, heading from the
+    IMU), training's `robot_heading` frame. `expert_heading`: the window's
+    own first frame, training's `expert_heading` frame, which needs no
+    localization. `bundle` picks whichever the bundle was trained with. A
+    mismatch is allowed (a robot_heading policy can run anchor-blind) and
+    printed, because the policy then reads "perfectly on track" all the time.
+    """
+    if anchor_source == "bundle":
+        anchor_source = (
+            "expert_heading"
+            if bundle.manifest.command.macro_anchor_mode == "expert_heading"
+            else "robot"
+        )
+    if anchor_source not in ANCHOR_SOURCES:
+        raise ValueError(f"anchor_source must be one of {ANCHOR_SOURCES} or 'bundle'")
+    trained = bundle.manifest.command.macro_anchor_mode
+    if trained is not None and (trained == "expert_heading") != (anchor_source == "expert_heading"):
+        print(
+            f"WARNING: bundle trained with macro_anchor_mode={trained!r} but the "
+            f"runtime anchors the window at {anchor_source!r}"
+        )
+    return anchor_source
 
 
 def _oracle_enabled(bundle: PolicyBundle, command_source: str) -> bool:
@@ -52,7 +83,7 @@ def _oracle_enabled(bundle: PolicyBundle, command_source: str) -> bool:
     oracle = command_source == "oracle"
     command = bundle.manifest.command
     expected_anchor = {
-        "root_qpos": {"robot", "robot_heading"},
+        "root_qpos": {"robot", "robot_heading", "expert_heading"},
         "joint_qpos_qvel_anchor_ori": {"robot_heading"},
     }.get(command.encoder_state_interface)
     if oracle and (
@@ -173,6 +204,7 @@ class NativeFakeLoop:
         command_source: str = "vla",
         sensor_noise: dict[str, float] | None = None,
         noise_seed: int = 0,
+        anchor_source: str = "bundle",
     ) -> None:
         try:
             import ec_native
@@ -231,6 +263,8 @@ class NativeFakeLoop:
             bool(lock_memory),
             bool(require_realtime),
         )
+        self.anchor_source = _anchor_source_for(bundle, anchor_source)
+        self._runtime.set_anchor_source(self.anchor_source)
 
     def start(self, max_ticks: int, *, paced: bool = True) -> None:
         self._runtime.start(int(max_ticks), bool(paced))
@@ -466,6 +500,10 @@ class NativeUnitreeLoop(NativeFakeLoop):
         dds_domain: int = 0,
         stiffness_scale: float = 1.0,
         damping_scale: float = 1.0,
+        anchor_source: str = "bundle",
+        anchor_position_source: str = "auto",
+        odometry_topic: str = "rt/odommodestate",
+        odometry_mjcf: str = "",
     ) -> None:
         try:
             import ec_native
@@ -473,6 +511,10 @@ class NativeUnitreeLoop(NativeFakeLoop):
             raise ImportError(
                 "NativeUnitreeLoop needs the Unitree-enabled native build"
             ) from exc
+        if anchor_position_source not in ANCHOR_POSITION_SOURCES:
+            raise ValueError(
+                f"anchor_position_source must be one of {ANCHOR_POSITION_SOURCES}"
+            )
         if stiffness_scale <= 0 or damping_scale <= 0:
             raise ValueError("gain scales must be positive")
         self.stiffness_scale = float(stiffness_scale)
@@ -562,6 +604,15 @@ class NativeUnitreeLoop(NativeFakeLoop):
         if fixed_anchor is not None:
             config["fixed_anchor_position"] = fixed_anchor.tolist()
             config["fixed_anchor_quaternion"] = fixed_quaternion.tolist()
+            # The fixed anchor is the start alignment; where the translation
+            # goes from there is the live-anchor source.
+            config["anchor_position_source"] = str(anchor_position_source)
+            config["odometry_topic"] = str(odometry_topic)
+            config["odometry_mjcf"] = str(odometry_mjcf)
+            config["isaac_joint_names"] = list(action.isaac_joint_names)
+        self.anchor_source = _anchor_source_for(bundle, anchor_source)
+        config["anchor_source"] = self.anchor_source
+        self.anchor_position_source = str(anchor_position_source)
         self.bundle = bundle
         self._runtime = ec_native.NativeUnitreeRuntime(
             self.tracker._core,
