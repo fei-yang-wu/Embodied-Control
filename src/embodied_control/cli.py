@@ -1235,6 +1235,24 @@ def _cmd_lifecycle_rehearse(args) -> int:
     return 0 if summary["episodes"] and summary["episodes_passed"] == summary["episodes"] else 1
 
 
+def _cmd_lifecycle_rehearsal_grade(args) -> int:
+    from embodied_control.robot.rehearsal_grade import grade_rehearsal
+
+    try:
+        aggregate = grade_rehearsal(args.output, reference_root=args.reference_root, mjcf=args.mjcf)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"FAIL: {exc}")
+        return 2
+    fields = ("mpjpe_l_mm", "mpjpe_g_mm", "drift_max_m", "ankle_target_dither", "all_target_dither", "anchor_error_max_m")
+    print(f"{aggregate['output']}: {aggregate['passed']}/{aggregate['motions']} passed, "
+          f"anchor sources {aggregate['anchor_position_sources']}")
+    print("%-12s %8s %8s %8s %8s %8s %8s" % ("subset", "L_mm", "G_mm", "drift_m", "ankle", "all", "anch_err"))
+    for name in ("all", "passed_only"):
+        print("%-12s " % name + " ".join("%8.3f" % aggregate[name][k] for k in fields))
+    print(f"rows: {Path(args.output) / 'grade.tsv'}")
+    return 0
+
+
 def _cmd_lifecycle_rehearsal_matrix(args) -> int:
     from embodied_control.robot.rehearse import matrix_report
 
@@ -1943,6 +1961,16 @@ def build_parser() -> argparse.ArgumentParser:
         "(default) exercises the controller's leg odometry",
     )
     reh.set_defaults(func=_cmd_lifecycle_rehearse)
+
+    rehg = lifes.add_parser(
+        "rehearsal-grade",
+        help="tracking error of a `rehearse` output from the plant's true state: "
+        "MPJPE-L/G, drift, target dither, anchor error per motion",
+    )
+    rehg.add_argument("output", help="a `rehearse --output` directory")
+    rehg.add_argument("--reference-root", default="", help="default: the job's")
+    rehg.add_argument("--mjcf", default="", help="default: the job's")
+    rehg.set_defaults(func=_cmd_lifecycle_rehearsal_grade)
 
     rehm = lifes.add_parser(
         "rehearsal-matrix",
