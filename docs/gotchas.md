@@ -285,3 +285,21 @@ always sets it); a hardware job without odometry and without `mjcf` silently
 runs the old behaviour, and lifecycle.jsonl's `anchor_position_source` says
 which one you got. `live_anchor: false` is the anchor-blind `expert_heading`
 window and only makes sense for a policy trained that way.
+
+## GPU inference for the native runtime (2026-09-13)
+
+The native build now ships ONNX Runtime's CUDA-12 GPU release (CUDA and
+TensorRT execution providers next to `libonnxruntime.so`); the CPU path is
+unchanged and remains the default. `realtime.inference_provider: cuda` in a
+lifecycle job (or `ec lifecycle rehearse --inference-provider cuda`) needs
+the `native-gpu` pixi environment, which carries the cudart / cuBLAS /
+cuDNN 9 / TensorRT 10 wheels (~5 GB) and preloads them at `import ec_native`.
+Numbers on the deployment host (RTX 5080), batch 1: policy 1.1 ms on one CPU
+thread, 0.35 ms on four, 0.08 ms CUDA, 0.05 ms TensorRT; the whole control
+tick 2.0 ms -> 0.21 ms p50 (plant rehearsal). `cuda` reproduces the golden
+trace to 1e-6; `tensorrt` builds TF32 engines (no ONNX Runtime option turns
+that off) and misses the encoder's 2e-5 parity tolerance by 4e-4 to 8e-4,
+so `verify-native-bundle --provider tensorrt` fails by design and TensorRT
+stays opt-in. `ec lowlevel bench-inference <bundle>` prints the table for
+any bundle. The provider is part of the rehearsal identity: hardware runs
+what the plant ran.

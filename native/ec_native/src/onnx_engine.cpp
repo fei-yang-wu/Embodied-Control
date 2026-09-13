@@ -3,7 +3,10 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <memory>
 #include <stdexcept>
+#include <string>
+#include <vector>
 
 namespace ec_native {
 namespace {
@@ -26,10 +29,70 @@ void require_tensor(const Ort::TypeInfo& type, std::size_t width,
 
 }  // namespace
 
+namespace {
+
+InferenceOptions cpu_options(std::size_t intra_op_threads) {
+  InferenceOptions options;
+  options.intra_op_threads = intra_op_threads;
+  return options;
+}
+
+void append_cuda_provider(Ort::SessionOptions& session_options, int device_id) {
+  const OrtApi& api = Ort::GetApi();
+  OrtCUDAProviderOptionsV2* raw = nullptr;
+  Ort::ThrowOnError(api.CreateCUDAProviderOptions(&raw));
+  std::unique_ptr<OrtCUDAProviderOptionsV2, decltype(api.ReleaseCUDAProviderOptions)>
+      options(raw, api.ReleaseCUDAProviderOptions);
+  const std::string device = std::to_string(device_id);
+  const char* keys[] = {"device_id", "cudnn_conv_algo_search",
+                        "do_copy_in_default_stream"};
+  const char* values[] = {device.c_str(), "DEFAULT", "1"};
+  Ort::ThrowOnError(
+      api.UpdateCUDAProviderOptions(options.get(), keys, values, 3));
+  Ort::ThrowOnError(api.SessionOptionsAppendExecutionProvider_CUDA_V2(
+      session_options, options.get()));
+}
+
+void append_tensorrt_provider(Ort::SessionOptions& session_options,
+                              const InferenceOptions& config) {
+  const OrtApi& api = Ort::GetApi();
+  OrtTensorRTProviderOptionsV2* raw = nullptr;
+  Ort::ThrowOnError(api.CreateTensorRTProviderOptions(&raw));
+  std::unique_ptr<OrtTensorRTProviderOptionsV2,
+                  decltype(api.ReleaseTensorRTProviderOptions)>
+      options(raw, api.ReleaseTensorRTProviderOptions);
+  const std::string device = std::to_string(config.device_id);
+  std::vector<const char*> keys = {"device_id", "trt_fp16_enable",
+                                   "trt_timing_cache_enable"};
+  std::vector<const char*> values = {device.c_str(),
+                                     config.trt_fp16 ? "1" : "0", "1"};
+  if (!config.trt_cache_dir.empty()) {
+    keys.push_back("trt_engine_cache_enable");
+    values.push_back("1");
+    keys.push_back("trt_engine_cache_path");
+    values.push_back(config.trt_cache_dir.c_str());
+    keys.push_back("trt_timing_cache_path");
+    values.push_back(config.trt_cache_dir.c_str());
+  }
+  Ort::ThrowOnError(api.UpdateTensorRTProviderOptions(
+      options.get(), keys.data(), values.data(), keys.size()));
+  Ort::ThrowOnError(api.SessionOptionsAppendExecutionProvider_TensorRT_V2(
+      session_options, options.get()));
+}
+
+}  // namespace
+
 OnnxEngine::OnnxEngine(const std::string& model_path, std::string input_name,
                        std::string output_name, std::size_t input_width,
                        std::size_t output_width,
                        std::size_t intra_op_threads)
+    : OnnxEngine(model_path, std::move(input_name), std::move(output_name),
+                 input_width, output_width, cpu_options(intra_op_threads)) {}
+
+OnnxEngine::OnnxEngine(const std::string& model_path, std::string input_name,
+                       std::string output_name, std::size_t input_width,
+                       std::size_t output_width,
+                       const InferenceOptions& options)
     : environment_(ORT_LOGGING_LEVEL_WARNING, "ec_native"),
       memory_info_(
           Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault)),
@@ -41,14 +104,26 @@ OnnxEngine::OnnxEngine(const std::string& model_path, std::string input_name,
       output_buffer_(output_width, 0.0F),
       input_shape_{1, static_cast<std::int64_t>(input_width)},
       output_shape_{1, static_cast<std::int64_t>(output_width)} {
-  if (intra_op_threads == 0) {
+  if (options.intra_op_threads == 0) {
     throw std::runtime_error("ONNX intra-op thread count must be positive");
   }
   session_options_.SetExecutionMode(ExecutionMode::ORT_SEQUENTIAL);
   session_options_.SetGraphOptimizationLevel(
       GraphOptimizationLevel::ORT_ENABLE_ALL);
-  session_options_.SetIntraOpNumThreads(static_cast<int>(intra_op_threads));
+  session_options_.SetIntraOpNumThreads(
+      static_cast<int>(options.intra_op_threads));
   session_options_.SetInterOpNumThreads(1);
+  if (options.provider == "tensorrt") {
+    // TensorRT takes the graph; CUDA runs any node it declines.
+    append_tensorrt_provider(session_options_, options);
+    append_cuda_provider(session_options_, options.device_id);
+  } else if (options.provider == "cuda") {
+    append_cuda_provider(session_options_, options.device_id);
+  } else if (options.provider != "cpu") {
+    throw std::runtime_error("inference provider must be cpu, cuda or tensorrt, got " +
+                             options.provider);
+  }
+  provider_ = options.provider;
   session_ = Ort::Session(environment_, model_path.c_str(), session_options_);
   validate_contract();
   input_tensor_ = Ort::Value::CreateTensor<float>(

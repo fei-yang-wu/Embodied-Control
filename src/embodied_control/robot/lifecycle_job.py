@@ -69,6 +69,18 @@ class RealtimeSpec(JobModel):
     writer_priority: int = 90
     lock_memory: bool = True
     policy_threads: int = 1
+    # Where the policy and the reference encoder run. `cpu` is the reference
+    # path; `cuda` cuts the inference share of the control tick from ~1.4 ms
+    # to ~0.15 ms on the deployment host and stays within the bundle's parity
+    # tolerance (needs the `native-gpu` environment). `tensorrt` is another
+    # 0.05 ms faster but its TF32 engines miss the encoder tolerance (8e-4),
+    # so it is opt-in. Part of the rehearsal identity: hardware runs what the
+    # plant ran.
+    inference_provider: Literal["cpu", "cuda", "tensorrt"] = "cpu"
+    inference_device: int = 0
+    trt_fp16: bool = False
+    # Empty: ~/.cache/embodied_control/tensorrt/<bundle name>.
+    trt_cache_dir: str = ""
 
 
 class LifecycleJob(JobModel):

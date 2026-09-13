@@ -105,6 +105,8 @@ struct NativePlannerConfig {
     kRobot,
     kExpertHeading,
   } anchor_source = AnchorSource::kRobot;
+  // Where the reference encoder runs (see InferenceOptions in onnx_engine.hpp).
+  InferenceOptions encoder_inference;
 };
 
 struct NativeSchedulerConfig {

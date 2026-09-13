@@ -318,6 +318,26 @@ NativeTrackerCore::NativeTrackerCore(
     std::span<const float> fsq_half_levels, std::size_t fsq_z_dim,
     float raw_action_clip,
     std::size_t intra_op_threads)
+    : NativeTrackerCore(policy_path, input_name, output_name, terms,
+                        command_width, default_joint_position, action_scale,
+                        joint_lower, joint_upper, fsq_half_levels, fsq_z_dim,
+                        raw_action_clip, [&intra_op_threads]() {
+                          InferenceOptions options;
+                          options.intra_op_threads = intra_op_threads;
+                          return options;
+                        }()) {}
+
+NativeTrackerCore::NativeTrackerCore(
+    const std::string& policy_path, const std::string& input_name,
+    const std::string& output_name,
+    const std::vector<TermConfig>& terms,
+    std::size_t command_width,
+    std::span<const float> default_joint_position,
+    std::span<const float> action_scale,
+    std::span<const float> joint_lower, std::span<const float> joint_upper,
+    std::span<const float> fsq_half_levels, std::size_t fsq_z_dim,
+    float raw_action_clip,
+    const InferenceOptions& inference)
     : command_width_(command_width),
       fsq_half_levels_(fsq_half_levels.begin(), fsq_half_levels.end()),
       fsq_z_dim_(fsq_z_dim),
@@ -330,7 +350,7 @@ NativeTrackerCore::NativeTrackerCore(
                 }
                 return total;
               }(),
-              kJointCount, intra_op_threads) {
+              kJointCount, inference) {
   if (command_width_ == 0 || command_width_ > kMaxCommand) {
     throw std::runtime_error("command width is outside native limits");
   }

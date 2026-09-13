@@ -231,6 +231,8 @@ def build_tracker(job, args, bundle, selection):
         start_pose = [float(v) for v in bundle.manifest.action.default_joint_pos]
     else:
         start_pose = [float(v) for v in job.start_pose]
+    from embodied_control.lowlevel.native_core import default_trt_cache_dir, inference_options
+
     runtime = NativeUnitreeLoop(
         bundle,
         network,
@@ -262,7 +264,14 @@ def build_tracker(job, args, bundle, selection):
         anchor_position_source=job.anchor_position_source,
         odometry_topic=job.odometry_topic,
         odometry_mjcf=job.mjcf,
+        inference=inference_options(
+            job.realtime.inference_provider,
+            device_id=job.realtime.inference_device,
+            trt_fp16=job.realtime.trt_fp16,
+            trt_cache_dir=job.realtime.trt_cache_dir or default_trt_cache_dir(bundle),
+        ),
     )
+    print(f"Inference: {runtime.tracker.provider} (policy), threads {job.realtime.policy_threads}")
     print(
         "Encoder anchor: "
         + (f"live robot, translation source {job.anchor_position_source}"
@@ -298,6 +307,9 @@ def run_identity_for(job, bundle, network: str, selection=None, ticks=None) -> d
         "blend_ticks", "play_countdown_seconds", "arm_timeout_seconds", "stand_hold_seconds",
         "live_anchor", "anchor_position_source",
     )}
+    deployment["inference"] = {
+        "provider": job.realtime.inference_provider, "trt_fp16": job.realtime.trt_fp16,
+    }
     deployment["gain_scale"] = job.gain_scale.model_dump()
     deployment["rehearsal_hoist_contract"] = "g1_shoulder_straps_v1"
     deployment["startup_contract"] = "diagnostic_pose_operator_play_v1"

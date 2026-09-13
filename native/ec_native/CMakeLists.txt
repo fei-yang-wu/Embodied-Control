@@ -40,10 +40,15 @@ if(NOT EC_ONNXRUNTIME_ROOT)
     message(FATAL_ERROR
       "Set EC_ONNXRUNTIME_ROOT for this platform; the automatic release is linux-x64")
   endif()
+  # The CUDA 12 GPU release: the same libonnxruntime plus the CUDA and
+  # TensorRT execution providers (loaded only when a session asks for them,
+  # so a machine without a GPU runs the CPU path unchanged). The runtime
+  # libraries they dlopen (cudart / cublas / cudnn 9 / nvinfer 10) come from
+  # the `gpu` pixi feature's wheels and are preloaded by ec_native at import.
   FetchContent_Declare(
     onnxruntime_release
-    URL "https://github.com/microsoft/onnxruntime/releases/download/v${EC_ONNXRUNTIME_VERSION}/onnxruntime-linux-x64-${EC_ONNXRUNTIME_VERSION}.tgz"
-    URL_HASH "SHA256=a3e1b79d7bb1bf09696ce675f49e4064e6c81f6202b8225624fff0e93f8d6407"
+    URL "https://github.com/microsoft/onnxruntime/releases/download/v${EC_ONNXRUNTIME_VERSION}/onnxruntime-linux-x64-gpu_cuda12-${EC_ONNXRUNTIME_VERSION}.tgz"
+    URL_HASH "SHA256=ea6bd2b65d7dfabbeb92c4af5dd8f12e5aed8601e544ad378d2f872275438b1a"
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
   FetchContent_MakeAvailable(onnxruntime_release)
   set(EC_ONNXRUNTIME_ROOT "${onnxruntime_release_SOURCE_DIR}")
@@ -84,6 +89,13 @@ install(
     "${EC_ONNXRUNTIME_ROOT}/lib/libonnxruntime.so.1.28.0"
     "${EC_ONNXRUNTIME_ROOT}/lib/libonnxruntime_providers_shared.so"
   DESTINATION ec_native/lib)
+foreach(provider cuda tensorrt)
+  if(EXISTS "${EC_ONNXRUNTIME_ROOT}/lib/libonnxruntime_providers_${provider}.so")
+    install(
+      FILES "${EC_ONNXRUNTIME_ROOT}/lib/libonnxruntime_providers_${provider}.so"
+      DESTINATION ec_native/lib)
+  endif()
+endforeach()
 install(
   FILES
     "${EC_ONNXRUNTIME_ROOT}/LICENSE"

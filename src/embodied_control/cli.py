@@ -387,10 +387,21 @@ def _cmd_lowlevel_verify_bundle(args) -> int:
 
 def _cmd_lowlevel_verify_native_bundle(args) -> int:
     from embodied_control.lowlevel.bundle import PolicyBundle
-    from embodied_control.lowlevel.native_core import verify_native_bundle
+    from embodied_control.lowlevel.native_core import (
+        default_trt_cache_dir,
+        inference_options,
+        verify_native_bundle,
+    )
 
     try:
-        report = verify_native_bundle(PolicyBundle.load(args.bundle))
+        bundle = PolicyBundle.load(args.bundle)
+        report = verify_native_bundle(
+            bundle,
+            inference=inference_options(
+                args.provider, trt_fp16=args.trt_fp16,
+                trt_cache_dir=default_trt_cache_dir(bundle),
+            ),
+        )
     except (
         KeyError,
         RuntimeError,
@@ -401,6 +412,76 @@ def _cmd_lowlevel_verify_native_bundle(args) -> int:
         print(f"FAIL: {exc}")
         return 1
     print(json.dumps(report, indent=2))
+    return 0
+
+
+def _cmd_lowlevel_bench_inference(args) -> int:
+    """Batch-1 latency per provider: what one control tick pays for inference."""
+    import time
+
+    import numpy as np
+
+    from embodied_control.lowlevel.bundle import PolicyBundle
+    from embodied_control.lowlevel.native_core import default_trt_cache_dir, inference_options
+
+    try:
+        import ec_native
+    except ImportError:
+        print("FAIL: needs the native environment")
+        return 2
+    bundle = PolicyBundle.load(args.bundle)
+    trace = np.load(bundle.root / "golden_trace.npz")
+    rows = []
+    for provider in [p.strip() for p in args.providers.split(",") if p.strip()]:
+        threads = [int(t) for t in args.threads.split(",")] if provider == "cpu" else [1]
+        for count in threads:
+            row = {"provider": provider, "threads": count}
+            for model_name, key_in, key_out in (
+                ("policy_onnx", "obs", "action"), ("encoder_onnx", "encoder_in", "encoder_out"),
+            ):
+                artifact = bundle.manifest.models.get(model_name)
+                if artifact is None or key_in not in trace:
+                    continue
+                try:
+                    started = time.perf_counter()
+                    engine = ec_native.OnnxEngine(
+                        str(bundle.model_path(model_name, expected_format="onnx")),
+                        artifact.input_name, artifact.output_name,
+                        artifact.input_shape[1], artifact.output_shape[1], count,
+                        inference_options(provider, trt_cache_dir=default_trt_cache_dir(bundle)),
+                    )
+                    build = time.perf_counter() - started
+                except RuntimeError as exc:
+                    row[model_name] = f"unavailable: {str(exc).splitlines()[0][:80]}"
+                    continue
+                engine.warmup(100)
+                sample = np.asarray(trace[key_in][0], dtype=np.float32)
+                durations = []
+                for _ in range(args.iterations):
+                    started = time.perf_counter()
+                    out = engine.infer(sample)
+                    durations.append(time.perf_counter() - started)
+                d = np.asarray(durations) * 1e3
+                row[model_name] = {
+                    "p50_ms": float(np.median(d)), "p99_ms": float(np.percentile(d, 99)),
+                    "max_ms": float(d.max()), "build_s": build,
+                    "max_abs_err_vs_golden": float(np.abs(out - trace[key_out][0]).max()),
+                    "actual_provider": engine.provider,
+                }
+            rows.append(row)
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return 0
+    print("%-9s %7s | %-40s | %-40s" % ("provider", "threads", "policy p50/p99/max ms (err)", "encoder p50/p99/max ms (err)"))
+    for row in rows:
+        cells = []
+        for name in ("policy_onnx", "encoder_onnx"):
+            v = row.get(name)
+            if isinstance(v, dict):
+                cells.append("%.3f / %.3f / %.3f (%.1e)" % (v["p50_ms"], v["p99_ms"], v["max_ms"], v["max_abs_err_vs_golden"]))
+            else:
+                cells.append(str(v or "-")[:40])
+        print("%-9s %7d | %-40s | %-40s" % (row["provider"], row["threads"], cells[0], cells[1]))
     return 0
 
 
@@ -1224,6 +1305,7 @@ def _cmd_lifecycle_rehearse(args) -> int:
         template=template,
         video=not args.no_video, offline=not args.fetch, plant_noise=args.plant_noise,
         plant_odometry=args.plant_odometry,
+        inference_provider=args.inference_provider, policy_threads=args.policy_threads,
     )
     try:
         summary = sweep(plan)
@@ -1459,7 +1541,20 @@ def build_parser() -> argparse.ArgumentParser:
         "verify-native-bundle", help="replay golden traces in C++ ONNX Runtime"
     )
     lnver.add_argument("bundle")
+    lnver.add_argument("--provider", choices=("cpu", "cuda", "tensorrt"), default="cpu")
+    lnver.add_argument("--trt-fp16", action="store_true")
     lnver.set_defaults(func=_cmd_lowlevel_verify_native_bundle)
+
+    lbinf = lows.add_parser(
+        "bench-inference",
+        help="batch-1 latency of a bundle's policy and encoder per provider / thread count",
+    )
+    lbinf.add_argument("bundle")
+    lbinf.add_argument("--providers", default="cpu,cuda,tensorrt")
+    lbinf.add_argument("--threads", default="1,4", help="cpu intra-op thread counts")
+    lbinf.add_argument("--iterations", type=int, default=2000)
+    lbinf.add_argument("--json", action="store_true")
+    lbinf.set_defaults(func=_cmd_lowlevel_bench_inference)
     lnbench = lows.add_parser(
         "bench-native", help="measure the callback-free native control hot path"
     )
@@ -1960,6 +2055,12 @@ def build_parser() -> argparse.ArgumentParser:
         "topic (e.g. rt/odommodestate): a perfect-estimator rehearsal. Empty "
         "(default) exercises the controller's leg odometry",
     )
+    reh.add_argument(
+        "--inference-provider", choices=("cpu", "cuda", "tensorrt"), default="cpu",
+        help="where the policy and encoder run; cuda / tensorrt need `-e native-gpu`. "
+        "Part of the rehearsal identity",
+    )
+    reh.add_argument("--policy-threads", type=int, default=1, help="ONNX Runtime intra-op threads (cpu)")
     reh.set_defaults(func=_cmd_lifecycle_rehearse)
 
     rehg = lifes.add_parser(

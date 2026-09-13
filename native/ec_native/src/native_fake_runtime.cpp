@@ -132,7 +132,8 @@ NativeFakeRuntime::NativeFakeRuntime(
     }
     encoder_ = std::make_unique<OnnxEngine>(
         encoder_path, encoder_input_name, encoder_output_name,
-        encoder_input_width, encoder_output_width, 1);
+        encoder_input_width, encoder_output_width,
+        planner_.encoder_inference);
     const std::size_t phase_width = planner_.sin_cos_phase ? 2 : 0;
     if (tracker_.command_width() != planner_.z_dim + phase_width) {
       throw std::runtime_error(

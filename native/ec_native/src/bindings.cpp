@@ -158,6 +158,30 @@ ec_native::NativePlannerConfig::EncoderTrigger encoder_trigger(
   throw std::runtime_error("unsupported encoder trigger: " + value);
 }
 
+// {"provider": cpu|cuda|tensorrt, "device_id": int, "intra_op_threads": int,
+//  "trt_fp16": bool, "trt_cache_dir": str}; missing keys keep the CPU defaults.
+ec_native::InferenceOptions inference_options(const py::dict& options,
+                                              std::size_t intra_op_threads) {
+  ec_native::InferenceOptions result;
+  result.intra_op_threads = intra_op_threads;
+  if (options.contains("provider")) {
+    result.provider = py::cast<std::string>(options["provider"]);
+  }
+  if (options.contains("device_id")) {
+    result.device_id = py::cast<int>(options["device_id"]);
+  }
+  if (options.contains("intra_op_threads")) {
+    result.intra_op_threads = py::cast<std::size_t>(options["intra_op_threads"]);
+  }
+  if (options.contains("trt_fp16")) {
+    result.trt_fp16 = py::cast<bool>(options["trt_fp16"]);
+  }
+  if (options.contains("trt_cache_dir")) {
+    result.trt_cache_dir = py::cast<std::string>(options["trt_cache_dir"]);
+  }
+  return result;
+}
+
 ec_native::NativePlannerConfig::AnchorSource anchor_source(
     const std::string& value) {
   if (value == "robot") {
@@ -275,7 +299,7 @@ class NativeTrackerCoreBinding {
       const FloatArray& action_scale, const FloatArray& joint_lower,
       const FloatArray& joint_upper, const FloatArray& fsq_half_levels,
       std::size_t fsq_z_dim, float raw_action_clip,
-      std::size_t intra_op_threads) {
+      std::size_t intra_op_threads, const py::dict& inference) {
     const auto defaults = vector_from_array(
         default_joint_position, ec_native::kJointCount, "default_joint_position");
     const auto scales =
@@ -312,8 +336,10 @@ class NativeTrackerCoreBinding {
     core_ = std::make_unique<ec_native::NativeTrackerCore>(
         policy_path, input_name, output_name, term_configs, command_width, defaults,
         scales, lower, upper, half, fsq_z_dim, raw_action_clip,
-        intra_op_threads);
+        inference_options(inference, intra_op_threads));
   }
+
+  std::string provider() const { return core_->provider(); }
 
   void reset() { core_->reset(); }
 
@@ -396,7 +422,7 @@ class NativeFakeRuntimeBinding {
       const std::string& encoder_output_name,
       std::size_t encoder_input_width, std::size_t encoder_output_width,
       int cpu, int fifo_priority, bool lock_memory,
-      bool require_realtime) {
+      bool require_realtime, const py::dict& encoder_inference) {
     ec_native::NativeSchedulerConfig scheduler{
         .control_hz = control_hz,
         .lag_alpha = lag_alpha,
@@ -421,6 +447,7 @@ class NativeFakeRuntimeBinding {
         .oracle_reference = oracle_reference,
         .reference_encoder_layout = reference_layout(reference_encoder_layout),
         .encoder_trigger = encoder_trigger(encoder_trigger_mode),
+        .encoder_inference = inference_options(encoder_inference, 1),
     };
     runtime_ = std::make_unique<ec_native::NativeFakeRuntime>(
         tracker.core(), response_slot, request_slot, create_slots, scheduler,
@@ -987,6 +1014,11 @@ class NativeUnitreeRuntimeBinding : public NativeFakeRuntimeBinding {
             config_value<std::string>(config, "reference_encoder_layout")),
         .encoder_trigger = encoder_trigger(
             config_value<std::string>(config, "encoder_trigger")),
+        .encoder_inference = inference_options(
+            config.contains("encoder_inference")
+                ? py::cast<py::dict>(config["encoder_inference"])
+                : py::dict(),
+            1),
     };
     auto runtime = std::make_unique<ec_native::NativeFakeRuntime>(
         tracker.core(), response_slot, request_slot, create_slots, scheduler,
@@ -1141,9 +1173,12 @@ class OnnxEngineBinding {
   OnnxEngineBinding(const std::string& model_path,
                     const std::string& input_name,
                     const std::string& output_name, std::size_t input_width,
-                    std::size_t output_width, std::size_t intra_op_threads)
+                    std::size_t output_width, std::size_t intra_op_threads,
+                    const py::dict& inference)
       : engine_(model_path, input_name, output_name, input_width,
-                output_width, intra_op_threads) {}
+                output_width, inference_options(inference, intra_op_threads)) {}
+
+  std::string provider() const { return engine_.provider(); }
 
   void warmup(std::size_t iterations) {
     py::gil_scoped_release release;
@@ -1214,14 +1249,16 @@ PYBIND11_MODULE(_ec_native, m) {
                     const std::vector<NativeTrackerCoreBinding::TermTuple>&,
                     std::size_t, const FloatArray&, const FloatArray&,
                     const FloatArray&, const FloatArray&, const FloatArray&,
-                    std::size_t, float, std::size_t>(),
+                    std::size_t, float, std::size_t, const py::dict&>(),
            py::arg("policy_path"), py::arg("input_name"),
            py::arg("output_name"), py::arg("terms"),
            py::arg("command_width"), py::arg("default_joint_position"),
            py::arg("action_scale"), py::arg("joint_lower"),
            py::arg("joint_upper"), py::arg("fsq_half_levels"),
            py::arg("fsq_z_dim"), py::arg("raw_action_clip") = 0.0F,
-           py::arg("intra_op_threads") = 4)
+           py::arg("intra_op_threads") = 4,
+           py::arg("inference") = py::dict())
+      .def_property_readonly("provider", &NativeTrackerCoreBinding::provider)
       .def("reset", &NativeTrackerCoreBinding::reset)
       .def("warmup", &NativeTrackerCoreBinding::warmup,
            py::arg("iterations") = 8)
@@ -1237,10 +1274,12 @@ PYBIND11_MODULE(_ec_native, m) {
   py::class_<OnnxEngineBinding>(m, "OnnxEngine")
       .def(py::init<const std::string&, const std::string&,
                     const std::string&, std::size_t, std::size_t,
-                    std::size_t>(),
+                    std::size_t, const py::dict&>(),
            py::arg("model_path"), py::arg("input_name"),
            py::arg("output_name"), py::arg("input_width"),
-           py::arg("output_width"), py::arg("intra_op_threads") = 4)
+           py::arg("output_width"), py::arg("intra_op_threads") = 4,
+           py::arg("inference") = py::dict())
+      .def_property_readonly("provider", &OnnxEngineBinding::provider)
       .def("warmup", &OnnxEngineBinding::warmup, py::arg("iterations") = 8)
       .def("infer", &OnnxEngineBinding::infer, py::arg("input"));
 
@@ -1265,7 +1304,7 @@ PYBIND11_MODULE(_ec_native, m) {
                std::size_t, std::size_t, bool, std::uint32_t, bool,
                const std::string&, std::size_t, const std::string&,
                const std::string&, const std::string&, const std::string&,
-               std::size_t, std::size_t, int, int, bool, bool>(),
+               std::size_t, std::size_t, int, int, bool, bool, const py::dict&>(),
            py::arg("tracker"), py::arg("response_slot"),
            py::arg("request_slot") = "", py::arg("create_slots") = true,
            py::arg("control_hz") = 50, py::arg("lag_alpha") = 1.0F,
@@ -1288,6 +1327,7 @@ PYBIND11_MODULE(_ec_native, m) {
            py::arg("encoder_output_width") = 0, py::arg("cpu") = -1,
            py::arg("fifo_priority") = 0, py::arg("lock_memory") = false,
            py::arg("require_realtime") = false,
+           py::arg("encoder_inference") = py::dict(),
            py::keep_alive<1, 2>())
       .def("start", &NativeFakeRuntimeBinding::start,
            py::arg("max_ticks"), py::arg("paced") = true)

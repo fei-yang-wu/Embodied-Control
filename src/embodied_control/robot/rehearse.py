@@ -77,6 +77,8 @@ class RehearsePlan:
     # a perfect estimator. Empty: the controller falls back to its own leg
     # odometry, the sim stand-in for the vendor estimator.
     plant_odometry: str = ""
+    inference_provider: str = "cpu"
+    policy_threads: int = 1
 
 
 # ------------------------------------------------------------------ jobs
@@ -134,7 +136,9 @@ def canonical_job(plan: RehearsePlan, motion: str, bundle_manifest) -> dict:
         "mjcf": str(Path(plan.model).resolve()),
         "realtime": {
             "control_cpu": 2, "writer_cpu": 3, "control_priority": 80,
-            "writer_priority": 90, "lock_memory": True, "policy_threads": 1,
+            "writer_priority": 90, "lock_memory": True,
+            "policy_threads": int(plan.policy_threads),
+            "inference_provider": str(plan.inference_provider),
         },
         "thresholds": {"settle_timeout_seconds": 15.0},
     }

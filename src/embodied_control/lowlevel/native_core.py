@@ -98,10 +98,52 @@ def _oracle_enabled(bundle: PolicyBundle, command_source: str) -> bool:
     return oracle
 
 
+INFERENCE_PROVIDERS = ("cpu", "cuda", "tensorrt")
+
+
+def inference_options(
+    provider: str = "cpu",
+    *,
+    device_id: int = 0,
+    intra_op_threads: int | None = None,
+    trt_fp16: bool = False,
+    trt_cache_dir: str = "",
+) -> dict:
+    """The `inference` dict the native bindings take (see InferenceOptions).
+
+    `cpu` is the reference path. `cuda` and `tensorrt` need the GPU
+    providers in the native build plus the CUDA / cuDNN / TensorRT runtime
+    libraries (`pixi run -e native-gpu ...`, which preloads them).
+    """
+    if provider not in INFERENCE_PROVIDERS:
+        raise ValueError(f"inference provider must be one of {INFERENCE_PROVIDERS}")
+    options: dict = {"provider": str(provider), "device_id": int(device_id),
+                     "trt_fp16": bool(trt_fp16), "trt_cache_dir": str(trt_cache_dir)}
+    if intra_op_threads is not None:
+        options["intra_op_threads"] = int(intra_op_threads)
+    return options
+
+
+def default_trt_cache_dir(bundle: PolicyBundle) -> str:
+    """One TensorRT engine cache per bundle, outside the bundle (pinned)."""
+    root = os.environ.get("EC_TRT_CACHE_DIR") or os.path.join(
+        os.path.expanduser("~"), ".cache", "embodied_control", "tensorrt"
+    )
+    path = os.path.join(root, bundle.root.name)
+    os.makedirs(path, exist_ok=True)  # TensorRT refuses a missing cache directory
+    return path
+
+
 class NativeTracker:
     """Configure C++ once; only fixed float arrays cross during diagnostic steps."""
 
-    def __init__(self, bundle: PolicyBundle, *, intra_op_threads: int = 4):
+    def __init__(
+        self,
+        bundle: PolicyBundle,
+        *,
+        intra_op_threads: int = 4,
+        inference: dict | None = None,
+    ):
         try:
             import ec_native
         except ImportError as exc:  # pragma: no cover - depends on optional build
@@ -150,7 +192,12 @@ class NativeTracker:
             fsq_z_dim,
             float(action.raw_action_clip or 0.0),
             int(intra_op_threads),
+            dict(inference or {}),
         )
+
+    @property
+    def provider(self) -> str:
+        return str(self._core.provider)
 
     def reset(self) -> None:
         self._core.reset()
@@ -205,6 +252,7 @@ class NativeFakeLoop:
         sensor_noise: dict[str, float] | None = None,
         noise_seed: int = 0,
         anchor_source: str = "bundle",
+        inference: dict | None = None,
     ) -> None:
         try:
             import ec_native
@@ -213,7 +261,10 @@ class NativeFakeLoop:
                 "NativeFakeLoop needs the native Pixi environment"
             ) from exc
 
-        self.tracker = NativeTracker(bundle, intra_op_threads=policy_threads)
+        inference = dict(inference or {})
+        self.tracker = NativeTracker(
+            bundle, intra_op_threads=policy_threads, inference=inference
+        )
         _require_supported_encoder_cadence(bundle)
         command = bundle.manifest.command
         oracle_reference = _oracle_enabled(bundle, command_source)
@@ -262,6 +313,7 @@ class NativeFakeLoop:
             int(fifo_priority),
             bool(lock_memory),
             bool(require_realtime),
+            inference,
         )
         self.anchor_source = _anchor_source_for(bundle, anchor_source)
         self._runtime.set_anchor_source(self.anchor_source)
@@ -504,6 +556,7 @@ class NativeUnitreeLoop(NativeFakeLoop):
         anchor_position_source: str = "auto",
         odometry_topic: str = "rt/odommodestate",
         odometry_mjcf: str = "",
+        inference: dict | None = None,
     ) -> None:
         try:
             import ec_native
@@ -511,6 +564,7 @@ class NativeUnitreeLoop(NativeFakeLoop):
             raise ImportError(
                 "NativeUnitreeLoop needs the Unitree-enabled native build"
             ) from exc
+        inference = dict(inference or {})
         if anchor_position_source not in ANCHOR_POSITION_SOURCES:
             raise ValueError(
                 f"anchor_position_source must be one of {ANCHOR_POSITION_SOURCES}"
@@ -524,7 +578,9 @@ class NativeUnitreeLoop(NativeFakeLoop):
                 "ec_native was built without Unitree SDK2; set "
                 "EC_UNITREE_SDK_ROOT and run `pixi run -e native build-native`"
             )
-        self.tracker = NativeTracker(bundle, intra_op_threads=policy_threads)
+        self.tracker = NativeTracker(
+            bundle, intra_op_threads=policy_threads, inference=inference
+        )
         _require_supported_encoder_cadence(bundle)
         action = bundle.manifest.action
         if not action.joint_limits_lower or not action.joint_limits_upper:
@@ -612,7 +668,9 @@ class NativeUnitreeLoop(NativeFakeLoop):
             config["isaac_joint_names"] = list(action.isaac_joint_names)
         self.anchor_source = _anchor_source_for(bundle, anchor_source)
         config["anchor_source"] = self.anchor_source
+        config["encoder_inference"] = inference
         self.anchor_position_source = str(anchor_position_source)
+        self.inference = inference
         self.bundle = bundle
         self._runtime = ec_native.NativeUnitreeRuntime(
             self.tracker._core,
@@ -796,8 +854,8 @@ class NativePlantClient:
 
 
 def verify_native_bundle(
-    bundle: PolicyBundle, *, warmup_iterations: int = 8
-) -> dict[str, float | int]:
+    bundle: PolicyBundle, *, warmup_iterations: int = 8, inference: dict | None = None
+) -> dict[str, float | int | str]:
     """Replay bundle golden traces in the C++ ONNX Runtime engine."""
     try:
         import ec_native
@@ -807,7 +865,8 @@ def verify_native_bundle(
         ) from exc
 
     trace = np.load(bundle.root / "golden_trace.npz")
-    report: dict[str, float | int] = {"rows": int(trace["obs"].shape[0])}
+    report: dict[str, float | int | str] = {"rows": int(trace["obs"].shape[0])}
+    report["provider"] = str((inference or {}).get("provider", "cpu"))
     for model_name, input_key, output_key, report_key in (
         ("policy_onnx", "obs", "action", "policy_max_abs_error"),
         ("encoder_onnx", "encoder_in", "encoder_out", "encoder_max_abs_error"),
@@ -825,6 +884,8 @@ def verify_native_bundle(
             artifact.output_name,
             artifact.input_shape[1],
             artifact.output_shape[1],
+            1,
+            dict(inference or {}),
         )
         engine.warmup(warmup_iterations)
         outputs = np.stack(

@@ -111,6 +111,18 @@ class NativeTrackerCore {
       std::span<const float> fsq_half_levels, std::size_t fsq_z_dim,
       float raw_action_clip,
       std::size_t intra_op_threads = 1);
+  NativeTrackerCore(
+      const std::string& policy_path, const std::string& input_name,
+      const std::string& output_name,
+      const std::vector<TermConfig>& terms,
+      std::size_t command_width,
+      std::span<const float> default_joint_position,
+      std::span<const float> action_scale,
+      std::span<const float> joint_lower, std::span<const float> joint_upper,
+      std::span<const float> fsq_half_levels, std::size_t fsq_z_dim,
+      float raw_action_clip,
+      const InferenceOptions& inference);
+  const std::string& provider() const noexcept { return engine_.provider(); }
 
   void reset() noexcept;
   const StepResult& step(const RobotState& state,
