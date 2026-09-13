@@ -178,7 +178,22 @@ class NativeTracker:
         fsq_half = command.fsq_half_levels or []
         fsq_z_dim = int(command.z_dim or 0) if command.quantizer == "fsq" else 0
         self.bundle = bundle
-        self._core = ec_native.NativeTrackerCore(
+        try:
+            self._core = self._build_core(ec_native, bundle, artifact, terms, command_width, action, lower, upper, fsq_half, fsq_z_dim, intra_op_threads, inference)
+        except RuntimeError as exc:
+            provider = str((inference or {}).get("provider", "cpu"))
+            if provider != "cpu":
+                raise RuntimeError(
+                    f"inference provider {provider!r} failed to start: {exc}. The "
+                    "CUDA / cuDNN runtime wheels come with the `native` environment "
+                    "(TensorRT with `native-gpu`); on a machine without an NVIDIA "
+                    "GPU set realtime.inference_provider=cpu."
+                ) from exc
+            raise
+
+    @staticmethod
+    def _build_core(ec_native, bundle, artifact, terms, command_width, action, lower, upper, fsq_half, fsq_z_dim, intra_op_threads, inference):
+        return ec_native.NativeTrackerCore(
             str(bundle.policy_onnx_path),
             artifact.input_name,
             artifact.output_name,

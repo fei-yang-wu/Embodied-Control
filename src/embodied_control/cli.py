@@ -895,6 +895,8 @@ def _cmd_lowlevel_unitree(args) -> int:
             "WARNING: G1 writes use best-effort timing; SCHED_FIFO setup "
             "failures will not block control"
         )
+    from embodied_control.lowlevel.native_core import default_trt_cache_dir, inference_options
+
     bundle = PolicyBundle.load(args.bundle)
     fixed_anchor = None
     if args.command_source == "oracle":
@@ -948,6 +950,7 @@ def _cmd_lowlevel_unitree(args) -> int:
         anchor_position_source=args.anchor_position_source,
         odometry_topic=args.odometry_topic,
         odometry_mjcf=args.odometry_mjcf,
+        inference=inference_options(args.inference_provider, trt_cache_dir=default_trt_cache_dir(bundle)),
         control_cpu=args.control_cpu,
         writer_cpu=args.writer_cpu,
         control_fifo_priority=args.control_priority,
@@ -1723,6 +1726,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--fixed-anchor-max-displacement", type=float, default=0.05
     )
     lunitree.add_argument(
+        "--inference-provider", choices=["cpu", "cuda", "tensorrt"], default="cuda",
+        help="where the policy and encoder run (default cuda)",
+    )
+    lunitree.add_argument(
         "--anchor", choices=["bundle", "robot", "expert_heading"], default="bundle",
         help="encoder window anchor: the live robot (heading from the IMU, "
         "translation from --anchor-position-source) or the window's own first "
@@ -2056,9 +2063,9 @@ def build_parser() -> argparse.ArgumentParser:
         "(default) exercises the controller's leg odometry",
     )
     reh.add_argument(
-        "--inference-provider", choices=("cpu", "cuda", "tensorrt"), default="cpu",
-        help="where the policy and encoder run; cuda / tensorrt need `-e native-gpu`. "
-        "Part of the rehearsal identity",
+        "--inference-provider", choices=("cpu", "cuda", "tensorrt"), default="cuda",
+        help="where the policy and encoder run (default cuda; tensorrt needs "
+        "`-e native-gpu`). Part of the rehearsal identity",
     )
     reh.add_argument("--policy-threads", type=int, default=1, help="ONNX Runtime intra-op threads (cpu)")
     reh.set_defaults(func=_cmd_lifecycle_rehearse)

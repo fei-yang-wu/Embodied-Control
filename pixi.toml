@@ -153,23 +153,30 @@ test-native = "pytest -q tests/lowlevel/test_native_shm.py tests/lowlevel/test_n
 # Jupyter and plotting on top of the lowlevel runtime + MuJoCo backend.
 # Everything runs on CPU: the tracker MLP is ~2M parameters and one 500-step
 # MuJoCo episode takes a couple of seconds.
-# GPU inference for the native runtime: the CUDA 12 / cuDNN 9 / TensorRT 10
-# runtime libraries the ONNX Runtime providers dlopen. ~5 GB of wheels; only
-# the `native-gpu` environment carries them. The native build itself is the
-# same in both environments.
-[feature.gpu]
+# GPU inference for the native runtime. `cuda` is the default provider since
+# 2026-09-13 (control tick 2.0 -> 0.2 ms on the deployment host, golden-trace
+# parity kept), so the `native` environment carries the CUDA 12 / cuDNN 9
+# runtime wheels the ONNX Runtime CUDA provider dlopens (~1.5 GB); ec_native
+# preloads them at import. TensorRT (opt-in, off-parity) adds 4.4 GB and
+# lives only in `native-gpu`.
+[feature.cuda]
 platforms = ["linux-64"]
 
-[feature.gpu.pypi-dependencies]
+[feature.cuda.pypi-dependencies]
 nvidia-cuda-runtime-cu12 = ">=12.8,<13"
 nvidia-cuda-nvrtc-cu12 = ">=12.8,<13"
 nvidia-cublas-cu12 = ">=12.8,<13"
 nvidia-cudnn-cu12 = ">=9.11,<10"
 nvidia-cufft-cu12 = ">=11.3,<12"
 nvidia-curand-cu12 = ">=10.3,<11"
+
+[feature.tensorrt]
+platforms = ["linux-64"]
+
+[feature.tensorrt.pypi-dependencies]
 tensorrt-cu12-libs = ">=10.9,<11"
 
-[feature.gpu.tasks]
+[feature.tensorrt.tasks]
 build-native-gpu = "pixi reinstall -e native-gpu ec-native && python -c \"import ec_native; print(ec_native.__version__, len(ec_native.GPU_RUNTIME_LIBRARIES), 'gpu libraries preloaded')\""
 
 [feature.notebook.dependencies]
@@ -187,6 +194,6 @@ sim = ["sim"]
 transports = ["transports"]
 lowlevel = ["lowlevel"]
 lowlevel-sim = ["lowlevel", "sim"]
-native = ["lowlevel", "native"]
-native-gpu = ["lowlevel", "native", "gpu"]
+native = ["lowlevel", "native", "cuda"]
+native-gpu = ["lowlevel", "native", "cuda", "tensorrt"]
 latent-lab = ["lowlevel", "sim", "notebook"]

@@ -288,12 +288,14 @@ window and only makes sense for a policy trained that way.
 
 ## GPU inference for the native runtime (2026-09-13)
 
-The native build now ships ONNX Runtime's CUDA-12 GPU release (CUDA and
-TensorRT execution providers next to `libonnxruntime.so`); the CPU path is
-unchanged and remains the default. `realtime.inference_provider: cuda` in a
-lifecycle job (or `ec lifecycle rehearse --inference-provider cuda`) needs
-the `native-gpu` pixi environment, which carries the cudart / cuBLAS /
-cuDNN 9 / TensorRT 10 wheels (~5 GB) and preloads them at `import ec_native`.
+The native build ships ONNX Runtime's CUDA-12 GPU release (CUDA and
+TensorRT execution providers next to `libonnxruntime.so`). `cuda` is the
+DEFAULT provider (`realtime.inference_provider`, rehearse
+`--inference-provider`, `ec lowlevel unitree --inference-provider`) since
+2026-09-13; the `native` environment carries the cudart / cuBLAS / cuDNN 9
+wheels (~1.5 GB) and `ec_native` preloads them at import. `cpu` stays the
+bit-exact reference path for a machine without an NVIDIA GPU. TensorRT is
+opt-in and needs `native-gpu` (adds the 4.4 GB TensorRT 10 wheel).
 Numbers on the deployment host (RTX 5080), batch 1: policy 1.1 ms on one CPU
 thread, 0.35 ms on four, 0.08 ms CUDA, 0.05 ms TensorRT; the whole control
 tick 2.0 ms -> 0.21 ms p50 (plant rehearsal). `cuda` reproduces the golden

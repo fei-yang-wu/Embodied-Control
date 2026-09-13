@@ -77,7 +77,7 @@ class RehearsePlan:
     # a perfect estimator. Empty: the controller falls back to its own leg
     # odometry, the sim stand-in for the vendor estimator.
     plant_odometry: str = ""
-    inference_provider: str = "cpu"
+    inference_provider: str = "cuda"
     policy_threads: int = 1
 
 
