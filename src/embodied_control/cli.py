@@ -1329,11 +1329,12 @@ def _cmd_lifecycle_rehearsal_grade(args) -> int:
         print(f"FAIL: {exc}")
         return 2
     fields = ("mpjpe_l_mm", "mpjpe_g_mm", "drift_max_m", "ankle_target_dither", "all_target_dither", "anchor_error_max_m")
+    smooth = ("body_acc_mps2", "body_jerk_mps3", "tracking_acceleration_distance_mps2", "action_delta_l2", "joint_torques_l2", "energy_consumption")
     print(f"{aggregate['output']}: {aggregate['passed']}/{aggregate['motions']} passed, "
           f"anchor sources {aggregate['anchor_position_sources']}")
-    print("%-12s %8s %8s %8s %8s %8s %8s" % ("subset", "L_mm", "G_mm", "drift_m", "ankle", "all", "anch_err"))
+    print("%-12s %8s %8s %8s %8s %8s %8s | %8s %8s %8s %8s %9s %8s" % ("subset", "L_mm", "G_mm", "drift_m", "ankle", "all", "anch_err", "acc", "jerk", "acc_dist", "adelta", "torque_l2", "energy"))
     for name in ("all", "passed_only"):
-        print("%-12s " % name + " ".join("%8.3f" % aggregate[name][k] for k in fields))
+        print("%-12s " % name + " ".join("%8.3f" % aggregate[name][k] for k in fields) + " | " + " ".join("%8.2f" % aggregate[name][k] for k in smooth[:4]) + " %9.1f %8.1f" % (aggregate[name]["joint_torques_l2"], aggregate[name]["energy_consumption"]))
     print(f"rows: {Path(args.output) / 'grade.tsv'}")
     return 0
 

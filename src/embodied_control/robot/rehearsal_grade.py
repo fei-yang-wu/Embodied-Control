@@ -17,7 +17,18 @@ reports per motion:
   ankles and all joints),
 - the controller's anchor error (its anchor displacement against the plant
   truth, m; the odometry quality when the anchor is live),
-- the anchor source the episode settled on (from lifecycle.jsonl).
+- the anchor source the episode settled on (from lifecycle.jsonl),
+- Isaac's smoothness metrics recomputed from the plant at the 50 Hz control
+  step so the plant row can sit next to the clean-board row: body
+  acceleration and jerk (mean over the reference bodies of |d v/dt| and
+  |d a/dt| from finite differences of the FK body positions),
+  tracking acceleration distance (|a_robot - a_ref| the same way),
+  action_delta_l2 (norm of the raw-action step), and
+- the actuator cost the PD loop pays on the 500 Hz plant rows: the applied
+  torque `kp (target - q) - kd qdot` clamped to the effort limit (the plant's
+  own law; it logs no torque), as mean sum tau^2 (Isaac's joint_torques_l2
+  term) and mean sum |tau qdot| (Isaac's energy_consumption term), with the
+  target of the last control tick held on every row, as the writer does.
 """
 
 from __future__ import annotations
@@ -45,6 +56,12 @@ class MotionGrade:
     ankle_target_dither: float
     all_target_dither: float
     anchor_error_max_m: float
+    body_acc_mps2: float
+    body_jerk_mps3: float
+    tracking_acceleration_distance_mps2: float
+    action_delta_l2: float
+    joint_torques_l2: float
+    energy_consumption: float
     anchor_position_source: str
     live_anchor: bool
     directory: str
@@ -118,6 +135,7 @@ def grade_run(
     isaac_joint_names: list[str],
     mjcf: str,
     seed: int = 0,
+    action=None,
 ) -> MotionGrade:
     """One `sim/seed_N` run directory."""
     result = json.loads((run / "result.json").read_text()) if (run / "result.json").is_file() else {}
@@ -128,7 +146,7 @@ def grade_run(
     if not telemetry_paths or not states_path.is_file():
         return MotionGrade(
             motion_name, seed, bool(result.get("passed", False)), 0, 0, nan, nan, nan, nan, nan, nan,
-            source, live, str(run),
+            nan, nan, nan, nan, nan, nan, source, live, str(run),
         )
     telemetry = np.load(telemetry_paths[-1])
     states = np.load(states_path)
@@ -144,7 +162,7 @@ def grade_run(
     if ticks.size == 0:
         return MotionGrade(
             motion_name, seed, bool(result.get("passed", False)), int(len(controller_joints)), 0,
-            nan, nan, nan, nan, nan, nan, source, live, str(run),
+            nan, nan, nan, nan, nan, nan, nan, nan, nan, nan, nan, nan, source, live, str(run),
         )
     # Join each control tick to the plant row with the same joint vector.
     rows = np.array([
@@ -175,6 +193,37 @@ def grade_run(
     anchor_error = float(np.linalg.norm(estimate[:, :2] - truth_in_reference[:, :2], axis=1).max())
     played = targets[ticks]
     ankles = [i for i, n in enumerate(isaac_joint_names) if "ankle" in n]
+    # Isaac's smoothness metrics at the control step (dt = 20 ms): finite
+    # differences of the FK body positions, mean over bodies, mean over ticks.
+    dt = 1.0 / 50.0
+    body_vel = np.diff(robot_bodies, axis=0) / dt
+    body_acc = np.diff(body_vel, axis=0) / dt
+    body_jerk = np.diff(body_acc, axis=0) / dt
+    ref_vel = np.diff(reference_bodies, axis=0) / dt
+    ref_acc = np.diff(ref_vel, axis=0) / dt
+    acc_distance = np.linalg.norm(body_acc - ref_acc, axis=-1).mean(axis=-1)
+    raw_action = (played - np.asarray(action.default_joint_pos)) / np.asarray(action.action_scale) if action is not None else None
+    action_delta = float(np.linalg.norm(np.diff(raw_action, axis=0), axis=-1).mean()) if raw_action is not None else nan
+    # PD torque on the 500 Hz plant rows between consecutive control ticks,
+    # target of the last tick held (the writer republishes it every 2 ms).
+    torque_l2 = energy = nan
+    if action is not None and action.stiffness and action.damping:
+        kp = np.asarray(action.stiffness, np.float64)
+        kd = np.asarray(action.damping, np.float64)
+        effort = np.asarray(action.effort_limit, np.float64) if action.effort_limit else None
+        period = float(states["sample_period_seconds"]) if "sample_period_seconds" in states.files else 0.002
+        first, last = int(rows[0]), int(rows[-1])
+        q_rows = plant_joints[first:last + 1]
+        qdot_rows = np.gradient(q_rows, period, axis=0)
+        held = np.empty_like(q_rows)
+        bounds = np.append(rows, last + 1)
+        for k in range(ticks.size):
+            held[bounds[k] - first:bounds[k + 1] - first] = targets[ticks[k]]
+        tau = kp * (held - q_rows) - kd * qdot_rows
+        if effort is not None:
+            tau = np.clip(tau, -effort, effort)
+        torque_l2 = float((tau ** 2).sum(axis=1).mean())
+        energy = float(np.abs(tau * qdot_rows).sum(axis=1).mean())
     return MotionGrade(
         motion=motion_name,
         seed=seed,
@@ -187,10 +236,24 @@ def grade_run(
         ankle_target_dither=float(np.mean([_second_difference(played[:, j]) for j in ankles])),
         all_target_dither=float(np.mean([_second_difference(played[:, j]) for j in range(played.shape[1])])),
         anchor_error_max_m=anchor_error,
+        body_acc_mps2=float(np.linalg.norm(body_acc, axis=-1).mean()),
+        body_jerk_mps3=float(np.linalg.norm(body_jerk, axis=-1).mean()),
+        tracking_acceleration_distance_mps2=float(acc_distance.mean()),
+        action_delta_l2=action_delta,
+        joint_torques_l2=torque_l2,
+        energy_consumption=energy,
         anchor_position_source=source,
         live_anchor=live,
         directory=str(run),
     )
+
+
+AGGREGATE_KEYS = (
+    "mpjpe_l_mm", "mpjpe_g_mm", "drift_max_m", "ankle_target_dither", "all_target_dither",
+    "anchor_error_max_m", "body_acc_mps2", "body_jerk_mps3",
+    "tracking_acceleration_distance_mps2", "action_delta_l2", "joint_torques_l2",
+    "energy_consumption",
+)
 
 
 def grade_rehearsal(output: str | Path, *, reference_root: str = "", mjcf: str = "") -> dict:
@@ -206,6 +269,7 @@ def grade_rehearsal(output: str | Path, *, reference_root: str = "", mjcf: str =
     grades: list[MotionGrade] = []
     reference = None
     names: list[str] | None = None
+    action = None
     for row in summary["rows"]:
         job = yaml.safe_load(Path(row["job"]).read_text())
         root = reference_root or job["reference_root"]
@@ -214,13 +278,14 @@ def grade_rehearsal(output: str | Path, *, reference_root: str = "", mjcf: str =
             raise ValueError("the job carries no mjcf; pass --mjcf")
         if reference is None:
             reference = ReferenceArrays(root)
-            names = list(PolicyBundle.load(job["bundle"]).manifest.action.isaac_joint_names)
+            action = PolicyBundle.load(job["bundle"]).manifest.action
+            names = list(action.isaac_joint_names)
         motion_dir = Path(row["job"]).parent
         for run in sorted((motion_dir / "sim").glob("seed_*")):
             seed = int(run.name.split("_")[-1])
             grades.append(grade_run(
                 run, reference=reference, motion_name=row["motion"], isaac_joint_names=names,
-                mjcf=model, seed=seed,
+                mjcf=model, seed=seed, action=action,
             ))
     fields = [f for f in MotionGrade.__dataclass_fields__ if f != "directory"]
     lines = ["\t".join(fields + ["directory"])]
@@ -241,14 +306,8 @@ def grade_rehearsal(output: str | Path, *, reference_root: str = "", mjcf: str =
         "motions": len(grades),
         "passed": len(passed),
         "anchor_position_sources": sorted({g.anchor_position_source for g in grades}),
-        "all": {k: mean_of(k, grades) for k in (
-            "mpjpe_l_mm", "mpjpe_g_mm", "drift_max_m", "ankle_target_dither",
-            "all_target_dither", "anchor_error_max_m",
-        )},
-        "passed_only": {k: mean_of(k, passed) for k in (
-            "mpjpe_l_mm", "mpjpe_g_mm", "drift_max_m", "ankle_target_dither",
-            "all_target_dither", "anchor_error_max_m",
-        )},
+        "all": {k: mean_of(k, grades) for k in AGGREGATE_KEYS},
+        "passed_only": {k: mean_of(k, passed) for k in AGGREGATE_KEYS},
         "rows": [asdict(g) for g in grades],
     }
     (output / "grade.json").write_text(json.dumps(aggregate, indent=1) + "\n")
