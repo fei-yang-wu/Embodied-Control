@@ -1,7 +1,7 @@
 # VLA evaluation and hardware inference with TWIST2
 
-Status: named GR00T transport fields and current-server decoding implemented and
-tested. TWIST2 controller execution and task evaluation are not yet implemented.
+Status: base-GR00T body-only TWIST2 integration smoke passed through two Docker
+runtimes. Task evaluation and hardware execution remain unvalidated.
 Branch: `feat/vla-twist2`, based on dev `6ae6c827001c3059178c390c3ad29005bc944f34`.
 
 ## Ownership and runtime boundaries
@@ -71,6 +71,22 @@ relative arm joints, one camera with two history frames, and navigation commands
 That differs from the custom pipette full-body contract used for SFT. Replacing
 its processor with the SFT processor is not a validated zero-shot policy mapping.
 The dataset's six-value hands also differ from TWIST2's seven-motor Dex3 driver.
-These mappings must be resolved before controller execution. The first evaluation
-scope (integration smoke versus a closed-loop pipette benchmark) is pending user
-selection; the existing TWIST2 scene does not establish a pipette success task.
+These mappings must be resolved before controller execution. The user selected an integration smoke. The existing TWIST2 scene does not
+establish a pipette success task.
+
+## Body-only smoke implementation
+
+`sim/twist2_eval.py` is the delegated headless MuJoCo/ONNX evaluator;
+`examples/twist2_gr00t_smoke.yaml` uses the existing EC runner and normalizer.
+`containers/twist2_eval/Dockerfile` isolates its CPU simulator/controller;
+`containers/gr00t_runtime/Dockerfile` wraps a read-only, locally provisioned native
+GR00T environment in a separate GPU container. DexVLA's dated campaign contains
+build/launch commands and the exact input/output limitations.
+
+Verified run: `20260913_184314_g1_twist2_base_body_smoke_42`, two real base-model
+requests, 80 command ticks plus 100 neutral ticks, finite state, final base height
+0.78298 m. Artifact validation passed. Integration success is not task success.
+The simulated body bridge does not execute hands, EEF or navigation outputs;
+arm/waist commands are bounded and locomotion stays nominal. Synthetic observations
+and paused simulation during inference are intentional smoke-test limitations.
+The three bridge tests run with `python tests/test_twist2_smoke.py` in the image.
