@@ -1,6 +1,7 @@
 # VLA evaluation and hardware inference with TWIST2
 
-Status: integration branch prepared; no TWIST2 adapter implemented or validated.
+Status: named GR00T transport fields and current-server decoding implemented and
+tested. TWIST2 controller execution and task evaluation are not yet implemented.
 Branch: `feat/vla-twist2`, based on dev `6ae6c827001c3059178c390c3ad29005bc944f34`.
 
 ## Ownership and runtime boundaries
@@ -42,7 +43,7 @@ collector and deployed controller. Select and hash the exact TWIST2 checkpoint.
 ## Implementation sequence
 
 1. Specify and test the G1 observation/action mapping using recorded samples.
-2. Serve the trained native GR00T checkpoint in its isolated runtime; validate
+2. Serve the base native GR00T checkpoint in its isolated runtime; validate
    actual wire requests and decoded action chunks through EC.
 3. Add a TWIST2 command bridge with explicit timestamps, command freshness and
    reset semantics. Prove it with a fake controller before simulation.
@@ -53,3 +54,23 @@ collector and deployed controller. Select and hash the exact TWIST2 checkpoint.
 
 Native and RLinf one-step SFT runs validate training plumbing only. They do not
 establish policy quality, controller compatibility or hardware readiness.
+
+## Implementation evidence (2026-09-13)
+
+`Gr00tObservationMapping` now supports named `state_keys` with explicit
+`state_dims`, ordered `action_dims`, and `batched` camera/state inputs. Camera
+history accepts (T,H,W,3); split actions must have matching (1,H,D) shapes and
+finite values. Existing LIBERO mappings remain covered by transport tests.
+The client decoder accepts both legacy NPY and current numeric msgpack-numpy
+responses without invoking pickle. Bidirectional arrays and modality metadata
+were verified against the pinned Isaac-GR00T serializer, not just EC fixtures.
+
+The requested checkpoint is the untouched base `nvidia/GR00T-N1.7-3B`. Its
+processor supports `real_g1_relative_eef_relative_joints` with wrist EEF poses,
+relative arm joints, one camera with two history frames, and navigation commands.
+That differs from the custom pipette full-body contract used for SFT. Replacing
+its processor with the SFT processor is not a validated zero-shot policy mapping.
+The dataset's six-value hands also differ from TWIST2's seven-motor Dex3 driver.
+These mappings must be resolved before controller execution. The first evaluation
+scope (integration smoke versus a closed-loop pipette benchmark) is pending user
+selection; the existing TWIST2 scene does not establish a pipette success task.

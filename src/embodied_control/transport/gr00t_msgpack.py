@@ -22,6 +22,10 @@ running, not against research done against a repo's HEAD at a different
 point in time -- two clones of the "same" project can disagree.
 """
 
+# The pinned N1.7 server also emits msgpack-numpy numeric envelopes and the
+# newer modality marker. Retain legacy encoding, which that server accepts,
+# and decode both formats without importing a pickle-capable decoder.
+
 from __future__ import annotations
 
 import io
@@ -40,6 +44,22 @@ def _encode(obj):
 
 def _decode(obj):
     if isinstance(obj, dict):
+        if b"nd" in obj or "nd" in obj:
+            def get(key, default=None):
+                return obj.get(key.encode(), obj.get(key, default))
+            if get("kind") not in (None, b"", ""):
+                raise ValueError("Only plain numeric GR00T arrays are supported")
+            dtype = np.dtype(get("type"))
+            if dtype.kind not in "buifc" or dtype.hasobject:
+                raise ValueError("Only plain numeric GR00T arrays are supported")
+            values = np.frombuffer(get("data"), dtype=dtype)
+            if get("nd"):
+                return values.reshape(tuple(get("shape")))
+            if values.size != 1:
+                raise ValueError("GR00T scalar must contain exactly one value")
+            return values[0]
+        if "__ModalityConfig__" in obj:
+            return obj["as_json"]
         if "__ndarray_class__" in obj:
             return np.load(io.BytesIO(obj["as_npy"]), allow_pickle=False)
         if "__ModalityConfig_class__" in obj:

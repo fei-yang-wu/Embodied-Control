@@ -49,6 +49,10 @@ class Gr00tObservationMapping:
     # our camera name -> the key the served checkpoint expects
     # (GR00T convention is commonly "video.<name>", e.g. "video.ego_view")
     camera_keys: dict[str, str] = field(default_factory=dict)
+    state_keys: dict[str, str] = field(default_factory=dict)
+    state_dims: dict[str, int] = field(default_factory=dict)
+    action_dims: dict[str, int] = field(default_factory=dict)
+    batched: bool = False
     proprio_key: str = "state.joint_position"
     prompt_key: str = "annotation.human.action.task_description"
     # key in the action dict returned by get_action() holding the chunk.
@@ -105,10 +109,25 @@ def observation_to_gr00t(obs: dict, mapping: Gr00tObservationMapping) -> dict:
             array = camera["array"]
             if mapping.flip_images_180:
                 array = _flip_180(array)
-            payload[their_key] = _batch_video(array) if mapping.libero_gr00t_proprio else array
+            if mapping.batched:
+                array = np.asarray(array)
+                if array.dtype != np.uint8 or array.ndim not in (3, 4) or array.shape[-1] != 3:
+                    raise ValueError("GR00T cameras require uint8 (H,W,3) or (T,H,W,3)")
+                payload[their_key] = array[None, None] if array.ndim == 3 else array[None]
+            else:
+                payload[their_key] = _batch_video(array) if mapping.libero_gr00t_proprio else array
 
     proprio = obs.get("proprio") or {}
-    if mapping.libero_gr00t_proprio:
+    if mapping.state_keys:
+        if not mapping.batched or set(mapping.state_dims) != set(mapping.state_keys):
+            raise ValueError("Named GR00T states require batched=True and matching state_dims")
+        for source, target in mapping.state_keys.items():
+            values = np.asarray(proprio[source], dtype=np.float32)
+            width = mapping.state_dims[source]
+            if width < 1 or values.shape != (width,) or not np.isfinite(values).all():
+                raise ValueError(f"Invalid GR00T state {source!r}: expected {width} finite values")
+            payload[target] = values[None, None]
+    elif mapping.libero_gr00t_proprio:
         payload.update(_libero_gr00t_state(proprio))
     elif proprio.get("values"):
         payload[mapping.proprio_key] = proprio["values"]
@@ -117,6 +136,10 @@ def observation_to_gr00t(obs: dict, mapping: Gr00tObservationMapping) -> dict:
     if task.get("language_instruction"):
         payload[mapping.prompt_key] = [task["language_instruction"]]
 
+    if mapping.batched:
+        missing = set(mapping.camera_keys.values()) - set(payload)
+        if missing:
+            raise ValueError(f"Missing GR00T cameras: {sorted(missing)}")
     return payload
 
 
@@ -163,6 +186,18 @@ def _libero_gr00t_action_to_chunk(action: dict) -> list[list[float]]:
 def gr00t_action_to_chunk(action: dict, mapping: Gr00tObservationMapping) -> list[list[float]]:
     """The action dict half of ``get_action()``'s ``(action, info)`` return
     -> our ``action_chunk`` wire shape."""
+    if mapping.action_dims:
+        columns = []
+        for key, width in mapping.action_dims.items():
+            column = np.asarray(action[key], dtype=np.float32)
+            if (width < 1 or column.ndim != 3 or column.shape[0] != 1
+                    or column.shape[1] < 1 or column.shape[2] != width
+                    or not np.isfinite(column).all()):
+                raise ValueError(f"GR00T {key!r} must have finite shape (1,H,{width})")
+            if columns and column.shape[1] != columns[0].shape[1]:
+                raise ValueError("GR00T action fields must share one horizon")
+            columns.append(column)
+        return np.concatenate(columns, axis=2)[0].tolist()
     if mapping.libero_gr00t_action:
         return _libero_gr00t_action_to_chunk(action)
     if mapping.action_key not in action:
