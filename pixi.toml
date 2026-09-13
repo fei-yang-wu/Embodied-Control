@@ -93,7 +93,7 @@ msgpack-numpy = ">=0.4"  # GR00T's own server uses this package's real envelope 
 pyzmq = ">=25"
 
 [feature.transports.tasks]
-test-transports = "pytest -q tests/test_openpi_client.py tests/test_gr00t_client.py"
+test-transports = "pytest -q tests/test_openpi_client.py tests/test_gr00t_client.py tests/test_gr00t_named_fields.py"
 
 # --- lowlevel feature: the 50 Hz G1 tracker runtime (policy bundles) ---
 # Torch stays out of the light default env. The lowlevel package needs numpy;
