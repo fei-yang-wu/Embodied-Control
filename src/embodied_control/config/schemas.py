@@ -75,7 +75,7 @@ class EndpointSpec(BaseModel):
 
 
 class SimSpec(BaseModel):
-    backend: Literal["mujoco", "fake_delegated", "libero"] = "mujoco"
+    backend: Literal["mujoco", "fake_delegated", "libero", "twist2"] = "mujoco"
     # stepped: host drives reset/step in-process (MuJoCo is flexible enough for this).
     # delegated: a separate runtime (local subprocess or Docker container) owns and
     # runs its own rollout loop end-to-end, calling the policy service directly; the
@@ -93,6 +93,8 @@ class SimSpec(BaseModel):
 
     @model_validator(mode="after")
     def _delegated_requires_action_dim(self) -> "SimSpec":
+        if self.backend == "twist2" and (self.mode != "delegated" or self.action_dim != 53):
+            raise ValueError("TWIST2 smoke requires delegated mode and action_dim=53")
         if self.mode == "delegated" and self.action_dim is None:
             raise ValueError("sim.action_dim is required when sim.mode='delegated'")
         return self

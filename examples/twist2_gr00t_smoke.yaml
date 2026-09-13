@@ -1,0 +1,34 @@
+api_version: ec.eval/v1alpha1
+name: g1_twist2_base_body_smoke
+seed: 42
+tags:
+  purpose: integration_smoke_only
+  checkpoint: nvidia/GR00T-N1.7-3B
+sim:
+  backend: twist2
+  mode: delegated
+  action_dim: 53
+  runtime:
+    type: docker
+    image: ec-twist2-eval:smoke
+  timeout_s: 600
+  backend_config:
+    prompt: Stand still and raise your right arm.
+policy:
+  endpoint:
+    scheme: gr00t_zmq
+    host: 127.0.0.1
+    port: 5567
+    action_dim: 53
+  requested_action_horizon: 40
+embodiment:
+  observation_schema_id: ec.obs.g1_synthetic_smoke/v1
+  action_schema_id: ec.action.g1_body_bounded_smoke/v1
+rollout:
+  num_episodes: 1
+  max_steps_per_episode: 80
+  record_video: true
+  video_fps: 25
+outputs:
+  root_dir: ./outputs/g1-twist2-base-smoke/eval
+  run_name_template: "{date}_{name}_{seed}"

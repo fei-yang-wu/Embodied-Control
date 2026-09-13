@@ -38,6 +38,7 @@ from embodied_control.runtime.local import LocalRuntimeAdapter
 _LOCAL_MODULES = {
     "fake_delegated": "embodied_control.sim.fake_delegated_eval",
     "libero": "embodied_control.sim.libero_eval",
+    "twist2": "embodied_control.sim.twist2_eval",
 }
 
 
