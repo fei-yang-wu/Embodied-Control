@@ -41,7 +41,7 @@ reports per motion:
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import fields, asdict, dataclass
 from pathlib import Path
 
 import numpy as np
@@ -159,7 +159,7 @@ def grade_run(
         # over): every metric is NaN, filled by name so a new column can
         # never shift the positional list again.
         blank = {
-            f: float("nan") for f, t in MotionGrade.__annotations__.items() if t is float
+            f.name: float("nan") for f in fields(MotionGrade) if f.type in (float, "float")
         }
         return MotionGrade(
             **blank, motion=motion_name, seed=seed, passed=bool(result.get("passed", False)),
