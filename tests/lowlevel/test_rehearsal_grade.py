@@ -34,4 +34,11 @@ def test_grade_reports_source_and_finite_metrics(output, expected_source):
                 "action_delta_l2", "joint_torques_l2", "energy_consumption"):
         assert row[key] == row[key] and row[key] > 0.0, key
     assert row["body_jerk_mps3"] > row["body_acc_mps2"]
+    # Joint-limit columns: targets past the training limit are ordinary and
+    # measured in percent; the measured excursion is what the writer faults on.
+    assert 0.0 <= row["target_beyond_limit_pct"] <= 100.0
+    assert 0.0 <= row["ankle_target_beyond_limit_pct"] <= 100.0
+    assert row["ankle_target_excess_max_rad"] >= 0.0
+    assert 0.0 <= row["measured_excess_max_rad"] < 0.2
+    assert aggregate["all_max"]["measured_excess_max_rad"] >= row["measured_excess_max_rad"]
     assert (path / "grade.tsv").is_file()

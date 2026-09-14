@@ -1335,6 +1335,10 @@ def _cmd_lifecycle_rehearsal_grade(args) -> int:
     print("%-12s %8s %8s %8s %8s %8s %8s | %8s %8s %8s %8s %9s %8s" % ("subset", "L_mm", "G_mm", "drift_m", "ankle", "all", "anch_err", "acc", "jerk", "acc_dist", "adelta", "torque_l2", "energy"))
     for name in ("all", "passed_only"):
         print("%-12s " % name + " ".join("%8.3f" % aggregate[name][k] for k in fields) + " | " + " ".join("%8.2f" % aggregate[name][k] for k in smooth[:4]) + " %9.1f %8.1f" % (aggregate[name]["joint_torques_l2"], aggregate[name]["energy_consumption"]))
+    limits = ("ankle_target_excess_max_rad", "target_beyond_limit_pct", "ankle_target_beyond_limit_pct", "measured_excess_max_rad")
+    print("%-12s %12s %12s %12s %12s   (target past the training limit is ordinary; measured past it is the ankle-stop fault, writer guard 0.1)" % ("limits", "ankle_tgt_ex", "tgt_beyond%", "ankle_bey%", "meas_ex_max"))
+    for name in ("all", "passed_only"):
+        print("%-12s " % name + " ".join("%12.3f" % aggregate[name][k] for k in limits) + "   max: ankle_tgt_ex %.3f meas_ex %.3f" % (aggregate[name + "_max"]["ankle_target_excess_max_rad"], aggregate[name + "_max"]["measured_excess_max_rad"]))
     print(f"rows: {Path(args.output) / 'grade.tsv'}")
     return 0
 

@@ -15,6 +15,13 @@ reports per motion:
   reference anchor, m),
 - the commanded target's dither (mean per-tick second difference, rad,
   ankles and all joints),
+- the commanded target against the bundle's training joint limits: the
+  ankles' largest excursion past a limit (rad), the share of (tick, joint)
+  pairs whose target sits past a limit (all joints, and the ankles), and
+  the measured joints' largest excursion past a limit on the plant rows
+  (rad; the writer faults at 0.1). A target past the limit is ordinary (a
+  PD target is a torque proxy); a MEASURED joint past the limit is the
+  ankle-stop failure mode,
 - the controller's anchor error (its anchor displacement against the plant
   truth, m; the odometry quality when the anchor is live),
 - the anchor source the episode settled on (from lifecycle.jsonl),
@@ -55,6 +62,10 @@ class MotionGrade:
     drift_max_m: float
     ankle_target_dither: float
     all_target_dither: float
+    ankle_target_excess_max_rad: float
+    target_beyond_limit_pct: float
+    ankle_target_beyond_limit_pct: float
+    measured_excess_max_rad: float
     anchor_error_max_m: float
     body_acc_mps2: float
     body_jerk_mps3: float
@@ -145,8 +156,8 @@ def grade_run(
     nan = float("nan")
     if not telemetry_paths or not states_path.is_file():
         return MotionGrade(
-            motion_name, seed, bool(result.get("passed", False)), 0, 0, nan, nan, nan, nan, nan, nan,
-            nan, nan, nan, nan, nan, nan, source, live, str(run),
+            motion_name, seed, bool(result.get("passed", False)), 0, 0, nan, nan, nan, nan, nan,
+            nan, nan, nan, nan, nan, nan, nan, nan, nan, nan, source, live, str(run),
         )
     telemetry = np.load(telemetry_paths[-1])
     states = np.load(states_path)
@@ -203,6 +214,18 @@ def grade_run(
     ref_acc = np.diff(ref_vel, axis=0) / dt
     acc_distance = np.linalg.norm(body_acc - ref_acc, axis=-1).mean(axis=-1)
     raw_action = (played - np.asarray(action.default_joint_pos)) / np.asarray(action.action_scale) if action is not None else None
+    # Commanded target and measured joints against the training soft limits.
+    ankle_excess_max = target_beyond_pct = ankle_target_beyond_pct = measured_excess_max = nan
+    if action is not None and action.joint_limits_lower and action.joint_limits_upper:
+        lower = np.asarray(action.joint_limits_lower, np.float64)
+        upper = np.asarray(action.joint_limits_upper, np.float64)
+        target_excess = np.maximum(np.maximum(played - upper, lower - played), 0.0)
+        ankle_excess_max = float(target_excess[:, ankles].max()) if ankles else nan
+        target_beyond_pct = float(100.0 * (target_excess > 0.0).mean())
+        ankle_target_beyond_pct = float(100.0 * (target_excess[:, ankles] > 0.0).mean()) if ankles else nan
+        rows_q = plant_joints[int(rows[0]):int(rows[-1]) + 1]
+        measured_excess = np.maximum(np.maximum(rows_q - upper, lower - rows_q), 0.0)
+        measured_excess_max = float(measured_excess.max())
     action_delta = float(np.linalg.norm(np.diff(raw_action, axis=0), axis=-1).mean()) if raw_action is not None else nan
     # PD torque on the 500 Hz plant rows between consecutive control ticks,
     # target of the last tick held (the writer republishes it every 2 ms).
@@ -235,6 +258,10 @@ def grade_run(
         drift_max_m=drift,
         ankle_target_dither=float(np.mean([_second_difference(played[:, j]) for j in ankles])),
         all_target_dither=float(np.mean([_second_difference(played[:, j]) for j in range(played.shape[1])])),
+        ankle_target_excess_max_rad=ankle_excess_max,
+        target_beyond_limit_pct=target_beyond_pct,
+        ankle_target_beyond_limit_pct=ankle_target_beyond_pct,
+        measured_excess_max_rad=measured_excess_max,
         anchor_error_max_m=anchor_error,
         body_acc_mps2=float(np.linalg.norm(body_acc, axis=-1).mean()),
         body_jerk_mps3=float(np.linalg.norm(body_jerk, axis=-1).mean()),
@@ -250,10 +277,14 @@ def grade_run(
 
 AGGREGATE_KEYS = (
     "mpjpe_l_mm", "mpjpe_g_mm", "drift_max_m", "ankle_target_dither", "all_target_dither",
+    "ankle_target_excess_max_rad", "target_beyond_limit_pct", "ankle_target_beyond_limit_pct",
+    "measured_excess_max_rad",
     "anchor_error_max_m", "body_acc_mps2", "body_jerk_mps3",
     "tracking_acceleration_distance_mps2", "action_delta_l2", "joint_torques_l2",
     "energy_consumption",
 )
+# Per-motion maxima that also get a board-wide maximum, next to the mean.
+MAX_KEYS = ("ankle_target_excess_max_rad", "measured_excess_max_rad")
 
 
 def grade_rehearsal(output: str | Path, *, reference_root: str = "", mjcf: str = "") -> dict:
@@ -300,6 +331,10 @@ def grade_rehearsal(output: str | Path, *, reference_root: str = "", mjcf: str =
         values = [getattr(g, key) for g in subset if np.isfinite(getattr(g, key))]
         return float(np.mean(values)) if values else float("nan")
 
+    def max_of(key: str, subset: list[MotionGrade]) -> float:
+        values = [getattr(g, key) for g in subset if np.isfinite(getattr(g, key))]
+        return float(np.max(values)) if values else float("nan")
+
     passed = [g for g in grades if g.passed]
     aggregate = {
         "output": str(output),
@@ -308,6 +343,8 @@ def grade_rehearsal(output: str | Path, *, reference_root: str = "", mjcf: str =
         "anchor_position_sources": sorted({g.anchor_position_source for g in grades}),
         "all": {k: mean_of(k, grades) for k in AGGREGATE_KEYS},
         "passed_only": {k: mean_of(k, passed) for k in AGGREGATE_KEYS},
+        "all_max": {k: max_of(k, grades) for k in MAX_KEYS},
+        "passed_only_max": {k: max_of(k, passed) for k in MAX_KEYS},
         "rows": [asdict(g) for g in grades],
     }
     (output / "grade.json").write_text(json.dumps(aggregate, indent=1) + "\n")
