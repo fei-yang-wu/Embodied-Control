@@ -184,6 +184,7 @@ def _normalize_episodes(store: ArtifactStore, plan: ExecutionPlan) -> list[Episo
                 metrics={**raw.get("metrics", {}), "success": float(raw["success"])},
                 policy=EpisodePolicyStats(
                     num_requests=raw.get("num_requests", 0),
+                    latencies_ms=[1000 * r["latency_s"] for r in raw.get("requests", [])],
                     mean_action_horizon=raw.get("mean_action_horizon", 0.0),
                     fallback_steps=0,
                     timeouts=0,

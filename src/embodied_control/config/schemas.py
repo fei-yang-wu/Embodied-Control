@@ -213,6 +213,7 @@ class ExecutionPlan(BaseModel):
 # --------------------------------------------------------------------------- #
 class EpisodePolicyStats(BaseModel):
     num_requests: int = 0
+    latencies_ms: list[float] = Field(default_factory=list)
     mean_action_horizon: float = 0.0
     fallback_steps: int = 0
     timeouts: int = 0

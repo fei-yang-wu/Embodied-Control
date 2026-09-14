@@ -42,6 +42,8 @@ def aggregate_run_metrics(
     episodes: list[EpisodeRecord],
     latencies_ms: list[float],
 ) -> RunMetrics:
+    if not latencies_ms:
+        latencies_ms = [latency for e in episodes for latency in e.policy.latencies_ms]
     completed = [e for e in episodes if e.status == "completed"]
     failed = [e for e in episodes if e.status == "failed"]
     n_completed = len(completed)
