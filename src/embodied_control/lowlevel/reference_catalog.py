@@ -111,7 +111,10 @@ def reference_compatibility(bundle, reference: ReferenceArrays) -> dict:
         raise ValueError('the 50 Hz tracker requires a 50 Hz reference')
     command = bundle.manifest.command
     interface = command.encoder_state_interface
-    expected = {'root_qpos': (38, {'robot', 'robot_heading'}),
+    # The anchor modes the native oracle publishes (native_core.ANCHOR_SOURCES):
+    # `expert_heading` bundles read the window's own first frame and need no
+    # robot state, so they pass the same reference check as the live modes.
+    expected = {'root_qpos': (38, {'robot', 'robot_heading', 'expert_heading'}),
                 'joint_qpos_qvel_anchor_ori': (64, {'robot_heading'})}
     if interface not in expected:
         raise ValueError(f'unsupported reference encoder interface {interface!r}')

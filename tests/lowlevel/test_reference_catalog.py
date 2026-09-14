@@ -79,6 +79,10 @@ def test_reference_contract_does_not_guess_training_distribution(tmp_path):
     bundle = SimpleNamespace(manifest=SimpleNamespace(command=command,
         action=SimpleNamespace(isaac_joint_names=reference.joint_names)))
     assert reference_compatibility(bundle, reference)['training_distribution'] == 'unknown'
+    # An expert_heading root_qpos bundle (anchor-blind encoder) passes too.
+    command.macro_anchor_mode = 'expert_heading'
+    assert reference_compatibility(bundle, reference)['training_distribution'] == 'unknown'
+    command.macro_anchor_mode = 'robot_heading'
     command.encoder_state_interface = 'joint_qpos_qvel_anchor_ori'
     command.state_dim = 64
     with pytest.raises(ValueError, match='qvel'):
