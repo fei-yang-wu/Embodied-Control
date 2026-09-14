@@ -1,0 +1,37 @@
+api_version: ec.eval/v1alpha1
+name: g1_pipette_twist2_replay
+seed: 42
+tags:
+  purpose: recorded_training_episode_input_replay
+sim:
+  backend: twist2
+  mode: delegated
+  action_dim: 47
+  runtime:
+    type: docker
+    image: ec-twist2-eval:replay
+    mounts:
+      - source: /absolute/path/to/g1-pipette-replay-0
+        target: /episode
+        mode: ro
+  timeout_s: 1200
+  backend_config:
+    replay_episode: /episode/episode.json
+    action_source: policy
+policy:
+  endpoint:
+    scheme: gr00t_zmq
+    host: 127.0.0.1
+    port: 5567
+    action_dim: 47
+  requested_action_horizon: 40
+embodiment:
+  observation_schema_id: ec.obs.g1_pipette_recorded/v1
+  action_schema_id: ec.action.g1_pipette_twist2_body/v1
+rollout:
+  num_episodes: 1
+  max_steps_per_episode: 633
+  record_video: true
+  video_fps: 60
+outputs:
+  root_dir: ./outputs/g1-pipette-replay/eval

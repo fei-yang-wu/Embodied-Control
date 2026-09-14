@@ -90,3 +90,36 @@ The simulated body bridge does not execute hands, EEF or navigation outputs;
 arm/waist commands are bounded and locomotion stays nominal. Synthetic observations
 and paused simulation during inference are intentional smoke-test limitations.
 The three bridge tests run with `python tests/test_twist2_smoke.py` in the image.
+
+## Recorded pipette input replay (2026-09-14)
+
+`sim/twist2_replay.py` extends the delegated evaluator with the fine-tuned
+`NEW_EMBODIMENT` contract: current RGB and two wrist images, 46 named state
+values, and 40 predicted absolute 47-value actions. The current native campaign
+uses horizon 40; the 15-frame contract above describes the earlier smoke only.
+DexVLA exports a versioned `episode.json` and checksum-pinned videos. The runner
+checks dataset joint names against the loaded MuJoCo model and explicitly maps
+29 body joints followed by `vx_local, vy_local, z, roll, pitch, yaw_rate` into
+TWIST2's root-first 35-value input. Hand values remain in prediction artifacts;
+they are not converted into Dex3 motor targets.
+
+`examples/twist2_pipette_replay.yaml` selects this mode. Set its read-only episode
+mount to the exported directory. Delegated runtimes now honor configured mounts,
+environment and shared-memory size. A separately running native GR00T server
+must serve the fine-tuned checkpoint with `--embodiment-tag NEW_EMBODIMENT` and
+`--use-sim-policy-wrapper`. `action_source: recorded` provides a controller-only
+reference using the same episode and timing.
+
+The replay streams recorded observations at chunk boundaries and executes each
+predicted action at the dataset's 60 Hz clock, holding commands across the 100 Hz
+controller ticks without accumulated clock drift. Simulator state never replaces
+recorded VLA inputs, and inference pauses simulated time. The video combines
+MuJoCo and the three recorded views. Predictions, target actions, controller
+commands, request chunks/latencies, simulated poses and metrics are preserved.
+Success denotes finite execution without base height dropping below 0.35 m,
+not pipetting success. Initial root xy/yaw and velocity are unavailable and set
+to zero; joints/roll/pitch come from recorded state, height from its first action.
+The plant receives 100 warm-up ticks with that first recorded command.
+
+The pipette scene/objects, calibrated sim cameras, hand actuation, real-time
+asynchronous inference and hardware deployment are outside this replay contract.

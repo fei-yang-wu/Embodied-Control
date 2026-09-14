@@ -93,8 +93,12 @@ class SimSpec(BaseModel):
 
     @model_validator(mode="after")
     def _delegated_requires_action_dim(self) -> "SimSpec":
-        if self.backend == "twist2" and (self.mode != "delegated" or self.action_dim != 53):
-            raise ValueError("TWIST2 smoke requires delegated mode and action_dim=53")
+        if self.backend == "twist2":
+            expected = 47 if self.backend_config.get("replay_episode") else 53
+            if self.mode != "delegated" or self.action_dim != expected:
+                raise ValueError(f"TWIST2 requires delegated mode and action_dim={expected}")
+            if self.backend_config.get("action_source", "policy") not in ("policy", "recorded"):
+                raise ValueError("TWIST2 action_source must be policy or recorded")
         if self.mode == "delegated" and self.action_dim is None:
             raise ValueError("sim.action_dim is required when sim.mode='delegated'")
         return self
@@ -148,6 +152,16 @@ class EvalJob(BaseModel):
     embodiment: EmbodimentBinding = Field(default_factory=EmbodimentBinding)
     rollout: RolloutSpec = Field(default_factory=RolloutSpec)
     outputs: OutputSpec = Field(default_factory=OutputSpec)
+
+
+    @model_validator(mode="after")
+    def _twist2_replay_contract(self) -> "EvalJob":
+        if self.sim.backend == "twist2" and self.sim.backend_config.get("replay_episode"):
+            if self.policy.requested_action_horizon != 40:
+                raise ValueError("Pipette replay requires the native 40-frame horizon")
+            if self.rollout.video_fps != 60:
+                raise ValueError("Pipette replay video uses recorded 60 Hz timing")
+        return self
 
 
 # --------------------------------------------------------------------------- #

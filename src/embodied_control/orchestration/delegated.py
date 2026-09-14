@@ -104,7 +104,10 @@ def run_delegated_rollout(
                 MountSpec(source=str(store.generated_dir), target="/generated", mode="ro"),
                 MountSpec(source=str(store.raw_dir), target="/raw", mode="rw"),
                 MountSpec(source=str(store.videos_dir), target="/videos", mode="rw"),
+                *rt.mounts,
             ],
+            env=rt.env,
+            shm_size=rt.shm_size,
             log_path=log_path,
             logger=logger,
         )
@@ -161,6 +164,9 @@ def _normalize_episodes(store: ArtifactStore, plan: ExecutionPlan) -> list[Episo
     for path in sorted(store.raw_dir.glob("episode_*.json")):
         raw = json.loads(path.read_text())
         artifacts = {"raw_record": f"raw/{path.name}"}
+        trace_path = store.raw_dir / f"trace_{raw['episode_id']:04d}.json"
+        if trace_path.is_file():
+            artifacts["trace"] = f"raw/{trace_path.name}"
         video_path = store.videos_dir / f"episode_{raw['episode_id']:04d}.mp4"
         if video_path.is_file():
             artifacts["video"] = f"videos/{video_path.name}"
@@ -175,7 +181,7 @@ def _normalize_episodes(store: ArtifactStore, plan: ExecutionPlan) -> list[Episo
                 success=bool(raw["success"]),
                 episode_length_steps=raw["steps"],
                 total_return=raw["total_return"],
-                metrics={"success": float(raw["success"])},
+                metrics={**raw.get("metrics", {}), "success": float(raw["success"])},
                 policy=EpisodePolicyStats(
                     num_requests=raw.get("num_requests", 0),
                     mean_action_horizon=raw.get("mean_action_horizon", 0.0),

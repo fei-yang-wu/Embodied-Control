@@ -134,6 +134,9 @@ def main(argv=None):
     args = parser.parse_args(argv); config = json.loads(Path(args.config).read_text())
     output = Path(args.output); output.mkdir(parents=True, exist_ok=True)
     videos = Path(args.videos_dir); videos.mkdir(parents=True, exist_ok=True)
+    if config.get("replay_episode"):
+        from embodied_control.sim.twist2_replay import run
+        return run(config, output, videos)
     client = make_policy_client(config["policy_scheme"], config["policy_host"], config["policy_port"],
                                 timeout_s=120, action_dim=53, observation_mapping=mapping())
     try:
