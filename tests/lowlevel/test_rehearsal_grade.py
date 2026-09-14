@@ -42,3 +42,18 @@ def test_grade_reports_source_and_finite_metrics(output, expected_source):
     assert 0.0 <= row["measured_excess_max_rad"] < 0.2
     assert aggregate["all_max"]["measured_excess_max_rad"] >= row["measured_excess_max_rad"]
     assert (path / "grade.tsv").is_file()
+
+
+def test_blank_grade_for_a_run_without_telemetry(tmp_path):
+    """A run that faulted before any episode grades as NaN, not a crash."""
+    from embodied_control.robot.rehearsal_grade import MotionGrade, grade_run
+
+    run = tmp_path / "sim" / "seed_0"
+    run.mkdir(parents=True)
+    (run / "result.json").write_text('{"passed": false}')
+    grade = grade_run(run, reference=None, motion_name="m", isaac_joint_names=[], mjcf="")
+    assert isinstance(grade, MotionGrade)
+    assert grade.passed is False and grade.ticks == 0
+    assert grade.mpjpe_l_mm != grade.mpjpe_l_mm  # NaN
+    assert grade.measured_excess_max_rad != grade.measured_excess_max_rad
+    assert grade.directory == str(run)

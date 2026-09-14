@@ -155,9 +155,16 @@ def grade_run(
     source, live = _anchor_evidence(run)
     nan = float("nan")
     if not telemetry_paths or not states_path.is_file():
+        # No episode telemetry (the run faulted before the policy took
+        # over): every metric is NaN, filled by name so a new column can
+        # never shift the positional list again.
+        blank = {
+            f: float("nan") for f, t in MotionGrade.__annotations__.items() if t is float
+        }
         return MotionGrade(
-            motion_name, seed, bool(result.get("passed", False)), 0, 0, nan, nan, nan, nan, nan,
-            nan, nan, nan, nan, nan, nan, nan, nan, nan, nan, source, live, str(run),
+            **blank, motion=motion_name, seed=seed, passed=bool(result.get("passed", False)),
+            ticks=0, reference_ticks=0, anchor_position_source=source, live_anchor=live,
+            directory=str(run),
         )
     telemetry = np.load(telemetry_paths[-1])
     states = np.load(states_path)
