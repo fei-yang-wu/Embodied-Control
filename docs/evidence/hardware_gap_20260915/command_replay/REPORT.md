@@ -99,3 +99,39 @@ walks clean on it. So the fitted actuation does not reproduce the
 walking_quip_360 trip; it does change which motions fail, and SONIC is
 not immune (waist_pitch guard on the same motion). One seed each; the
 fault set needs repeats before it says anything about a specific motion.
+
+## Observation replay floor (`artifacts/obsreplay_20260915/`, echost, plant, stock profile)
+
+`ec lowlevel replay-observations` on a post f845 walking_quip_360 plant
+run recorded with the per-tick observation record (EC 2a6ae50), cuda
+provider, blend 250 ticks:
+
+| check | ticks | max abs | clean from tick |
+|---|---|---|---|
+| actor (observation -> policy -> decode vs written target) | 657 | 1.3e-7 | 250 |
+| encoder (window -> encoder vs consumed latent) | 907 | 0 | 0 |
+| assembly (state + command + last action -> observation) | 647 | 0 | 260 |
+
+Tick period 20.00 ms median / 21.13 max; sensor age (tick start minus
+LowState receive) 1.55 ms median / 1.72 p95 on the plant. A hardware
+recording is read against these: any actor/encoder residual is inference,
+any assembly residual is the observation pipeline, and the sensor-age
+distribution is the state delay the policy actually saw.
+
+## Lip lattice (`artifacts/lip_20260915/`, echost, stock profile, measured noise)
+
+0.25 m lattice of 20 mm wide box lips clear of the start pose
+(`g1_29dof_rev_1_0_lip3.xml` / `_lip5.xml`, 3 and 5 mm), walking_quip_360:
+
+| lip | bundle | runs | clean | stumble (ends > 1 m short) |
+|---|---|---|---|---|
+| 3 mm | post f845 | 6 | 6 | 2 (x end 3.17, 3.41 of 4.96; ankle dither 0.035 vs 0.012) |
+| 3 mm | sonic_v1_1 | 6 | 5 + 1 plant fault before ARMED | 0 |
+| 5 mm | post f845 | 1 | 1 | 0 |
+| 5 mm | sonic_v1_1 | 1 | 1 | 0 |
+
+Nobody falls; the 3 mm lattice makes post stumble in 2 of 6 runs where
+SONIC keeps pace in 5 of 5 walks. Stumble without a fall is the nearest
+plant event to the hardware trip so far. The seed-0 run stumbled once and
+walked clean once (async timing differs between 1-lane and 4-lane runs),
+so the rate is over runs, not seeds.
