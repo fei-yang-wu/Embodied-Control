@@ -182,6 +182,18 @@ void NativeFakeRuntime::start(std::size_t max_ticks, bool paced) {
                           std::numeric_limits<float>::quiet_NaN());
   command_target_log_.assign(max_ticks * kJointCount,
                              std::numeric_limits<float>::quiet_NaN());
+  observation_log_width_ = tracker_.observation_width();
+  command_log_width_ = tracker_.command_width();
+  encoder_window_log_width_ = encoder_ ? encoder_->input_width() : 0;
+  state_log_.assign(max_ticks * kStateLogWidth,
+                    std::numeric_limits<float>::quiet_NaN());
+  observation_log_.assign(max_ticks * observation_log_width_,
+                          std::numeric_limits<float>::quiet_NaN());
+  command_log_.assign(max_ticks * command_log_width_,
+                      std::numeric_limits<float>::quiet_NaN());
+  encoder_window_log_.assign(max_ticks * encoder_window_log_width_,
+                             std::numeric_limits<float>::quiet_NaN());
+  tick_stamps_ns_.assign(max_ticks * 2, 0);
   backend_->reset();
   robot_state_ = backend_->read_state();
   planner_history_initialized_ = false;
@@ -336,6 +348,7 @@ void NativeFakeRuntime::run(std::size_t max_ticks, bool paced) noexcept {
     }
 
     const std::uint64_t started_ns = monotonic_ns();
+    tick_started_ns_ = started_ns;
     loop_tick_ = tick;
     if (tick > 0 && !reference_paused_.load(std::memory_order_relaxed)) {
       ++reference_tick_;
@@ -762,6 +775,11 @@ bool NativeFakeRuntime::encode_active_reference(
   if (!packed) {
     return false;
   }
+  if (loop_tick_ < tick_stamps_ns_.size() / 2 &&
+      input_width == encoder_window_log_width_) {
+    std::copy_n(encoder_window_.begin(), input_width,
+                encoder_window_log_.begin() + loop_tick_ * input_width);
+  }
   try {
     const auto z = encoder_->infer(
         std::span<const float>(encoder_window_.data(), input_width));
@@ -784,6 +802,16 @@ void NativeFakeRuntime::record_reference_metrics() noexcept {
     std::copy(robot_state_.joint_position.begin(),
               robot_state_.joint_position.end(),
               joint_position_log_.begin() + loop_tick_ * kJointCount);
+    float* state_row = state_log_.data() + loop_tick_ * kStateLogWidth;
+    std::copy(robot_state_.joint_velocity.begin(),
+              robot_state_.joint_velocity.end(), state_row);
+    std::copy(robot_state_.projected_gravity.begin(),
+              robot_state_.projected_gravity.end(), state_row + kJointCount);
+    std::copy(robot_state_.base_angular_velocity.begin(),
+              robot_state_.base_angular_velocity.end(),
+              state_row + kJointCount + 3);
+    tick_stamps_ns_[loop_tick_ * 2] = tick_started_ns_;
+    tick_stamps_ns_[loop_tick_ * 2 + 1] = robot_state_.state_receive_ns;
     if (robot_state_.anchor_pose_valid) {
       float* pose = anchor_pose_log_.data() + loop_tick_ * 7;
       std::copy(robot_state_.anchor_position_w.begin(),
@@ -957,6 +985,13 @@ void NativeFakeRuntime::one_tick() noexcept {
     const auto& result = tracker_.step(
         robot_state_,
         std::span<const float>(command_.data(), tracker_.command_width()));
+    if (loop_tick_ < tick_stamps_ns_.size() / 2) {
+      std::copy_n(result.observation.begin(),
+                  std::min(result.observation_width, observation_log_width_),
+                  observation_log_.begin() + loop_tick_ * observation_log_width_);
+      std::copy_n(command_.begin(), command_log_width_,
+                  command_log_.begin() + loop_tick_ * command_log_width_);
+    }
     const float weight = backend_->blend_weight();
     std::array<float, kJointCount> held{};
     if (weight < 1.0F && backend_->held_target(held)) {
@@ -1072,6 +1107,34 @@ std::vector<float> NativeFakeRuntime::command_target_log() const {
   const std::size_t count = static_cast<std::size_t>(ticks_.load());
   return {command_target_log_.begin(),
           command_target_log_.begin() + count * kJointCount};
+}
+
+std::vector<float> NativeFakeRuntime::state_log() const {
+  const std::size_t count = static_cast<std::size_t>(ticks_.load());
+  return {state_log_.begin(), state_log_.begin() + count * kStateLogWidth};
+}
+
+std::vector<float> NativeFakeRuntime::observation_log() const {
+  const std::size_t count = static_cast<std::size_t>(ticks_.load());
+  return {observation_log_.begin(),
+          observation_log_.begin() + count * observation_log_width_};
+}
+
+std::vector<float> NativeFakeRuntime::command_log() const {
+  const std::size_t count = static_cast<std::size_t>(ticks_.load());
+  return {command_log_.begin(),
+          command_log_.begin() + count * command_log_width_};
+}
+
+std::vector<float> NativeFakeRuntime::encoder_window_log() const {
+  const std::size_t count = static_cast<std::size_t>(ticks_.load());
+  return {encoder_window_log_.begin(),
+          encoder_window_log_.begin() + count * encoder_window_log_width_};
+}
+
+std::vector<std::uint64_t> NativeFakeRuntime::tick_stamps_ns() const {
+  const std::size_t count = static_cast<std::size_t>(ticks_.load());
+  return {tick_stamps_ns_.begin(), tick_stamps_ns_.begin() + count * 2};
 }
 
 std::vector<float> NativeFakeRuntime::anchor_pose_log() const {

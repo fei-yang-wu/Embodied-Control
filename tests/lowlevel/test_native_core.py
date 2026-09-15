@@ -437,6 +437,34 @@ def test_native_oracle_encodes_stride_five_reference_on_every_control_tick(
     assert stats["encoder_inferences"] == 12
     assert stats["planner_requests"] >= 3
 
+    # Observation replay record: every control tick logs the sensor state
+    # the policy read, the observation and command it stepped with, the
+    # encoder window on the ticks the encoder ran, and the tick clocks.
+    ticks = stats["ticks"]
+    obs_width = loop.tracker.observation_width
+    state = loop.state_log()
+    observation = loop.observation_log()
+    command = loop.command_log()
+    window = loop.encoder_window_log()
+    stamps = loop.tick_stamps_ns()
+    assert state.shape == (ticks, 35)
+    assert observation.shape == (ticks, obs_width)
+    assert command.shape == (ticks, loop.tracker.command_width)
+    assert window.shape[0] == ticks and window.shape[1] > 0
+    assert stamps.shape == (ticks, 2)
+    assert np.isfinite(state).all()
+    controlled = np.isfinite(observation).all(axis=1)
+    assert controlled.sum() == stats["control_ticks"]
+    assert np.isfinite(command[controlled]).all()
+    assert np.isfinite(window).all(axis=1).sum() == stats["encoder_inferences"]
+    # Tick-start stamps advance by the control period; the fake backend has
+    # no receive clock, so the sensor stamp stays 0.
+    assert (np.diff(stamps[:, 0].astype(np.int64)) > 0).all()
+    assert (stamps[:, 1] == 0).all()
+    # The command the actor consumed is the latent the encoder produced.
+    encoded = np.isfinite(window).all(axis=1) & controlled
+    assert encoded.any()
+
 
 def test_native_step_assembles_and_decodes(tmp_path, latent_manifest):
     tracker = NativeTracker(_native_bundle(tmp_path, latent_manifest))

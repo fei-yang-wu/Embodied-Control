@@ -404,6 +404,34 @@ class NativeFakeLoop:
     def command_target_log(self) -> np.ndarray:
         return np.asarray(self._runtime.command_target_log()).reshape(-1, 29)
 
+    # Observation replay record: what the policy consumed on each tick.
+    def state_log(self) -> np.ndarray:
+        """ticks x 35: joint velocity 29 | projected gravity 3 | gyro 3."""
+        return np.asarray(self._runtime.state_log()).reshape(-1, 35)
+
+    def observation_log(self) -> np.ndarray:
+        """ticks x actor observation width (NaN on ticks without a step)."""
+        return np.asarray(self._runtime.observation_log()).reshape(
+            -1, max(int(self._runtime.observation_log_width()), 1)
+        )
+
+    def command_log(self) -> np.ndarray:
+        """ticks x command width: the latent (and phase) the actor stepped with."""
+        return np.asarray(self._runtime.command_log()).reshape(
+            -1, max(int(self._runtime.command_log_width()), 1)
+        )
+
+    def encoder_window_log(self) -> np.ndarray:
+        """ticks x encoder input width: the window on the ticks the encoder
+        ran, NaN elsewhere; empty when the bundle has no encoder."""
+        width = int(self._runtime.encoder_window_log_width())
+        return np.asarray(self._runtime.encoder_window_log()).reshape(-1, max(width, 1))[:, :width]
+
+    def tick_stamps_ns(self) -> np.ndarray:
+        """ticks x 2 CLOCK_MONOTONIC ns: tick start, sensor frame receive
+        (0 when the backend has no receive clock)."""
+        return np.asarray(self._runtime.tick_stamps_ns(), dtype=np.uint64).reshape(-1, 2)
+
     def tick_durations_ns(self) -> np.ndarray:
         return np.asarray(self._runtime.tick_durations_ns(), dtype=np.uint64)
 

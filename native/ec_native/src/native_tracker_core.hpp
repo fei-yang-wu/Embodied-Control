@@ -66,6 +66,9 @@ struct RobotState {
   std::array<float, 3> anchor_position_w{};
   std::array<float, 4> anchor_quaternion_w{0.0F, 0.0F, 0.0F, 1.0F};
   bool anchor_pose_valid = false;
+  // CLOCK_MONOTONIC stamp of the sensor frame behind this state (0 when the
+  // backend has no receive clock, e.g. the fake backend).
+  std::uint64_t state_receive_ns = 0;
 };
 
 bool align_heading_to_reference(

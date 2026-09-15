@@ -93,6 +93,14 @@ class TelemetryRecorder:
                 self.runtime.tick_durations_ns(), dtype=np.int64
             ),
         }
+        for name, dtype in (
+            ("command_target_log", np.float32), ("state_log", np.float32),
+            ("observation_log", np.float32), ("command_log", np.float32),
+            ("encoder_window_log", np.float32), ("tick_stamps_ns", np.uint64),
+        ):
+            getter = getattr(self.runtime, name, None)
+            if getter is not None:
+                record[name] = np.asarray(getter(), dtype=dtype)
         record["stats"] = dict(self.runtime.stats())
         return record
 

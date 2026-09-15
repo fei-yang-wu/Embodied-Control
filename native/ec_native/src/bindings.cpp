@@ -588,6 +588,29 @@ class NativeFakeRuntimeBinding {
     return result;
   }
 
+  template <typename T>
+  static py::array_t<T> to_array(const std::vector<T>& values) {
+    py::array_t<T> result(static_cast<py::ssize_t>(values.size()));
+    std::memcpy(result.mutable_data(), values.data(), sizeof(T) * values.size());
+    return result;
+  }
+  py::array_t<float> state_log() const { return to_array(runtime_->state_log()); }
+  py::array_t<float> observation_log() const {
+    return to_array(runtime_->observation_log());
+  }
+  py::array_t<float> command_log() const { return to_array(runtime_->command_log()); }
+  py::array_t<float> encoder_window_log() const {
+    return to_array(runtime_->encoder_window_log());
+  }
+  py::array_t<std::uint64_t> tick_stamps_ns() const {
+    return to_array(runtime_->tick_stamps_ns());
+  }
+  std::size_t observation_log_width() const { return runtime_->observation_log_width(); }
+  std::size_t command_log_width() const { return runtime_->command_log_width(); }
+  std::size_t encoder_window_log_width() const {
+    return runtime_->encoder_window_log_width();
+  }
+
   py::array_t<float> anchor_pose_log() const {
     const auto values = runtime_->anchor_pose_log();
     py::array_t<float> result(static_cast<py::ssize_t>(values.size()));
@@ -1359,6 +1382,15 @@ PYBIND11_MODULE(_ec_native, m) {
            &NativeFakeRuntimeBinding::joint_position_log)
       .def("anchor_pose_log", &NativeFakeRuntimeBinding::anchor_pose_log)
       .def("command_target_log", &NativeFakeRuntimeBinding::command_target_log)
+      .def("state_log", &NativeFakeRuntimeBinding::state_log)
+      .def("observation_log", &NativeFakeRuntimeBinding::observation_log)
+      .def("command_log", &NativeFakeRuntimeBinding::command_log)
+      .def("encoder_window_log", &NativeFakeRuntimeBinding::encoder_window_log)
+      .def("tick_stamps_ns", &NativeFakeRuntimeBinding::tick_stamps_ns)
+      .def("observation_log_width", &NativeFakeRuntimeBinding::observation_log_width)
+      .def("command_log_width", &NativeFakeRuntimeBinding::command_log_width)
+      .def("encoder_window_log_width",
+           &NativeFakeRuntimeBinding::encoder_window_log_width)
       .def("base_heights", &NativeFakeRuntimeBinding::base_heights)
       .def("reference_joint_mae",
            &NativeFakeRuntimeBinding::reference_joint_mae)

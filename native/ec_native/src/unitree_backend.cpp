@@ -507,6 +507,7 @@ const RobotState& NativeUnitreeBackend::read_state() noexcept {
   state_cache_.joint_position = snapshot.joint_position;
   state_cache_.joint_velocity = snapshot.joint_velocity;
   state_cache_.base_angular_velocity = snapshot.gyroscope;
+  state_cache_.state_receive_ns = snapshot.receive_ns;
   // One projected-gravity implementation for every backend. A hand-written
   // copy here had roll and pitch sign-flipped: the plant rehearsal showed the
   // policy leaning into every tilt until it fell, four seconds after engaging.

@@ -796,6 +796,31 @@ def _cmd_lowlevel_compare_unitree_pose(args) -> int:
     return 0 if report["status"] == "pass" else 1
 
 
+def _cmd_lowlevel_replay_observations(args) -> int:
+    """Observation replay: the policy side of the loop against a recording."""
+    from embodied_control.lowlevel.bundle import PolicyBundle
+    from embodied_control.lowlevel.observation_replay import (
+        load_observation_recording, replay, write_report,
+    )
+
+    bundle = PolicyBundle.load(args.bundle)
+    recording = load_observation_recording(args.telemetry)
+    inference = {"provider": args.provider} if args.provider else None
+    checks = replay(recording, bundle, blend_ticks=args.blend_ticks, inference=inference)
+    summary = write_report(checks, recording, args.output,
+                           label=args.label or Path(args.telemetry).parent.parent.name)
+    print(f"{summary['label']}: {summary['ticks']} ticks ({summary['controlled_ticks']} controlled), "
+          f"tick period {summary['tick_period_ms']['median']:.2f} ms median / "
+          f"{summary['tick_period_ms']['max']:.2f} max, sensor age "
+          f"{summary['sensor_age_ms']['median']:.2f} ms median / {summary['sensor_age_ms']['p95']:.2f} p95")
+    print("%-10s %8s %10s %10s %12s %6s" % ("check", "ticks", "max_abs", "p95_abs", "clean_from", "ok"))
+    for name, check in checks.items():
+        print("%-10s %8d %10.2e %10.2e %12d %6s" % (
+            name, check.ticks_compared, check.max_abs, check.p95_abs, check.first_clean_tick,
+            "yes" if check.ok else "NO"))
+    return 0 if all(c.ok for c in checks.values()) else 1
+
+
 def _cmd_lowlevel_replay_commands(args) -> int:
     """Command replay: the plant side of the loop against a recording."""
     from embodied_control.lowlevel.bundle import PolicyBundle
@@ -1750,6 +1775,21 @@ def build_parser() -> argparse.ArgumentParser:
     lreplay.add_argument("--output", required=True)
     lreplay.add_argument("--label", default="")
     lreplay.set_defaults(func=_cmd_lowlevel_replay_commands)
+
+    lobs = lows.add_parser(
+        "replay-observations",
+        help="run a recording's consumed observations and encoder windows through the bundle's "
+             "ONNX models and re-assemble the observation from the recorded sensor state; "
+             "grade each against what the controller recorded (plant out of the loop)",
+    )
+    lobs.add_argument("telemetry", help="episode telemetry.npz with the per-tick observation log")
+    lobs.add_argument("--bundle", required=True)
+    lobs.add_argument("--blend-ticks", type=int, default=0,
+                      help="the job's blend_ticks: targets and last-action there are blended")
+    lobs.add_argument("--provider", default="", help="onnxruntime provider (default: cpu)")
+    lobs.add_argument("--output", required=True)
+    lobs.add_argument("--label", default="")
+    lobs.set_defaults(func=_cmd_lowlevel_replay_observations)
 
     lodom = lows.add_parser(
         "odometry-probe",

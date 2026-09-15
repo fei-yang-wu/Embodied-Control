@@ -403,3 +403,36 @@ def test_each_episode_keeps_its_own_rehearsal_evidence(tmp_path):
     # The first episode's evidence survives the second lifecycle's shutdown.
     assert json.loads(first.read_text())["state"] == "VENDOR_RESTORED"
     assert (tmp_path / "lifecycle.jsonl").read_text().count("VENDOR_RESTORED") >= 2
+
+
+def test_observation_replay_arrays_collects_what_the_tracker_records():
+    """The episode telemetry carries the per-tick record the policy consumed
+    when the tracker exposes it, and stays silent for trackers that do not."""
+    import numpy as np
+
+    from embodied_control.robot.session import observation_replay_arrays
+
+    class Recording:
+        def state_log(self):
+            return np.zeros((3, 35), np.float32)
+
+        def observation_log(self):
+            return np.ones((3, 700), np.float32)
+
+        def command_log(self):
+            return np.zeros((3, 66), np.float32)
+
+        def encoder_window_log(self):
+            return np.full((3, 190), np.nan, np.float32)
+
+        def tick_stamps_ns(self):
+            return np.arange(6, dtype=np.uint64).reshape(3, 2)
+
+    arrays = observation_replay_arrays(Recording())
+    assert set(arrays) == {
+        "state_log", "observation_log", "command_log", "encoder_window_log",
+        "tick_stamps_ns",
+    }
+    assert arrays["observation_log"].shape == (3, 700)
+    assert arrays["tick_stamps_ns"].dtype == np.uint64
+    assert observation_replay_arrays(object()) == {}

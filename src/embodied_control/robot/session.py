@@ -195,6 +195,29 @@ def rows_of(values, width: int) -> list[list[float]]:
     return [flat[i:i + width] for i in range(0, len(flat) - width + 1, width)]
 
 
+def observation_replay_arrays(tracker) -> dict:
+    """Per-tick record of what the policy consumed (joint velocity, gravity,
+    gyro, the actor observation, the command, the encoder window, clock
+    stamps), so a hardware run can be replayed through the policy offline.
+    Empty for trackers that do not record it."""
+    import numpy as np
+
+    arrays = {}
+    for name, dtype in (
+        ("state_log", np.float32), ("observation_log", np.float32),
+        ("command_log", np.float32), ("encoder_window_log", np.float32),
+        ("tick_stamps_ns", np.uint64),
+    ):
+        getter = getattr(tracker, name, None)
+        if getter is None:
+            continue
+        try:
+            arrays[name] = np.asarray(getter(), dtype=dtype)
+        except Exception:  # an older runtime without the log
+            continue
+    return arrays
+
+
 def episode_summary(
     joint_position_log: list[list[float]],
     reference_frames: list[int],
@@ -566,6 +589,7 @@ class ExperimentSession:
                     ).reshape(-1, 29),
                     anchor_pose_source=np.asarray("controller_fixed_translation_imu_orientation"),
                     tick_durations_ns=np.asarray(tracker.tick_durations_ns(), dtype=np.uint64),
+                    **observation_replay_arrays(tracker),
                 )
             except ImportError:
                 pass

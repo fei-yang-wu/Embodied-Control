@@ -178,6 +178,17 @@ class NativeFakeRuntime {
   std::vector<float> joint_position_log() const;
   std::vector<float> anchor_pose_log() const;
   std::vector<float> command_target_log() const;
+  // Observation replay record (step 3 of docs/evidence/hardware_gap_20260915):
+  // per tick, what the policy consumed. Widths are fixed at start().
+  std::vector<float> state_log() const;            // ticks x kStateLogWidth
+  std::vector<float> observation_log() const;      // ticks x observation_log_width()
+  std::vector<float> command_log() const;          // ticks x command_log_width()
+  std::vector<float> encoder_window_log() const;   // ticks x encoder_window_log_width()
+  std::vector<std::uint64_t> tick_stamps_ns() const;  // ticks x 2 (tick start, state receive)
+  std::size_t observation_log_width() const noexcept { return observation_log_width_; }
+  std::size_t command_log_width() const noexcept { return command_log_width_; }
+  std::size_t encoder_window_log_width() const noexcept { return encoder_window_log_width_; }
+  static constexpr std::size_t kStateLogWidth = kJointCount + 6;
   RobotState state() const;
   double backend_time() const;
   double base_height() const;
@@ -268,6 +279,19 @@ class NativeFakeRuntime {
   // The target the writer was handed on each control tick (blended while
   // blending in), so dither can be attributed to the policy or the joints.
   std::vector<float> command_target_log_;  // ticks x kJointCount
+  // Observation replay: joint velocity 29 | projected gravity 3 | gyro 3 as
+  // read this tick; the actor observation and command the tracker stepped
+  // with; the encoder input on the ticks the encoder ran (NaN otherwise);
+  // tick-start and sensor-receive CLOCK_MONOTONIC stamps.
+  std::vector<float> state_log_;             // ticks x kStateLogWidth
+  std::vector<float> observation_log_;       // ticks x observation_log_width_
+  std::vector<float> command_log_;           // ticks x command_log_width_
+  std::vector<float> encoder_window_log_;    // ticks x encoder_window_log_width_
+  std::vector<std::uint64_t> tick_stamps_ns_;  // ticks x 2
+  std::size_t observation_log_width_ = 0;
+  std::size_t command_log_width_ = 0;
+  std::size_t encoder_window_log_width_ = 0;
+  std::uint64_t tick_started_ns_ = 0;
 
   std::atomic<std::uint64_t> ticks_{0};
   std::atomic<std::uint64_t> control_ticks_{0};
