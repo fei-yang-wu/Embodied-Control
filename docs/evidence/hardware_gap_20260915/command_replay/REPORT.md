@@ -177,3 +177,15 @@ stumbles in 5 of 8, at 4-7 s into the walk, the same window as the
 hardware trip (frames 176-184, ~3.6 s). This is the first plant condition
 where post falls on this motion. Single motion; 8 runs per cell; the
 hwfit profile is a position-only fit.
+
+## Conclusion (2026-09-15 evening)
+
+The hardware result -- post trips on walking_quip_360, SONIC walks it -- is
+NOT reproduced by any plant condition tried: stock profile, the fitted
+profile, floor friction 0.3-1.0, joint friction, actuator lag, measured
+noise, 20/40 ms state delay, box lips, capsule ridges, ridges on the fitted
+profile. Every condition that fails post on that motion fails SONIC too.
+The plant can be made to fail; it cannot yet be made to fail like the
+robot. The cause stays unidentified. The two measurements that could
+change that are on the robot: one walk recorded with the per-tick
+observation record (replay-observations) and one 500 Hz torque capture.
