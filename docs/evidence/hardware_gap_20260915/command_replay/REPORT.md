@@ -135,3 +135,23 @@ SONIC keeps pace in 5 of 5 walks. Stumble without a fall is the nearest
 plant event to the hardware trip so far. The seed-0 run stumbled once and
 walked clean once (async timing differs between 1-lane and 4-lane runs),
 so the rate is over runs, not seeds.
+
+### Stumble anatomy and the box-lip artifact
+
+Plant states of the lip3 post stumble (seed_4) through FK: the left toe
+lands 8 cm past the 0.375 lip at ~0 clearance (toe on the lip edge), then
+during that stance the foot slides backward 0.46 -> 0.27 m with the toe
+dipping into the lip and the root dropping 0.78 -> 0.73 m; the robot is
+0.4 m behind the reference within 2 s and never closes it. Toe clearance
+at lip crossings: clean post run min 0.021 m (0/18 under 5 mm), stumble
+run min -0.006 (3/13 under 5 mm), SONIC min 0.000 (1/18), median 0.037 vs
+post 0.033. A stance-foot slip on a lip, not a swing toe catch; the foot
+slip the operator saw on hardware.
+
+Box lips break the plant's hoist: `mj_geomDistance` returns 0 for a
+far-apart box-mesh pair, so `measure_floor_gap` reads 0, the robot hangs
+10 cm too high and, when the lowering margin does not reach the floor, the
+ankles flop into their limit before ARMED (SONIC 11/16 lattice runs faulted
+at ARM this way; 3/3 stock-floor runs clean). Capsule ridges measure
+correctly (`examples/make_ridge_floor.py`, ridge3/ridge5 models); the rate
+below is on ridges.
