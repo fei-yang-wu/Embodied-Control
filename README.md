@@ -300,6 +300,15 @@ see [artifacts/noise_analysis_20260910/REPORT.md](artifacts/noise_analysis_20260
 `--plant-noise off` none; neither changes the rehearsal identity, so keep the
 default run as the gate evidence and use the others for comparison.
 
+`--plant <yaml>` picks the plant profile. Beyond the vendor gains, a profile
+may carry per-joint `frictionloss` (N m) and `damping` (N m s/rad) on the
+dof and a global `actuator_lag_ms` (first-order lag on the servo target);
+all zero in `examples/g1_plant.yaml`. They exist to match the hardware,
+which needs about twice the plant's PD torque for the same leg motion
+(see [artifacts/hardware_trip_analysis_20260915/REPORT.md](artifacts/hardware_trip_analysis_20260915/REPORT.md));
+the calibration profiles and their comparison live under
+`artifacts/plant_calibration_20260915/`.
+
 `--stiffness-scale` / `--damping-scale` multiply the bundle's PD gains for a
 rehearsal experiment (job field `gain_scale`). A scale is part of the
 rehearsal identity, so a hardware run at a scale needs a rehearsal at the

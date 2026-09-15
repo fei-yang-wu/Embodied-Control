@@ -92,6 +92,10 @@ class NativeDdsPlant:
             bool(hoist),
             float(hoist_clearance),
         )
+        if any(joint.frictionloss or joint.damping for joint in robot.joints):
+            self._plant.set_joint_dynamics(values("frictionloss"), values("damping"))
+        if robot.actuator_lag_ms > 0:
+            self._plant.set_actuator_lag(float(robot.actuator_lag_ms) / 1000.0)
         if odometry_topic:
             self._plant.publish_odometry(str(odometry_topic))
 

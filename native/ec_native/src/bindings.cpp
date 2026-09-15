@@ -1081,6 +1081,13 @@ class MujocoDdsPlantBinding {
   void publish_odometry(const std::string& topic) {
     plant_.publish_odometry(topic);
   }
+  void set_joint_dynamics(const FloatArray& frictionloss,
+                          const FloatArray& damping) {
+    plant_.set_joint_dynamics(
+        vector_from_array(frictionloss, ec_native::kJointCount, "frictionloss"),
+        vector_from_array(damping, ec_native::kJointCount, "damping"));
+  }
+  void set_actuator_lag(double seconds) { plant_.set_actuator_lag(seconds); }
   void stop() { plant_.stop(); }
   void wait_for_stop() {
     py::gil_scoped_release release;
@@ -1660,6 +1667,10 @@ PYBIND11_MODULE(_ec_native, m) {
       .def("start", &MujocoDdsPlantBinding::start)
       .def("publish_odometry", &MujocoDdsPlantBinding::publish_odometry,
            py::arg("topic"))
+      .def("set_joint_dynamics", &MujocoDdsPlantBinding::set_joint_dynamics,
+           py::arg("frictionloss"), py::arg("damping"))
+      .def("set_actuator_lag", &MujocoDdsPlantBinding::set_actuator_lag,
+           py::arg("seconds"))
       .def("hoist", &MujocoDdsPlantBinding::hoist)
       .def("lower", &MujocoDdsPlantBinding::lower)
       .def("slack", &MujocoDdsPlantBinding::slack)

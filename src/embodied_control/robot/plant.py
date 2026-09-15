@@ -19,6 +19,13 @@ class PlantJoint(BaseModel):
     effort_limit: float = Field(gt=0)
     vendor_stiffness: float = Field(ge=0)
     vendor_damping: float = Field(ge=0)
+    # Passive joint dynamics on the dof, beyond the servo: Coulomb friction
+    # (N m) and viscous damping (N m s/rad). Zero is the vendor MJCF; the
+    # hardware needs about twice the plant's PD torque for the same leg
+    # motion (artifacts/hardware_trip_analysis_20260915/REPORT.md), so a
+    # calibration profile raises these.
+    frictionloss: float = Field(default=0.0, ge=0)
+    damping: float = Field(default=0.0, ge=0)
 
 
 class PlantConfig(BaseModel):
@@ -26,6 +33,8 @@ class PlantConfig(BaseModel):
 
     api_version: Literal["ec.plant/v1alpha1"] = "ec.plant/v1alpha1"
     joints: list[PlantJoint] = Field(min_length=29, max_length=29)
+    # First-order lag on the servo position target, all joints. Zero: none.
+    actuator_lag_ms: float = Field(default=0.0, ge=0)
 
     @model_validator(mode="after")
     def validate_joint_mapping(self) -> "PlantConfig":

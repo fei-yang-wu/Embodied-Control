@@ -1,0 +1,17 @@
+{
+  "git_head": "77b2ab78fe5d441838358ab0a02de0742fbff97b",
+  "working_tree_was_dirty_before_study": true,
+  "source_sha256": {
+    "native/ec_native/src/native_fake_runtime.cpp": "a3524eaf488b45151bcc460ef59da92665808f8b630296498bbc2299f9540a0a",
+    "native/ec_native/src/mujoco_dds_plant.cpp": "0db8bf5fb640e8ce9434d68faa87838e61d7ceaae8dd471605ddcc4826cf360c",
+    "native/ec_native/src/unitree_backend.cpp": "2c59212779cfd3deac04bf2f4fb0c1f899dd348e345fec33b985c46729e3e7dd",
+    "native/ec_native/src/leg_odometry.cpp": "49c194e7d37bfeb7f46bceb55afecf34e98b35a4e6e78da0edd793da2e4b6611",
+    "src/embodied_control/lowlevel/native_core.py": "b180a4206dfe4ac7994d201977c0b5bab22a8a36941a9ff8f1ac3904795a3765",
+    "src/embodied_control/robot/build.py": "b469ae5263ca49d981708e753a9eed29971e9f9dff58f97d5dbd60fe231562c4"
+  },
+  "studied_claude_session": "9095fcf2-6877-4277-b730-6df4a1284dec",
+  "comparison_frames": [
+    1,
+    255
+  ]
+}

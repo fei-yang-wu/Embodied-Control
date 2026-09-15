@@ -21,6 +21,20 @@ _PROPRIO_TERMS = {
 }
 
 
+def _native_encoder_trigger(bundle: PolicyBundle, hold_steps: int, oracle_reference: bool) -> str:
+    """At a one-tick hold, `on_acceptance` and `every_control_tick` are the
+    same training cadence (a fresh latent every step). Deployed through the
+    request slot, `on_acceptance` costs the round trip: the reply lands one
+    tick after the request, so the latent refreshes every second tick
+    (453 deadline misses per 454 requests in every post_c1l1j1p1 rehearsal).
+    Encoding from the chunk in hand keeps the 50 Hz cadence the bundle
+    trained with; the oracle reply already carries a hold of slack."""
+    command = bundle.manifest.command
+    if oracle_reference and int(hold_steps) == 1 and bundle.manifest.models.get("encoder_onnx") is not None:
+        return "every_control_tick"
+    return str(command.encoder_trigger)
+
+
 def _direct_command_tag(bundle: PolicyBundle) -> int:
     if bundle.manifest.interface == "latent":
         return 1
@@ -318,7 +332,7 @@ class NativeFakeLoop:
             oracle_reference,
             _native_reference_layout(bundle),
             int(command.macro_frame_stride or 1),
-            str(command.encoder_trigger),
+            _native_encoder_trigger(bundle, int(hold_steps or command.hold_steps), oracle_reference),
             encoder_path,
             encoder_input_name,
             encoder_output_name,
@@ -503,7 +517,7 @@ class NativeMujocoLoop(NativeFakeLoop):
             oracle_reference,
             _native_reference_layout(bundle),
             int(command.macro_frame_stride or 1),
-            str(command.encoder_trigger),
+            _native_encoder_trigger(bundle, int(hold_steps or command.hold_steps), oracle_reference),
             encoder_path,
             encoder_input_name,
             encoder_output_name,
@@ -656,7 +670,7 @@ class NativeUnitreeLoop(NativeFakeLoop):
             "direct_tag": _direct_command_tag(bundle),
             "reference_encoder_layout": _native_reference_layout(bundle),
             "encoder_frame_stride": int(command.macro_frame_stride or 1),
-            "encoder_trigger": str(command.encoder_trigger),
+            "encoder_trigger": _native_encoder_trigger(bundle, int(hold_steps or command.hold_steps), oracle_reference),
             "encoder_path": encoder_path,
             "encoder_input_name": encoder_input_name,
             "encoder_output_name": encoder_output_name,

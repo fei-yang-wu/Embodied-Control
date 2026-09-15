@@ -110,6 +110,17 @@ class MujocoDdsPlant {
   // a perfect estimator. Empty: no odometry on the wire (the default; a
   // rehearsal then exercises the controller's own leg odometry).
   void publish_odometry(const std::string& topic);
+  // Before start: passive joint dynamics the vendor MJCF leaves at zero, in
+  // SDK motor order. Coulomb friction (N m) and viscous damping (N m s/rad)
+  // on the joint dof, separate from the servo's kd. The hardware needs about
+  // twice the plant's PD torque for the same leg motion
+  // (`artifacts/hardware_trip_analysis_20260915/REPORT.md`); this is the
+  // knob for matching that.
+  void set_joint_dynamics(std::span<const float> frictionloss,
+                          std::span<const float> damping);
+  // Before start: first-order lag on the servo's position target, the way
+  // a motor driver's inner loop trails the command. Zero: none.
+  void set_actuator_lag(double seconds);
 
   MujocoDdsPlant(const MujocoDdsPlant&) = delete;
   MujocoDdsPlant& operator=(const MujocoDdsPlant&) = delete;
@@ -165,6 +176,11 @@ class MujocoDdsPlant {
   std::array<float, kJointCount> effort_limit_{};
   std::array<float, kJointCount> hold_stiffness_{};
   std::array<float, kJointCount> hold_damping_{};
+  std::array<float, kJointCount> joint_frictionloss_{};
+  std::array<float, kJointCount> joint_damping_{};
+  double actuator_lag_seconds_ = 0.0;
+  std::array<float, kJointCount> lagged_target_{};
+  bool lagged_target_primed_ = false;
   std::array<float, 36> initial_pose_{};
   bool has_initial_pose_ = false;
   std::array<std::size_t, kJointCount> actuator_to_sdk_{};

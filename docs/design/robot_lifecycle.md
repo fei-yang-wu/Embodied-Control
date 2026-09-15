@@ -709,6 +709,28 @@ rehearsals cannot qualify the revised contract. New experiments use default
 stance and remain separate from the previous motion-pose initialization runs.
 Lifecycle completion and tracking quality must be reported separately.
 
+### Anchor translation and latent cadence (2026-09-15)
+
+`anchor_position_source` defaults to `leg_kinematics`. On walking_quip_360
+the vendor odometry reported 1.59 m of 2.89 m reference travel while our
+frames own the joints; the leg-kinematics estimate on the same motion gave
+2.62 m of 2.74 m, matching the plant. Every odometry run before this date
+fed the encoder a ~40% short anchor. A job with no `mjcf` takes the
+repository model (`DEFAULT_G1_MJCF`). The source is part of the deployment
+sha, so a leg-kinematics hardware job needs a leg-kinematics rehearsal.
+
+A one-tick-hold bundle (`hold_steps: 1`, our post/combo trackers) used to
+refresh its latent every second tick: the request slot round trip lands the
+reply one tick after the request, so every other tick was a deadline miss
+holding the previous latent (453 misses per 454 requests in each
+rehearsal). The native loops now encode such a bundle from the chunk in
+hand on every control tick (`_native_encoder_trigger`), the cadence it
+trained with; a chunk that runs out before the next reply counts a deadline
+miss and holds the last latent instead of faulting. SONIC (hold 10, lead 4)
+always encoded per tick and was never affected. See
+`artifacts/hardware_trip_analysis_20260915/REPORT.md` for the hardware data
+behind both changes.
+
 The rehearsal identity also includes planner lookahead (`lead_ticks`). A
 retained runtime fault disqualifies a rehearsal even if recovery restored the
 vendor without any failed transition. Arming rechecks active control after

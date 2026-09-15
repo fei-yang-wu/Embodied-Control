@@ -1,0 +1,292 @@
+{
+  "post_c1l1j1p1_f84500152320": [
+    {
+      "condition": "baseline",
+      "steps": 455,
+      "completed": true,
+      "leg_reference_mae_rad": 0.06001018360257149,
+      "left_knee_target_step_p99_rad": 0.17041820287704468,
+      "pitch_min_max_deg": [
+        -5.369990348815918,
+        2.9616386890411377
+      ],
+      "travel_m": 5.012815475463867,
+      "final_root_error_m": 0.032795920968055725
+    },
+    {
+      "condition": "half_rate",
+      "steps": 455,
+      "completed": true,
+      "leg_reference_mae_rad": 0.06295411288738251,
+      "left_knee_target_step_p99_rad": 0.17475613951683044,
+      "pitch_min_max_deg": [
+        -5.408649444580078,
+        3.01928973197937
+      ],
+      "travel_m": 5.017314434051514,
+      "final_root_error_m": 0.03766847401857376
+    },
+    {
+      "condition": "position_gain_0.6",
+      "steps": 455,
+      "completed": true,
+      "leg_reference_mae_rad": 0.07237105816602707,
+      "left_knee_target_step_p99_rad": 0.17991983890533447,
+      "pitch_min_max_deg": [
+        -6.910231113433838,
+        3.274292230606079
+      ],
+      "travel_m": 5.299160957336426,
+      "final_root_error_m": 0.4859877824783325
+    },
+    {
+      "condition": "position_bias_5cm",
+      "steps": 455,
+      "completed": true,
+      "leg_reference_mae_rad": 0.06035462021827698,
+      "left_knee_target_step_p99_rad": 0.17412398755550385,
+      "pitch_min_max_deg": [
+        -5.4697723388671875,
+        2.9616968631744385
+      ],
+      "travel_m": 5.012993335723877,
+      "final_root_error_m": 0.06871744245290756
+    },
+    {
+      "condition": "imu_pitch_2deg",
+      "steps": 455,
+      "completed": true,
+      "leg_reference_mae_rad": 0.06492944061756134,
+      "left_knee_target_step_p99_rad": 0.16600877046585083,
+      "pitch_min_max_deg": [
+        -7.423994541168213,
+        0.7853461503982544
+      ],
+      "travel_m": 4.996084213256836,
+      "final_root_error_m": 0.021188924089074135
+    },
+    {
+      "condition": "gyro_delay_20ms",
+      "steps": 455,
+      "completed": true,
+      "leg_reference_mae_rad": 0.067737877368927,
+      "left_knee_target_step_p99_rad": 0.20094850659370422,
+      "pitch_min_max_deg": [
+        -5.0432024002075195,
+        3.3385562896728516
+      ],
+      "travel_m": 5.005133628845215,
+      "final_root_error_m": 0.02474041096866131
+    },
+    {
+      "condition": "state_delay_20ms",
+      "steps": 455,
+      "completed": true,
+      "leg_reference_mae_rad": 0.06867939978837967,
+      "left_knee_target_step_p99_rad": 0.2274841070175171,
+      "pitch_min_max_deg": [
+        -9.120208740234375,
+        4.570857048034668
+      ],
+      "travel_m": 4.9955668449401855,
+      "final_root_error_m": 0.017018698155879974
+    },
+    {
+      "condition": "state_delay_40ms",
+      "steps": 113,
+      "completed": false,
+      "leg_reference_mae_rad": 0.12726429104804993,
+      "left_knee_target_step_p99_rad": 0.5857109427452087,
+      "pitch_min_max_deg": [
+        -6.950475215911865,
+        57.47572326660156
+      ],
+      "travel_m": 1.0360790491104126,
+      "final_root_error_m": 0.72715824842453
+    },
+    {
+      "condition": "measured_noise",
+      "steps": 455,
+      "completed": true,
+      "leg_reference_mae_rad": 0.05984035134315491,
+      "left_knee_target_step_p99_rad": 0.17038893699645996,
+      "pitch_min_max_deg": [
+        -5.353740692138672,
+        3.0871174335479736
+      ],
+      "travel_m": 5.012210369110107,
+      "final_root_error_m": 0.03254308924078941
+    },
+    {
+      "condition": "training_noise",
+      "steps": 455,
+      "completed": true,
+      "leg_reference_mae_rad": 0.05963656306266785,
+      "left_knee_target_step_p99_rad": 0.19488127529621124,
+      "pitch_min_max_deg": [
+        -5.364224910736084,
+        4.186952114105225
+      ],
+      "travel_m": 4.999691486358643,
+      "final_root_error_m": 0.01919914036989212
+    },
+    {
+      "condition": "command_delay_20ms",
+      "steps": 455,
+      "completed": true,
+      "leg_reference_mae_rad": 0.07394877821207047,
+      "left_knee_target_step_p99_rad": 0.2277279645204544,
+      "pitch_min_max_deg": [
+        -8.162736892700195,
+        4.537558078765869
+      ],
+      "travel_m": 5.0001702308654785,
+      "final_root_error_m": 0.021396541967988014
+    }
+  ],
+  "sonic_v1_1": [
+    {
+      "condition": "baseline",
+      "steps": 455,
+      "completed": true,
+      "leg_reference_mae_rad": 0.0779472291469574,
+      "left_knee_target_step_p99_rad": 0.1886148452758789,
+      "pitch_min_max_deg": [
+        -5.381875514984131,
+        6.644033432006836
+      ],
+      "travel_m": 4.865345001220703,
+      "final_root_error_m": 0.23490318655967712
+    },
+    {
+      "condition": "half_rate",
+      "steps": 455,
+      "completed": true,
+      "leg_reference_mae_rad": 0.07812780886888504,
+      "left_knee_target_step_p99_rad": 0.20940271019935608,
+      "pitch_min_max_deg": [
+        -5.262890338897705,
+        6.583819389343262
+      ],
+      "travel_m": 4.858008861541748,
+      "final_root_error_m": 0.22561444342136383
+    },
+    {
+      "condition": "position_gain_0.6",
+      "steps": 455,
+      "completed": true,
+      "leg_reference_mae_rad": 0.0779472291469574,
+      "left_knee_target_step_p99_rad": 0.1886148452758789,
+      "pitch_min_max_deg": [
+        -5.381875514984131,
+        6.644033432006836
+      ],
+      "travel_m": 4.865345001220703,
+      "final_root_error_m": 0.23490318655967712
+    },
+    {
+      "condition": "position_bias_5cm",
+      "steps": 455,
+      "completed": true,
+      "leg_reference_mae_rad": 0.0779472291469574,
+      "left_knee_target_step_p99_rad": 0.1886148452758789,
+      "pitch_min_max_deg": [
+        -5.381875514984131,
+        6.644033432006836
+      ],
+      "travel_m": 4.865345001220703,
+      "final_root_error_m": 0.23490318655967712
+    },
+    {
+      "condition": "imu_pitch_2deg",
+      "steps": 455,
+      "completed": true,
+      "leg_reference_mae_rad": 0.07691311091184616,
+      "left_knee_target_step_p99_rad": 0.180068701505661,
+      "pitch_min_max_deg": [
+        -7.597232818603516,
+        5.091106414794922
+      ],
+      "travel_m": 4.667159080505371,
+      "final_root_error_m": 0.33383527398109436
+    },
+    {
+      "condition": "gyro_delay_20ms",
+      "steps": 455,
+      "completed": true,
+      "leg_reference_mae_rad": 0.0774931088089943,
+      "left_knee_target_step_p99_rad": 0.2005552500486374,
+      "pitch_min_max_deg": [
+        -6.052669525146484,
+        6.481058597564697
+      ],
+      "travel_m": 4.84715461730957,
+      "final_root_error_m": 0.21330590546131134
+    },
+    {
+      "condition": "state_delay_20ms",
+      "steps": 455,
+      "completed": true,
+      "leg_reference_mae_rad": 0.08340299874544144,
+      "left_knee_target_step_p99_rad": 0.17968900501728058,
+      "pitch_min_max_deg": [
+        -7.566534519195557,
+        6.719648838043213
+      ],
+      "travel_m": 5.099923610687256,
+      "final_root_error_m": 0.16964635252952576
+    },
+    {
+      "condition": "state_delay_40ms",
+      "steps": 112,
+      "completed": false,
+      "leg_reference_mae_rad": 0.16860894858837128,
+      "left_knee_target_step_p99_rad": 1.2582247257232666,
+      "pitch_min_max_deg": [
+        -65.46580505371094,
+        19.433441162109375
+      ],
+      "travel_m": 0.5374442934989929,
+      "final_root_error_m": 0.6729644536972046
+    },
+    {
+      "condition": "measured_noise",
+      "steps": 455,
+      "completed": true,
+      "leg_reference_mae_rad": 0.0782293900847435,
+      "left_knee_target_step_p99_rad": 0.18485204875469208,
+      "pitch_min_max_deg": [
+        -5.3436760902404785,
+        6.73390531539917
+      ],
+      "travel_m": 4.856127738952637,
+      "final_root_error_m": 0.23811207711696625
+    },
+    {
+      "condition": "training_noise",
+      "steps": 455,
+      "completed": true,
+      "leg_reference_mae_rad": 0.0763942077755928,
+      "left_knee_target_step_p99_rad": 0.17441773414611816,
+      "pitch_min_max_deg": [
+        -5.749725341796875,
+        6.755065441131592
+      ],
+      "travel_m": 4.834229469299316,
+      "final_root_error_m": 0.3250422775745392
+    },
+    {
+      "condition": "command_delay_20ms",
+      "steps": 455,
+      "completed": true,
+      "leg_reference_mae_rad": 0.08748151361942291,
+      "left_knee_target_step_p99_rad": 0.18808040022850037,
+      "pitch_min_max_deg": [
+        -7.395071029663086,
+        6.713670253753662
+      ],
+      "travel_m": 5.088356971740723,
+      "final_root_error_m": 0.14598003029823303
+    }
+  ]
+}

@@ -376,6 +376,7 @@ void MujocoDdsPlant::reset() {
 
 void MujocoDdsPlant::reset_data(bool while_running) {
   mj_resetData(impl_->model, impl_->data);
+  lagged_target_primed_ = false;
   mjData* data = impl_->data;
   if (has_initial_pose_) {
     data->qpos[0] = initial_pose_[0];
@@ -626,6 +627,41 @@ std::array<double, 6> MujocoDdsPlant::hoist_attachment_points() const {
 std::vector<float> MujocoDdsPlant::hoist_log() const {
   const std::size_t rows = state_log_rows_.load(std::memory_order_acquire);
   return {hoist_log_.begin(), hoist_log_.begin() + static_cast<std::ptrdiff_t>(rows * 9)};
+}
+
+void MujocoDdsPlant::set_joint_dynamics(std::span<const float> frictionloss,
+                                        std::span<const float> damping) {
+  if (running()) {
+    throw std::runtime_error("set_joint_dynamics must be set before start");
+  }
+  if (frictionloss.size() != kJointCount || damping.size() != kJointCount ||
+      !finite_plant_values(frictionloss) || !finite_plant_values(damping) ||
+      std::any_of(frictionloss.begin(), frictionloss.end(),
+                  [](float value) { return value < 0.0F; }) ||
+      std::any_of(damping.begin(), damping.end(),
+                  [](float value) { return value < 0.0F; })) {
+    throw std::runtime_error("invalid joint dynamics");
+  }
+  mjModel* model = impl_->model;
+  for (std::size_t actuator = 0; actuator < kJointCount; ++actuator) {
+    const std::size_t sdk = actuator_to_sdk_[actuator];
+    const int dof = dof_address_[actuator];
+    model->dof_frictionloss[dof] = frictionloss[sdk];
+    model->dof_damping[dof] = damping[sdk];
+    joint_frictionloss_[sdk] = frictionloss[sdk];
+    joint_damping_[sdk] = damping[sdk];
+  }
+}
+
+void MujocoDdsPlant::set_actuator_lag(double seconds) {
+  if (running()) {
+    throw std::runtime_error("set_actuator_lag must be set before start");
+  }
+  if (!std::isfinite(seconds) || seconds < 0.0) {
+    throw std::runtime_error("invalid actuator lag");
+  }
+  actuator_lag_seconds_ = seconds;
+  lagged_target_primed_ = false;
 }
 
 void MujocoDdsPlant::publish_odometry(const std::string& topic) {
@@ -995,6 +1031,7 @@ void MujocoDdsPlant::physics_loop() noexcept {
       // frame from before the switch is nobody's current command.
       command_slot_->valid.store(false, std::memory_order_relaxed);
       previous_owned_ = owned;
+      lagged_target_primed_ = false;
     }
     if (hoist_enabled_) {
       apply_hoist();
@@ -1016,9 +1053,23 @@ void MujocoDdsPlant::physics_loop() noexcept {
       float q_absmax = applied_q_absmax_.load(std::memory_order_relaxed);
       float extra_absmax =
           applied_extra_absmax_.load(std::memory_order_relaxed);
+      const bool lagged = actuator_lag_seconds_ > 0.0;
+      if (lagged && !lagged_target_primed_) {
+        std::copy(command.q.begin(), command.q.end(), lagged_target_.begin());
+        lagged_target_primed_ = true;
+      }
+      const float lag_alpha =
+          lagged ? static_cast<float>(timestep_ /
+                                      (actuator_lag_seconds_ + timestep_))
+                 : 1.0F;
       for (std::size_t actuator = 0; actuator < kJointCount; ++actuator) {
         const std::size_t sdk = actuator_to_sdk_[actuator];
-        impl_->data->ctrl[actuator] = command.q[sdk];
+        float target = command.q[sdk];
+        if (lagged) {
+          lagged_target_[sdk] += lag_alpha * (command.q[sdk] - lagged_target_[sdk]);
+          target = lagged_target_[sdk];
+        }
+        impl_->data->ctrl[actuator] = target;
         // The servo term covers kp (q_des - q) - kd dq; the firmware law's
         // remaining kd dq_des + tau_ff part is injected as an applied force.
         const float extra =

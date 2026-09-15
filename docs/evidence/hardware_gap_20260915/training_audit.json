@@ -1,0 +1,160 @@
+{
+  "date": "2026-09-15",
+  "repositories": {
+    "training": {
+      "commit": "3059d2835cdf10d25eaebb09a70d745a59ac1b7e",
+      "source_sha256": {
+        "experiments/campaigns/2026-09-14-posture-c1l1j1-10b/campaign.yaml": "e428a69bf5d9fdb129441a9774d474de77b9e1f26231fdc633fe0d142d0efaa1",
+        "source/isaaclab_imitation/isaaclab_imitation/tasks/manager_based/imitation/config/g1/common/observations.py": "660bfbc821292e4f4b6b6ad24928b2597570de7b50fe79f1eb97142398fb88ca",
+        "source/isaaclab_imitation/isaaclab_imitation/tasks/manager_based/imitation/config/g1/common/events.py": "e9233a81425f2c431bfce517f576595fee0e00beb222323e4b46809ba1583182",
+        "source/isaaclab_imitation/isaaclab_imitation/tasks/manager_based/imitation/config/g1/common/actions.py": "458a93c59fc349a7d6ecee547e23e0aaecacb9c99bb78f5b31d158480385bce1",
+        "source/isaaclab_imitation/isaaclab_imitation/tasks/manager_based/imitation/config/g1/common/presets.py": "a76d882950e554ba6403e2e6dca78dae6cf360641941a0adea20b5561f2c7213",
+        "source/isaaclab_imitation/isaaclab_imitation/tasks/manager_based/imitation/config/g1/imitation_g1_env_v2.py": "0bd7dc5789603348d13c7562d4acebb030077a7d84b91e3bb1890e97fc1a107d",
+        "source/isaaclab_imitation/isaaclab_imitation/envs/expert_data_plane.py": "ef0eb5aa7dee04c907dfae11de364dd9e83faa298cc251575fe41c9cabddfb7a",
+        "source/isaaclab_imitation/isaaclab_imitation/tasks/manager_based/imitation/mdp/actions.py": "68b0fd58135bf86d9aeb23021a08dbf9934b4dde600d58c0387fd76b4e340031",
+        "source/isaaclab_imitation/isaaclab_imitation/tasks/manager_based/imitation/mdp/__init__.py": "4f6da2852f95dd1859671ae1e7e790a991a3105b5eb091604d8aa92ffbc69125",
+        "experiments/campaigns/2026-09-13-e5-hardware-gap-10b/campaign.yaml": "0a738febd1be1c8ac5f31e62c3952bb1c82fff216f48cc7be22054e744d0971a",
+        "experiments/campaigns/2026-09-13-e5-hardware-gap-10b/README.md": "73ee8edbb70ef742efc08ba5f3e16e8157a26f9eff93ba15ccea870182410aad"
+      }
+    },
+    "sonic": {
+      "commit": "087f9ac01d46f6d8e4d0b73c01ae64799f292a38",
+      "source_sha256": {
+        "gear_sonic/config/exp/manager/universal_token/all_modes/sonic_v1_1.yaml": "aa55abcad9214ca091f001893e8081766ad5d8ebdcc6ead3aaf2e76dab4e0a54",
+        "gear_sonic/config/manager_env/observations/policy/local_dir_hist.yaml": "da53d61a86d1f73c7f7b31a9abdcca68ea129572d5982b7d5ee44cc5474ed74e",
+        "gear_sonic/config/manager_env/events/tracking/level0_4.yaml": "c11337f8fb260cae8959bcb9044c5310cf2f2324eecc179d1deb69ab98bf6476",
+        "gear_sonic/config/manager_env/events/terms/physics_material.yaml": "e8867558365f593d34ae2f74ffe5f3acdc57c46186394b1ee5dce595ef9ad4f8",
+        "gear_sonic/config/manager_env/events/terms/base_com.yaml": "b647b935b18fdb16e005e66542383d005e59e352d32c131e542608955dfd51c5",
+        "gear_sonic/config/manager_env/events/terms/add_joint_default_pos.yaml": "b974d8a4b81a935d4aa3b1fcb50bf95cecb6f4acef4dd7869d398b553d646a0e",
+        "gear_sonic/envs/manager_env/robots/g1.py": "42f9b4394eb21512735da4b1ca78c2d0546c4221c7bdaf8b3a186d8dc5588ba9",
+        "gear_sonic/envs/manager_env/mdp/actuators.py": "64e86ed1cce64f4a29c935a979b0703508e08a11247b39d27e450b796926f606",
+        "gear_sonic/envs/manager_env/mdp/terrain.py": "cd18054abdfdad9c967e3abdf2f51ae7198d4ecb396256d60e4024297423b2e6"
+      }
+    }
+  },
+  "noise_comparison": {
+    "projected_gravity": {
+      "training": {
+        "n_min": -0.05,
+        "n_max": 0.05
+      },
+      "sonic": {
+        "n_min": -0.05,
+        "n_max": 0.05
+      },
+      "units": "dimensionless components"
+    },
+    "base_ang_vel": {
+      "training": {
+        "n_min": -0.2,
+        "n_max": 0.2
+      },
+      "sonic": {
+        "n_min": -0.2,
+        "n_max": 0.2
+      },
+      "units": "rad/s"
+    },
+    "joint_pos_rel": {
+      "training": {
+        "n_min": -0.01,
+        "n_max": 0.01
+      },
+      "sonic": {
+        "n_min": -0.01,
+        "n_max": 0.01
+      },
+      "units": "rad"
+    },
+    "joint_vel_rel": {
+      "training": {
+        "n_min": -0.5,
+        "n_max": 0.5
+      },
+      "sonic": {
+        "n_min": -0.5,
+        "n_max": 0.5
+      },
+      "units": "rad/s"
+    }
+  },
+  "campaign_c1_overrides": [
+    "env.actions.joint_pos.delay_substeps_min=0",
+    "env.actions.joint_pos.delay_substeps_max=1",
+    "env.events.randomize_actuator_gains.params.stiffness_distribution_params=[0.9,1.1]",
+    "env.events.randomize_actuator_gains.params.damping_distribution_params=[0.9,1.1]",
+    "env.expert_macro_anchor_walk_std=0.002",
+    "env.expert_macro_anchor_walk_max=0.1",
+    "env.expert_macro_anchor_jitter=0.005",
+    "env.expert_macro_anchor_jump_prob=0.02",
+    "env.expert_macro_anchor_jump=0.03",
+    "env.rewards.joint_limit.weight=-50.0",
+    "env.terminations.joint_near_limit.params.fraction=0.5"
+  ],
+  "campaign_posture_overrides": [
+    "env.rewards.joint_deviation.weight=-0.001",
+    "env.rewards.track_joint_pos.weight=0.05"
+  ],
+  "stage_argument_composition": [
+    "${concat:${vars.base_args},${vars.c1_args},${vars.arm_args},${vars.seg1_tail}}",
+    "${concat:${vars.base_args},${vars.c1_args},${vars.arm_args},${vars.seg2_tail}}"
+  ],
+  "bundle_source": {
+    "checkpoint_path": "/mnt/hsstorage/fwu91/Projects/SL/IsaacLab-Imitation/logs/posture_ec/ckpt/post_c1l1j1p1_f84500152320.pt",
+    "checkpoint_sha256": "37118eaf48ebafb5a08c9014796c90a65ceb0e5371b6df5406c8667996ebd686",
+    "checkpoint_metadata": {},
+    "primary_policy_role": "student",
+    "preset": "combo_v3",
+    "activation": "silu",
+    "repo_commit": "6f474d20de6c942f9d8be292675e89fe1e895647",
+    "export_command": "/mnt/hsstorage/fwu91/Projects/SL/IsaacLab-Imitation/source/imitation_experiments/imitation_experiments/lowlevel/export_policy_bundle.py --checkpoint /mnt/hsstorage/fwu91/Projects/SL/IsaacLab-Imitation/logs/posture_ec/ckpt/post_c1l1j1p1_f84500152320.pt --skill-checkpoint /mnt/hsstorage/fwu91/Projects/SL/IsaacLab-Imitation/logs/latent64_probe_mirror/p5_affine_encoder/latest.pt --preset combo_v3 --hold-steps 1 --output /mnt/hsstorage/fwu91/Projects/SL/IsaacLab-Imitation/logs/posture_ec/bundles/post_c1l1j1p1_f84500152320 --verify",
+    "tool_versions": {
+      "torch": "2.11.0+cu130",
+      "numpy": "2.5.2",
+      "onnx": "1.22.0",
+      "onnxruntime": "1.28.0"
+    },
+    "parity": "torchscript-eager+onnxruntime-cpu+rlopt-native",
+    "skill_checkpoint_path": "/mnt/hsstorage/fwu91/Projects/SL/IsaacLab-Imitation/logs/latent64_probe_mirror/p5_affine_encoder/latest.pt",
+    "skill_checkpoint_sha256": "da83c3dd00da6b389a6801552a7503b94c143a4737972bd0dfe5a557b84e5810",
+    "encoder_binding": "frozen_identical",
+    "encoder_divergence_max_abs": 0.0
+  },
+  "bundle_manifest_sha256": "a932b2bf628edd369b9cfe874ed29dcc678c0aba7c072a267a64eef9bd7005b6",
+  "checkpoint_export_commit_fetch": "remote error: upload-pack: not our ref 6f474d20de6c942f9d8be292675e89fe1e895647",
+  "limits": [
+    "Static source/configuration audit; no training backend instantiated.",
+    "Current dev is not attested identical to the historical checkpoint training snapshot.",
+    "Equal randomization ranges do not imply equal realized simulator distributions."
+  ],
+  "target_equivalent_action_clip_audit": {
+    "f845_legkin_hw": {
+      "frames": [
+        1,
+        255
+      ],
+      "target_equivalent_raw_action_abs_max": 8.876019992255882,
+      "count_outside_plus_minus_20": 0,
+      "total_joint_samples": 7395
+    },
+    "f845_odom_hw": {
+      "frames": [
+        1,
+        255
+      ],
+      "target_equivalent_raw_action_abs_max": 5.157038028165157,
+      "count_outside_plus_minus_20": 0,
+      "total_joint_samples": 7395
+    },
+    "f885_odom_hw": {
+      "frames": [
+        1,
+        255
+      ],
+      "target_equivalent_raw_action_abs_max": 6.156461435003817,
+      "count_outside_plus_minus_20": 0,
+      "total_joint_samples": 7395
+    }
+  },
+  "claude_final_reviewed_at": "2026-09-15T19:39:34.102Z"
+}

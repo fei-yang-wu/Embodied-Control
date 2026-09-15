@@ -26,11 +26,26 @@ def test_plant_profile_and_cli_need_only_robot_and_model():
 @pytest.mark.parametrize("field,value", [
     ("motor_id", 1), ("name", "left_hip_roll_joint"), ("effort_limit", 0),
     ("armature", -1), ("vendor_stiffness", -1), ("vendor_damping", -1),
-    ("nominal_position", float("nan")),
+    ("nominal_position", float("nan")), ("frictionloss", -0.1), ("damping", -0.1),
 ])
 def test_invalid_plant_joint_contract_is_rejected(field, value):
     raw = load_plant_config(PROFILE).model_dump()
     raw["joints"][0][field] = value
+    with pytest.raises(ValidationError):
+        PlantConfig.model_validate(raw)
+
+
+def test_passive_joint_dynamics_default_to_the_vendor_model():
+    robot = load_plant_config(PROFILE)
+    assert all(joint.frictionloss == 0.0 and joint.damping == 0.0 for joint in robot.joints)
+    assert robot.actuator_lag_ms == 0.0
+    raw = robot.model_dump()
+    raw["joints"][3].update(frictionloss=1.5, damping=0.8)
+    raw["actuator_lag_ms"] = 12.0
+    calibrated = PlantConfig.model_validate(raw)
+    assert calibrated.joints[3].frictionloss == 1.5
+    assert calibrated.actuator_lag_ms == 12.0
+    raw["actuator_lag_ms"] = -1.0
     with pytest.raises(ValidationError):
         PlantConfig.model_validate(raw)
 

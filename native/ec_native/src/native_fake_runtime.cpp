@@ -905,7 +905,18 @@ void NativeFakeRuntime::one_tick() noexcept {
         reference_tick_ >= active_reference_tick_
             ? static_cast<std::size_t>(reference_tick_ - active_reference_tick_)
             : 0;
-    if (!encode_active_reference(reference_offset)) {
+    const std::size_t covered_frames =
+        active_reference_length_ >= kReferenceHeaderWidth
+            ? (active_reference_length_ - kReferenceHeaderWidth) /
+                  raw_reference_width_
+            : 0;
+    if (reference_offset +
+            (planner_.window_frames - 1) * planner_.encoder_frame_stride >=
+        covered_frames) {
+      // The chunk in hand has run out before the next one landed: a late
+      // reply, not a contract breach. Hold the last latent and count it.
+      deadline_misses_.fetch_add(1, std::memory_order_relaxed);
+    } else if (!encode_active_reference(reference_offset)) {
       transition_to_damp(RuntimeFault::kCommandContract);
       backend_->damp();
       damp_ticks_.fetch_add(1, std::memory_order_relaxed);

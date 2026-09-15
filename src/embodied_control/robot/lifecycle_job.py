@@ -10,6 +10,12 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 LIFECYCLE_API_VERSION = "ec.lifecycle/v1alpha1"
+# The repository's G1 model, which leg-kinematics anchoring and the
+# rehearsal plant share; a job that names no mjcf gets this one.
+DEFAULT_G1_MJCF = (
+    Path(__file__).resolve().parents[3]
+    / "assets/latent_playkit/model/g1_29dof_rev_1_0.xml"
+)
 
 
 class JobModel(BaseModel):
@@ -105,11 +111,14 @@ class LifecycleJob(JobModel):
     # (`anchor_position_source`), training's `robot_heading` frame. Off: the
     # window's own first frame (`expert_heading`), no localization at all.
     live_anchor: bool = True
-    # `auto` takes the vendor odometry topic when it is alive at capture,
-    # else kinematic leg odometry from `mjcf`, else the frozen start.
-    # `fixed_start` is the pre-2026-09-11 behaviour (phantom offset on a
-    # moving reference).
-    anchor_position_source: Literal["auto", "odometry", "leg_kinematics", "fixed_start"] = "auto"
+    # `leg_kinematics` (the default since 2026-09-15) integrates the stance
+    # foot from `mjcf`: on walking_quip_360 it reported 2.62 m of 2.74 m
+    # reference travel where the vendor odometry reported 1.59 m of 2.89 m
+    # (`artifacts/hardware_trip_analysis_20260915/REPORT.md`). `auto` takes
+    # the vendor odometry topic when it is alive at capture, else leg
+    # kinematics, else the frozen start. `fixed_start` is the pre-2026-09-11
+    # behaviour (phantom offset on a moving reference).
+    anchor_position_source: Literal["auto", "odometry", "leg_kinematics", "fixed_start"] = "leg_kinematics"
     # The G1 state estimator's odometry (unitree_go SportModeState_).
     odometry_topic: str = "rt/odommodestate"
     # Legacy compatibility knob. Displacement is now reported, never rejected:
@@ -193,7 +202,12 @@ class LifecycleJob(JobModel):
         ):
             raise ValueError("start_pose=motion needs reference_root and motion")
         if self.live_anchor and self.anchor_position_source == "leg_kinematics" and not self.mjcf:
-            raise ValueError("anchor_position_source=leg_kinematics needs mjcf")
+            if not DEFAULT_G1_MJCF.is_file():
+                raise ValueError(
+                    "anchor_position_source=leg_kinematics needs mjcf "
+                    f"(the repository model {DEFAULT_G1_MJCF} is absent)"
+                )
+            self.mjcf = str(DEFAULT_G1_MJCF)
         if self.live_anchor and self.anchor_position_source == "odometry" and not self.odometry_topic:
             raise ValueError("anchor_position_source=odometry needs odometry_topic")
         if isinstance(self.start_pose, list) and len(self.start_pose) != 29:
