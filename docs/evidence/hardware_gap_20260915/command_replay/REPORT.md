@@ -83,3 +83,19 @@ change the fit-set MAE by under 0.002; the ankle damping carries the cut.
 - Open-loop replay cannot say whether the fitted plant trips the policy:
   that is the closed-loop rehearsal on the fitted profile
   (`artifacts/hwfit_20260915/`).
+
+## Closed loop on the fitted profile (`artifacts/hwfit_20260915/`, echost, 1 seed, measured noise)
+
+| run | clean | L mm (all) | measured excess max | faults |
+|---|---|---|---|---|
+| post f845, walking_quip_360 | 1/1 | 19.39 | 0.000 | none |
+| sonic_v1_1, walking_quip_360 | 0/1 | 22.42 | 0.088 | joint-limit guard on waist_pitch |
+| post f845, all 43 | 28/43 | 30.31 | 0.096 | 10 tilt (falls), 5 joint-limit guard (hip roll x3, waist pitch, shoulder roll), 0 ankle |
+
+Stock profile, same bundle: 39-42/43 clean, failures all ankle-pitch guard, 0-1
+falls. The fitted profile moves the failure mode from the ankle stop to
+falls and to hip-roll / waist limits, but the hardware trip motion itself
+walks clean on it. So the fitted actuation does not reproduce the
+walking_quip_360 trip; it does change which motions fail, and SONIC is
+not immune (waist_pitch guard on the same motion). One seed each; the
+fault set needs repeats before it says anything about a specific motion.
