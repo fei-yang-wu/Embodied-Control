@@ -155,3 +155,25 @@ ankles flop into their limit before ARMED (SONIC 11/16 lattice runs faulted
 at ARM this way; 3/3 stock-floor runs clean). Capsule ridges measure
 correctly (`examples/make_ridge_floor.py`, ridge3/ridge5 models); the rate
 below is on ridges.
+
+### Step 5 matrix (walking_quip_360, measured noise, independent 1-lane runs)
+
+Stumble = the plant root ends more than 1 m short of the reference's
+~4.95 m without a fault; trip = writer fault during RUNNING.
+
+| floor | profile | bundle | runs | clean full travel | stumble | trip / fall |
+|---|---|---|---|---|---|---|
+| 3 mm box lips (hoist artifact, see above) | stock | post f845 | 14 | 12 | 2 | 0 |
+| 3 mm box lips | stock | sonic | 7 walks | 7 | 0 | 0 |
+| 3 mm ridges | stock | post f845 | 8 | 8 | 0 | 0 |
+| 3 mm ridges | stock | sonic | 8 | 5 | 1 | 2 (R ankle pitch guard at x 2.25, 4.1 s in) |
+| 3 mm ridges | hwfit | post f845 | 8 | 2 | 5 (x end 1.7-4.7) | 1 fall (5.8 s in, root z 0.20) |
+| 3 mm ridges | hwfit | sonic | 8 | 3 | 1 | 4 (hip roll guard x4, 4.1-7.4 s in) |
+
+Neither floor on the stock profile gives the hardware's "post trips, SONIC
+walks": box lips catch post, ridges catch SONIC. The fitted actuation plus
+ridges degrades both: post stumbles or falls in 6 of 8 runs, SONIC trips or
+stumbles in 5 of 8, at 4-7 s into the walk, the same window as the
+hardware trip (frames 176-184, ~3.6 s). This is the first plant condition
+where post falls on this motion. Single motion; 8 runs per cell; the
+hwfit profile is a position-only fit.
