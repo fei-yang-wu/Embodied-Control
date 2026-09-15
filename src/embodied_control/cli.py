@@ -796,6 +796,41 @@ def _cmd_lowlevel_compare_unitree_pose(args) -> int:
     return 0 if report["status"] == "pass" else 1
 
 
+def _cmd_lowlevel_replay_commands(args) -> int:
+    """Command replay: the plant side of the loop against a recording."""
+    from embodied_control.lowlevel.bundle import PolicyBundle
+    from embodied_control.lowlevel.command_replay import (
+        load_recording, plant_from_profile, replay, write_report,
+    )
+    from embodied_control.robot.lifecycle_job import DEFAULT_G1_MJCF
+    from embodied_control.robot.plant import load_plant_config
+
+    bundle = PolicyBundle.load(args.bundle)
+    action = bundle.manifest.action
+    names = list(action.isaac_joint_names)
+    recording = load_recording(args.telemetry, names)
+    if args.states:
+        from embodied_control.lowlevel.command_replay import attach_plant_truth
+        attach_plant_truth(recording, args.states)
+    profile = load_plant_config(args.plant)
+    mjcf = args.mjcf or str(DEFAULT_G1_MJCF)
+    plant = plant_from_profile(mjcf, profile, names, list(action.stiffness), list(action.damping))
+    result = replay(recording, plant, window_ticks=args.window, settle_ticks=args.settle)
+    summary = write_report(result, args.output, label=args.label or Path(args.telemetry).parent.parent.name)
+    print(f"{summary['label']}: {summary['ticks']} ticks, window {args.window}, "
+          f"leg MAE {summary['leg_mae_rad']:.4f} rad, p95 {summary['leg_p95_rad']:.4f}")
+    print("%-28s %8s %8s %8s %8s %9s" % ("joint", "mae", "p95", "bias", "amp_s/h", "force_p95"))
+    for name, row in summary["per_joint"].items():
+        if "hip" in name or "knee" in name or "ankle" in name:
+            print("%-28s %8.4f %8.4f %+8.4f %8.3f %9.1f" % (
+                name, row["mae_rad"], row["p95_rad"], row["bias_rad"],
+                row["amp_ratio_sim_over_hw"], row["force_p95_nm"]))
+    print("worst windows (start tick, leg MAE, worst joint): " + ", ".join(
+        f"{w['start_tick']}:{w['leg_mae_rad']:.3f}:{w['worst_joint']}" for w in summary["worst_windows"]))
+    print(f"files: {Path(args.output) / 'summary.json'}")
+    return 0
+
+
 def _cmd_lowlevel_odometry_probe(args) -> int:
     """Is the G1's odometry on the wire? Rate, gap, and whether it moves."""
     try:
@@ -1698,6 +1733,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     lcheck.add_argument("--json", action="store_true")
     lcheck.set_defaults(func=_cmd_lowlevel_check_unitree)
+
+    lreplay = lows.add_parser(
+        "replay-commands",
+        help="drive the plant model with a recording's PD targets, window by window, "
+             "and grade the joint divergence against the recording (policy out of the loop)",
+    )
+    lreplay.add_argument("telemetry", help="episode telemetry.npz (hardware or plant)")
+    lreplay.add_argument("--bundle", required=True, help="bundle dir: joint order and servo gains")
+    lreplay.add_argument("--plant", default="examples/g1_plant.yaml", help="plant profile YAML")
+    lreplay.add_argument("--mjcf", default="", help="plant model (default: the repository G1)")
+    lreplay.add_argument("--window", type=int, default=25, help="ticks per re-synchronised window")
+    lreplay.add_argument("--settle", type=int, default=3, help="ticks skipped after each re-sync")
+    lreplay.add_argument("--states", default="", help="plant.states.npz of the same run: use the "
+                         "simulator's true root state at each re-sync (replica self-test)")
+    lreplay.add_argument("--output", required=True)
+    lreplay.add_argument("--label", default="")
+    lreplay.set_defaults(func=_cmd_lowlevel_replay_commands)
 
     lodom = lows.add_parser(
         "odometry-probe",
