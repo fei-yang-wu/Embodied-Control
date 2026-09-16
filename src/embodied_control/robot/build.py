@@ -272,11 +272,31 @@ def build_tracker(job, args, bundle, selection):
         ),
     )
     print(f"Inference: {runtime.tracker.provider} (policy), threads {job.realtime.policy_threads}")
-    print(
-        "Encoder anchor: "
-        + (f"live robot, translation source {job.anchor_position_source}"
-           if job.live_anchor else "expert heading (window's own first frame)")
-    )
+    if job.recorded_latents:
+        if selection.mode != "oracle":
+            raise ValueError("recorded latents need oracle playback")
+        from embodied_control.lowlevel.recorded_latents import check_table, load_table
+
+        table = load_table(job.recorded_latents)
+        check_table(
+            table,
+            bundle_sha256=str((bundle.manifest.source or {}).get("checkpoint_sha256", "")),
+            motion=selection.motion,
+            z_dim=int(bundle.manifest.command.z_dim or 0),
+        )
+        dense, valid = table.dense(selection.start_frame)
+        runtime.set_recorded_latents(dense, valid)
+        print(
+            f"Encoder: RECORDED latents from {job.recorded_latents} "
+            f"({int(valid.sum())} frames {int(table.frames.min())}..{int(table.frames.max())}, "
+            f"recorded from {table.source or 'unknown'}); the live window is not encoded"
+        )
+    else:
+        print(
+            "Encoder anchor: "
+            + (f"live robot, translation source {job.anchor_position_source}"
+               if job.live_anchor else "expert heading (window's own first frame)")
+        )
     return runtime, start_pose, reference_gravity, ticks
 
 
@@ -305,7 +325,7 @@ def run_identity_for(job, bundle, network: str, selection=None, ticks=None) -> d
     deployment = {key: getattr(job, key) for key in (
         "start_pose", "fixed_initial_anchor", "pin_reference", "ramp_seconds", "lead_ticks",
         "blend_ticks", "play_countdown_seconds", "arm_timeout_seconds", "stand_hold_seconds",
-        "live_anchor", "anchor_position_source",
+        "live_anchor", "anchor_position_source", "recorded_latents",
     )}
     deployment["inference"] = {
         "provider": job.realtime.inference_provider, "trt_fp16": job.realtime.trt_fp16,

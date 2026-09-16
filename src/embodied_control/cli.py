@@ -796,6 +796,38 @@ def _cmd_lowlevel_compare_unitree_pose(args) -> int:
     return 0 if report["status"] == "pass" else 1
 
 
+def _cmd_lowlevel_export_latents(args) -> int:
+    """Rebuild a run's per-frame latent stream as a recorded-latent table."""
+    import json as _json
+
+    from embodied_control.lowlevel.bundle import PolicyBundle
+    from embodied_control.lowlevel.recorded_latents import save_table, table_from_telemetry
+
+    bundle = PolicyBundle.load(args.bundle)
+    telemetry = Path(args.telemetry)
+    motion = args.motion
+    start_frame = args.start_frame
+    summary = telemetry.parent / "summary.json"
+    if summary.is_file():
+        info = _json.loads(summary.read_text())
+        motion = motion or str(info.get("motion", ""))
+        start_frame = int(info.get("start_frame", start_frame)) if start_frame is None else start_frame
+    if not motion:
+        raise SystemExit("pass --motion: the episode summary beside the telemetry names none")
+    table = table_from_telemetry(
+        telemetry,
+        bundle_sha256=str((bundle.manifest.source or {}).get("checkpoint_sha256", "")),
+        motion=motion,
+        start_frame=int(start_frame or 0),
+        z_dim=int(bundle.manifest.command.z_dim or 0),
+        pick=args.pick,
+    )
+    out = save_table(table, args.output)
+    print(f"{out}: {table.frames.shape[0]} frames {int(table.frames.min())}..{int(table.frames.max())}, "
+          f"z_dim {table.z_dim}, motion {table.motion}, bundle {table.bundle_sha256[:12]}")
+    return 0
+
+
 def _cmd_lowlevel_replay_observations(args) -> int:
     """Observation replay: the policy side of the loop against a recording."""
     from embodied_control.lowlevel.bundle import PolicyBundle
@@ -1361,6 +1393,8 @@ def _cmd_lifecycle_rehearse(args) -> int:
         template["live_anchor"] = args.anchor == "live"
     if args.anchor_position_source != "template":
         template["anchor_position_source"] = args.anchor_position_source
+    if args.recorded_latents:
+        template["recorded_latents"] = str(Path(args.recorded_latents).resolve())
     plan = RehearsePlan(
         bundle=args.bundle, motions=motions, output=output,
         reference_root=args.reference_root, model=args.model, plant_config=args.plant,
@@ -1776,6 +1810,20 @@ def build_parser() -> argparse.ArgumentParser:
     lreplay.add_argument("--label", default="")
     lreplay.set_defaults(func=_cmd_lowlevel_replay_commands)
 
+    lexp = lows.add_parser(
+        "export-latents",
+        help="rebuild the per-reference-frame latent stream a run consumed (command_log + "
+             "reference_frames in its telemetry) as a table another run can play back",
+    )
+    lexp.add_argument("telemetry", help="episode telemetry.npz of the source run")
+    lexp.add_argument("--bundle", required=True, help="the bundle the run used (binds the table)")
+    lexp.add_argument("--motion", default="", help="default: the episode summary beside the telemetry")
+    lexp.add_argument("--start-frame", type=int, default=None)
+    lexp.add_argument("--pick", choices=("last", "first"), default="last",
+                      help="which tick's latent to keep when several ticks share a frame")
+    lexp.add_argument("--output", required=True)
+    lexp.set_defaults(func=_cmd_lowlevel_export_latents)
+
     lobs = lows.add_parser(
         "replay-observations",
         help="run a recording's consumed observations and encoder windows through the bundle's "
@@ -2131,6 +2179,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--template", default="",
         help="lifecycle job whose deployment settings (start pose, blend, "
         "thresholds, realtime, ...) every motion copies",
+    )
+    reh.add_argument(
+        "--recorded-latents", default="",
+        help="recorded-latent table (ec lowlevel export-latents) served in place of the "
+             "live encoder window; bound to the bundle checkpoint and motion",
     )
     reh.add_argument("--no-video", action="store_true")
     reh.add_argument("--fetch", action="store_true", help="allow fetching a pinned bundle")

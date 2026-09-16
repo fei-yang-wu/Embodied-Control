@@ -487,6 +487,8 @@ class NativeFakeRuntimeBinding {
     result["planner_requests"] = stats.planner_requests;
     result["planner_responses"] = stats.planner_responses;
     result["encoder_inferences"] = stats.encoder_inferences;
+    result["recorded_latent_hits"] = stats.recorded_latent_hits;
+    result["recorded_latent_misses"] = stats.recorded_latent_misses;
     result["response_overruns"] = stats.response_overruns;
     result["stale_responses"] = stats.stale_responses;
     result["reference_ticks"] = stats.reference_ticks;
@@ -563,6 +565,22 @@ class NativeFakeRuntimeBinding {
         static_cast<const float*>(info.ptr),
         static_cast<std::size_t>(info.size)));
   }
+
+  void set_recorded_latents(const FloatArray& table,
+                            const py::array_t<std::uint8_t, py::array::c_style | py::array::forcecast>& valid) {
+    const auto info = table.request();
+    if (info.ndim != 2) {
+      throw std::runtime_error("recorded latent table must be [frames, z_dim]");
+    }
+    const auto flags = valid.request();
+    runtime_->set_recorded_latents(
+        std::span<const float>(static_cast<const float*>(info.ptr),
+                               static_cast<std::size_t>(info.size)),
+        std::span<const std::uint8_t>(static_cast<const std::uint8_t*>(flags.ptr),
+                                      static_cast<std::size_t>(flags.size)),
+        static_cast<std::size_t>(info.shape[1]));
+  }
+  bool recorded_latents_enabled() const { return runtime_->recorded_latents_enabled(); }
 
   py::array_t<std::int32_t> reference_frames() const {
     const auto values = runtime_->reference_frames();
@@ -1378,6 +1396,10 @@ PYBIND11_MODULE(_ec_native, m) {
       .def("set_initial_pose", &NativeFakeRuntimeBinding::set_initial_pose,
            py::arg("pose"))
       .def("reference_frames", &NativeFakeRuntimeBinding::reference_frames)
+      .def("set_recorded_latents", &NativeFakeRuntimeBinding::set_recorded_latents,
+           py::arg("table"), py::arg("valid"))
+      .def_property_readonly("recorded_latents_enabled",
+                             &NativeFakeRuntimeBinding::recorded_latents_enabled)
       .def("joint_position_log",
            &NativeFakeRuntimeBinding::joint_position_log)
       .def("anchor_pose_log", &NativeFakeRuntimeBinding::anchor_pose_log)

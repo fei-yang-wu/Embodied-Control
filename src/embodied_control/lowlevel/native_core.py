@@ -392,6 +392,19 @@ class NativeFakeLoop:
         """Frame-0 start: [root pos 3 | root quat XYZW 4 | joints 29]."""
         self._runtime.set_initial_pose(np.ascontiguousarray(pose, dtype=np.float32))
 
+    def set_recorded_latents(self, table: np.ndarray, valid: np.ndarray) -> None:
+        """Serve z[reference frame] from `table` ([frames, z_dim], runtime-local
+        frame index) instead of encoding the live window; `valid[f] == 0`
+        holds the previous latent. Before start() only."""
+        self._runtime.set_recorded_latents(
+            np.ascontiguousarray(table, dtype=np.float32),
+            np.ascontiguousarray(valid, dtype=np.uint8),
+        )
+
+    @property
+    def recorded_latents_enabled(self) -> bool:
+        return bool(self._runtime.recorded_latents_enabled)
+
     def reference_frames(self) -> np.ndarray:
         return np.asarray(self._runtime.reference_frames())
 

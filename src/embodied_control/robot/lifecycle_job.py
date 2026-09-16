@@ -121,6 +121,12 @@ class LifecycleJob(JobModel):
     anchor_position_source: Literal["auto", "odometry", "leg_kinematics", "fixed_start"] = "leg_kinematics"
     # The G1 state estimator's odometry (unitree_go SportModeState_).
     odometry_topic: str = "rt/odommodestate"
+    # Recorded-latent playback (lowlevel/recorded_latents.py): a table of
+    # per-reference-frame latents exported from an earlier run of the same
+    # bundle and motion. When set the runtime serves z[frame] from the table
+    # on every control tick and never encodes the live window, so the run
+    # needs no position estimate; `live_anchor` only shapes the anchor log.
+    recorded_latents: str = ""
     # Legacy compatibility knob. Displacement is now reported, never rejected:
     # curated moving references intentionally deploy from a fixed start anchor.
     fixed_anchor_max_displacement: float = Field(default=0.05, gt=0.0)

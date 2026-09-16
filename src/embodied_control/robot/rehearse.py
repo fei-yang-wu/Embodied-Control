@@ -237,6 +237,7 @@ def run_episode(
         "plant_odometry": plant_odometry,
         "live_anchor": job.live_anchor,
         "anchor_position_source": job.anchor_position_source,
+        "recorded_latents": job.recorded_latents,
     }
     plant_log = run / "plant.log"
     with plant_log.open("w") as stream:

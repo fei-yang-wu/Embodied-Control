@@ -715,6 +715,23 @@ bool NativeFakeRuntime::accept_reference_chunk(std::uint32_t length) noexcept {
 
 bool NativeFakeRuntime::encode_active_reference(
     std::size_t offset_steps) noexcept {
+  if (recorded_latent_frames_ > 0) {
+    // Recorded-latent playback: the latent a previous run consumed at this
+    // reference frame, in place of encoding the live window. Serves both
+    // the acceptance-time and the every-control-tick callers.
+    const std::size_t frame =
+        static_cast<std::size_t>(active_reference_tick_) + offset_steps;
+    if (frame < recorded_latent_frames_ && recorded_latent_valid_[frame]) {
+      std::copy_n(recorded_latents_.begin() + frame * recorded_latent_z_dim_,
+                  recorded_latent_z_dim_, command_.begin());
+      recorded_latent_hits_.fetch_add(1, std::memory_order_relaxed);
+    } else {
+      recorded_latent_misses_.fetch_add(1, std::memory_order_relaxed);
+    }
+    last_encoder_tick_ = loop_tick_;
+    encoder_ran_ = true;
+    return true;
+  }
   const bool expert_anchor =
       planner_.anchor_source == NativePlannerConfig::AnchorSource::kExpertHeading;
   if (!encoder_ || (!expert_anchor && !robot_state_.anchor_pose_valid) ||
@@ -926,8 +943,9 @@ void NativeFakeRuntime::one_tick() noexcept {
   record_reference_metrics();
 
   if (planner_.oracle_reference &&
-      planner_.encoder_trigger ==
-          NativePlannerConfig::EncoderTrigger::kEveryControlTick &&
+      (recorded_latent_frames_ > 0 ||
+       planner_.encoder_trigger ==
+           NativePlannerConfig::EncoderTrigger::kEveryControlTick) &&
       (!encoder_ran_ || last_encoder_tick_ != loop_tick_)) {
     const std::size_t reference_offset =
         reference_tick_ >= active_reference_tick_
@@ -1039,6 +1057,8 @@ NativeRuntimeStats NativeFakeRuntime::stats() const noexcept {
       .planner_requests = planner_requests_.load(),
       .planner_responses = planner_responses_.load(),
       .encoder_inferences = encoder_inferences_.load(),
+      .recorded_latent_hits = recorded_latent_hits_.load(),
+      .recorded_latent_misses = recorded_latent_misses_.load(),
       .response_overruns = response_overruns_.load(),
 
       .stale_responses = stale_responses_.load(),
@@ -1082,6 +1102,30 @@ std::vector<float> NativeFakeRuntime::reference_joint_mae() const {
 
 void NativeFakeRuntime::set_initial_pose(std::span<const float> pose) {
   backend_->set_initial_pose(pose);
+}
+
+void NativeFakeRuntime::set_recorded_latents(
+    std::span<const float> table, std::span<const std::uint8_t> valid,
+    std::size_t z_dim) {
+  if (running_.load() || thread_.joinable()) {
+    throw std::runtime_error("set recorded latents before start");
+  }
+  if (!planner_.oracle_reference) {
+    throw std::runtime_error(
+        "recorded latents need oracle playback (the reference frame indexes the table)");
+  }
+  if (z_dim == 0 || z_dim != planner_.z_dim) {
+    throw std::runtime_error("recorded latent width does not match the contract's z_dim");
+  }
+  if (valid.empty() || table.size() != valid.size() * z_dim) {
+    throw std::runtime_error("recorded latent table must be frames x z_dim with one valid flag per frame");
+  }
+  recorded_latents_.assign(table.begin(), table.end());
+  recorded_latent_valid_.assign(valid.begin(), valid.end());
+  recorded_latent_frames_ = valid.size();
+  recorded_latent_z_dim_ = z_dim;
+  recorded_latent_hits_.store(0);
+  recorded_latent_misses_.store(0);
 }
 
 std::vector<std::int32_t> NativeFakeRuntime::reference_frames() const {

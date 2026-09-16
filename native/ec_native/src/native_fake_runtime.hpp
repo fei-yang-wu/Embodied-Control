@@ -48,6 +48,10 @@ struct NativeRuntimeStats {
   std::uint64_t planner_requests = 0;
   std::uint64_t planner_responses = 0;
   std::uint64_t encoder_inferences = 0;
+  // Recorded-latent playback: control ticks served from the table, and
+  // ticks whose reference frame had no entry (the last latent was held).
+  std::uint64_t recorded_latent_hits = 0;
+  std::uint64_t recorded_latent_misses = 0;
   std::uint64_t response_overruns = 0;
   std::uint64_t stale_responses = 0;
   std::uint64_t reference_ticks = 0;
@@ -170,6 +174,17 @@ class NativeFakeRuntime {
   }
 
   void set_initial_pose(std::span<const float> pose);
+  // Before start only: serve the encoder's latent from a table indexed by
+  // the runtime's reference frame instead of encoding the live window. The
+  // encoder stays loaded and is bypassed on every control tick; `valid[f]`
+  // == 0 holds the previous latent and counts a miss. Frames past the table
+  // count as misses too. z_dim must equal the contract's latent width.
+  void set_recorded_latents(std::span<const float> table,
+                            std::span<const std::uint8_t> valid,
+                            std::size_t z_dim);
+  bool recorded_latents_enabled() const noexcept {
+    return recorded_latent_frames_ > 0;
+  }
   NativeRuntimeStats stats() const noexcept;
   std::vector<std::uint64_t> tick_durations_ns() const;
   std::vector<float> base_heights() const;
@@ -303,6 +318,12 @@ class NativeFakeRuntime {
   std::atomic<std::uint64_t> planner_requests_{0};
   std::atomic<std::uint64_t> planner_responses_{0};
   std::atomic<std::uint64_t> encoder_inferences_{0};
+  std::atomic<std::uint64_t> recorded_latent_hits_{0};
+  std::atomic<std::uint64_t> recorded_latent_misses_{0};
+  std::vector<float> recorded_latents_;        // frames x recorded_latent_z_dim_
+  std::vector<std::uint8_t> recorded_latent_valid_;
+  std::size_t recorded_latent_frames_ = 0;
+  std::size_t recorded_latent_z_dim_ = 0;
   std::atomic<std::uint64_t> response_overruns_{0};
   std::atomic<std::uint64_t> stale_responses_{0};
   std::atomic<std::uint64_t> plan_slot_advances_{0};
