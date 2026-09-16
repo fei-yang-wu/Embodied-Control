@@ -2182,7 +2182,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     reh.add_argument(
         "--recorded-latents", default="",
-        help="recorded-latent table (ec lowlevel export-latents) served in place of the "
+        help="recorded-latent table, or a directory of <motion>.npz tables (ec lowlevel export-latents), served in place of the "
              "live encoder window; bound to the bundle checkpoint and motion",
     )
     reh.add_argument("--no-video", action="store_true")

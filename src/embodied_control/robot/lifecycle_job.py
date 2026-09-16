@@ -126,6 +126,7 @@ class LifecycleJob(JobModel):
     # bundle and motion. When set the runtime serves z[frame] from the table
     # on every control tick and never encodes the live window, so the run
     # needs no position estimate; `live_anchor` only shapes the anchor log.
+    # A file, or a directory holding one <motion>.npz per motion.
     recorded_latents: str = ""
     # Legacy compatibility knob. Displacement is now reported, never rejected:
     # curated moving references intentionally deploy from a fixed start anchor.

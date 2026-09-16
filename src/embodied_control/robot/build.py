@@ -277,7 +277,14 @@ def build_tracker(job, args, bundle, selection):
             raise ValueError("recorded latents need oracle playback")
         from embodied_control.lowlevel.recorded_latents import check_table, load_table
 
-        table = load_table(job.recorded_latents)
+        # A directory holds one table per motion (<dir>/<motion>.npz), so an
+        # `all`-motion rehearsal or a hardware job can name the set once.
+        table_path = Path(job.recorded_latents)
+        if table_path.is_dir():
+            table_path = table_path / f"{selection.motion}.npz"
+            if not table_path.is_file():
+                raise ValueError(f"no recorded latents for {selection.motion!r} in {job.recorded_latents}")
+        table = load_table(table_path)
         check_table(
             table,
             bundle_sha256=str((bundle.manifest.source or {}).get("checkpoint_sha256", "")),
@@ -287,7 +294,7 @@ def build_tracker(job, args, bundle, selection):
         dense, valid = table.dense(selection.start_frame)
         runtime.set_recorded_latents(dense, valid)
         print(
-            f"Encoder: RECORDED latents from {job.recorded_latents} "
+            f"Encoder: RECORDED latents from {table_path} "
             f"({int(valid.sum())} frames {int(table.frames.min())}..{int(table.frames.max())}, "
             f"recorded from {table.source or 'unknown'}); the live window is not encoded"
         )
