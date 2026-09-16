@@ -1,0 +1,51 @@
+{
+  "api_version": "ec.model_pin/v1",
+  "files": {
+    "README.md": {
+      "sha256": "64566e1c87efc3a19988df953a7a8215379b97610306ac3de774b3c91b29378f",
+      "size": 1048
+    },
+    "action_contract.json": {
+      "sha256": "37d5888c9ec6cbce8c557ce2673ad5d8212ae95b02f9e65fdb44a2c172aedd4d",
+      "size": 6520
+    },
+    "encoder.onnx": {
+      "sha256": "cd1a5ed663b34b9a7792c21658a605944887b87f5a72732b8decbd6df72e3b3d",
+      "size": 14830697
+    },
+    "encoder.pt": {
+      "sha256": "f8943e4b2c879c3f06ff88ccbcf8c42af3acb22f39e4c05578cd81d2a9246a38",
+      "size": 14848485
+    },
+    "golden_trace.npz": {
+      "sha256": "d6c7d80e610c7964f4de4a05c0d7a5ad1bba9a35c5deaf8c46c5c12e73cc21e9",
+      "size": 2213874
+    },
+    "manifest.json": {
+      "sha256": "17dda766637fff6d2d04a0b1aa185ab527330a4ac724e73c692194554b71e997",
+      "size": 13030
+    },
+    "norm_stats.npz": {
+      "sha256": "1017d7ad519816c5f1ca7520360ac3404eb66669705bacd7c6e46a2dd6ab70b2",
+      "size": 9756
+    },
+    "obs_contract.json": {
+      "sha256": "7d490f321e5e4a317bbd1bdf366040a931b9bf7c1ea1f12b200546461d1a6215",
+      "size": 1343
+    },
+    "policy.onnx": {
+      "sha256": "1c2bde80b088588492fa9b19bd4bb681caf6e49f0cddb94c52770a00df82d72a",
+      "size": 40765322
+    },
+    "policy.pt": {
+      "sha256": "39fd4f442bebbb219fecd37b30cc3e5108bdcb362901669547ace7639627105e",
+      "size": 40780544
+    }
+  },
+  "kind": "controller",
+  "name": "post_c1l1j1p1_f89500286976",
+  "path": "controller/post_c1l1j1p1_f89500286976",
+  "repo": "fei-yang-wu/ec-g1-gr00t-eval-kit",
+  "repo_type": "model",
+  "revision": "a5d6b5841a35dd901ccc72e6c86279207a88ca35"
+}
